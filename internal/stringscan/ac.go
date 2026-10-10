@@ -200,6 +200,7 @@ func (a *acAutomaton) scanLiterals(b []byte, hits []Hit) []Hit {
 				Match:    match,
 				Redacted: ind.redact,
 				Extra:    map[string]string{"kind": ind.kind},
+				codeOnly: ind.codeOnly,
 			})
 		}
 	}

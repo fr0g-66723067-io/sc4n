@@ -355,3 +355,121 @@ func TestCredentialEnvironmentNameNeedsARead(t *testing.T) {
 		}
 	}
 }
+
+// TestProseShapedIndicatorsNeedAUse pins the correction for the shell and
+// credential literals that are words rather than uses. An ordinary note that
+// names them (a Markdown table cell, an install command, a credential file name
+// in documentation) must not produce the high shell/credential findings, while a
+// decoder chain still reports the fragments it is about to run.
+func TestProseShapedIndicatorsNeedAUse(t *testing.T) {
+	note := "| shape |\n" +
+		"Run chmod +x run.sh, then python -c \"print(1)\"\n" +
+		"See credentials.json in the GCP docs.\n"
+	sink, findings := sinkFor()
+	EmitString(sink, 0, note)
+	for _, f := range findings() {
+		if f.RuleID == "SC4N-STRING-SHELL" || f.RuleID == "SC4N-STRING-CREDENTIAL" {
+			t.Fatalf("a prose note produced %s: %q", f.RuleID, f.Evidence)
+		}
+	}
+
+	// The same words beside a decoder callable are the decoder-chain shape.
+	var shell, cred bool
+	for _, h := range hitsFor(t, "os.system('chmod +x /tmp/x')\nid_rsa\n") {
+		switch h.Rule.ID {
+		case "SC4N-STRING-SHELL":
+			shell = true
+		case "SC4N-STRING-CREDENTIAL":
+			cred = true
+		}
+	}
+	if !shell || !cred {
+		t.Fatalf("a decoder chain did not report its fragments: shell=%v cred=%v", shell, cred)
+	}
+
+	// An install document is not a payload.
+	install := "# Install\n\n```bash\nchmod +x serve.sh\n./serve.sh\n```\n\nSee known_hosts for SSH setup.\nwhoami\n"
+	sink2, findings2 := sinkFor()
+	EmitString(sink2, 0, install)
+	for _, f := range findings2() {
+		if f.RuleID == "SC4N-STRING-SHELL" || f.RuleID == "SC4N-STRING-CREDENTIAL" {
+			t.Fatalf("an install document produced %s: %q", f.RuleID, f.Evidence)
+		}
+	}
+
+	// A path reaches the store wherever it appears, unlike the bare word.
+	var path bool
+	for _, h := range hitsFor(t, "the key is at ~/.ssh/known_hosts") {
+		if h.Rule.ID == "SC4N-STRING-CREDENTIAL" {
+			path = true
+		}
+	}
+	if !path {
+		t.Fatal("a credential path was not reported")
+	}
+	// The bare pipe spellings are gone: a Markdown table cell is not a shell.
+	for _, in := range []string{"| shape |", "| sh |"} {
+		for _, h := range hitsFor(t, in) {
+			if h.Rule.ID == "SC4N-STRING-SHELL" {
+				t.Fatalf("%q produced a shell finding: %+v", in, h)
+			}
+		}
+	}
+}
+
+// TestUnicodeAnomalySurvivesAnInvalidByte pins the correction for the Unicode
+// walk: an invalid byte splits the valid runs rather than disabling the pass, so
+// a bidi override on either side of a stray 0xE9 is still reported.
+func TestUnicodeAnomalySurvivesAnInvalidByte(t *testing.T) {
+	for _, in := range []string{
+		"evil\xe2\x80\xaeclass",
+		"evil\xe9\xe2\x80\xaeclass",
+		"\xe9evil\u202eclass",
+	} {
+		var found bool
+		for _, h := range Scan([]byte(in)) {
+			if h.Extra["kind"] == "bidi-control" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%q: a bidi override beside an invalid byte was not reported", in)
+		}
+	}
+}
+
+// TestRawIPURLRejectsImpossibleOctets and the documentation label pins the
+// correction for the IPv4 check: an octet above 255 is not an address, and the
+// documentation label names TEST-NET-1/2/3 rather than the whole of 192.0.0.0/16.
+func TestRawIPURLRejectsImpossibleOctets(t *testing.T) {
+	for _, h := range ScanString("http://999.999.999.999/x") {
+		if h.Rule.ID == "SC4N-STRING-RAW-IP-URL" {
+			t.Fatalf("an impossible address was reported: %+v", h)
+		}
+	}
+
+	var seen bool
+	for _, h := range ScanString("http://192.0.5.7/y") {
+		if h.Rule.ID == "SC4N-STRING-RAW-IP-URL" {
+			seen = true
+			if _, ok := h.Extra["reserved"]; ok {
+				t.Fatalf("a real address was labelled reserved: %+v", h.Extra)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("192.0.5.7 was not reported at all")
+	}
+
+	for _, in := range []string{"http://192.0.2.5/x", "http://198.51.100.7/x", "http://203.0.113.9/x"} {
+		var ok bool
+		for _, h := range ScanString(in) {
+			if h.Rule.ID == "SC4N-STRING-RAW-IP-URL" && h.Extra["reserved"] == "documentation" {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Fatalf("%s was not labelled documentation", in)
+		}
+	}
+}

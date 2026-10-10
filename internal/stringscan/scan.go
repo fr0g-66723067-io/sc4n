@@ -40,10 +40,42 @@ func scan(b []byte) []Hit {
 
 func scanInto(b []byte, hits []Hit) []Hit {
 	hits = automaton.scanLiterals(b, hits)
+	hits = dropUncorroborated(hits)
 	hits = scanRawIPURLs(b, hits)
 	hits = scanOpaqueLiterals(b, hits)
 	hits = scanUnicodeAnomalies(b, hits)
 	return dedupe(sortedHits(hits))
+}
+
+// dropUncorroborated removes the hits that are words rather than uses unless the
+// buffer carries their context.
+//
+// A `chmod +x` or a bare `id_rsa` is reported only when the same buffer also names
+// a decoder or second-stage callable — the decoder-chain shape (`os.system`,
+// `base64.b64decode`, `eval(`, …). That is the difference between an install
+// document that shows a command and a payload that is about to run one. The
+// decoder set is the same one the obfuscation pairing uses, so it is exactly the
+// hit kind "decoder" already in the slice, which keeps the two features consistent
+// by construction.
+func dropUncorroborated(hits []Hit) []Hit {
+	hasDecoder := false
+	for i := range hits {
+		if hits[i].Extra["kind"] == "decoder" {
+			hasDecoder = true
+			break
+		}
+	}
+	if hasDecoder {
+		return hits
+	}
+	out := hits[:0]
+	for _, h := range hits {
+		if h.codeOnly {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 // scanIntoBody keeps the body of the old scan() separate so that ScanInto's
@@ -51,9 +83,9 @@ func scanInto(b []byte, hits []Hit) []Hit {
 // unless a detector found something.
 
 // dedupe collapses hits that name the same rule at the same offset. Several
-// literals belong to one rule and can end at the same offset (for example
-// "|sh" and "| sh"), and reporting the same rule twice at one offset is noise a
-// reviewer has to filter by hand.
+// literals belong to one rule and can end at the same offset (for example a
+// fragment whose shorter spelling is a suffix of its longer one), and reporting
+// the same rule twice at one offset is noise a reviewer has to filter by hand.
 func dedupe(hits []Hit) []Hit {
 	out := hits[:0]
 	lastRule := ""
@@ -150,21 +182,31 @@ func indexAny(b []byte, set string) int {
 }
 
 // isIPv4Literal reports whether b is a dotted quad of four decimal octets.
+//
+// Each octet is accumulated and bounded at 255 rather than only counting its
+// digits: "999.999.999.999" has four three-digit groups but is not an address,
+// and reporting it as a raw-IP URL is a finding a reviewer cannot act on. The
+// digit cap stays as a cheap bound on the accumulation.
 func isIPv4Literal(b []byte) bool {
-	octets, digits := 0, 0
-	for i := 0; i < len(b); i++ {
+	octets, digits, value := 0, 0, 0
+	for i := range b {
 		switch {
 		case b[i] >= '0' && b[i] <= '9':
 			if digits >= 3 {
 				return false
 			}
 			digits++
+			value = value*10 + int(b[i]-'0')
+			if value > 255 {
+				return false
+			}
 		case b[i] == '.':
 			if digits == 0 {
 				return false
 			}
 			octets++
 			digits = 0
+			value = 0
 		default:
 			return false
 		}
@@ -183,12 +225,18 @@ func isDocumentationIP(b []byte) bool {
 	}
 	switch {
 	case first == 192:
-		// 192.0.2.0/24 (TEST-NET-1) and 192.168.0.0/16 (private).
-		second := 0
+		// 192.0.2.0/24 (TEST-NET-1) and 192.168.0.0/16 (private). The TEST-NET-1
+		// match must name the third octet: 192.0.0.0/16 is ordinary address space
+		// (192.0.5.7 is a real host), and labelling the whole of it "documentation"
+		// is a label a reviewer uses to dismiss a finding.
+		second, third := 0, 0
 		for i++; i < len(b) && b[i] != '.'; i++ {
 			second = second*10 + int(b[i]-'0')
 		}
-		return second == 0 || second == 168
+		for i++; i < len(b) && b[i] != '.'; i++ {
+			third = third*10 + int(b[i]-'0')
+		}
+		return (second == 0 && third == 2) || second == 168
 	case first == 198:
 		// 198.51.100.0/24 (TEST-NET-2).
 		second, third := 0, 0
@@ -407,10 +455,13 @@ const maxMixedScriptBytes = 256
 // The walk decodes runes straight out of the byte slice rather than ranging over a
 // string: `range string(b)` copies the whole buffer, and a clean buffer must cost
 // no allocation (TestScanIntoCostsNothingWhenThereIsNothingToReport).
+//
+// An invalid byte does not disable the pass: the walk skips it and keeps going, so
+// a bidi override or an invisible character on either side of a stray 0xE9 is still
+// reported. The invalid byte splits the valid runs rather than standing the
+// detector down; an artifact that is wholly invalid is still covered by the
+// byte-safe literal tier and, for a text artifact, by SC4N-CONTENT-NOT-UTF8.
 func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
-	if !utf8.Valid(b) {
-		return hits
-	}
 	// Fixed-size state rather than maps, for the same reason.
 	var (
 		reported   [3]bool
@@ -440,6 +491,12 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 			continue
 		}
 		r, size := utf8.DecodeRune(b[offset:])
+		if r == utf8.RuneError && size == 1 {
+			// An invalid byte: skip it and keep the pass running on the next run.
+			prevWord = false
+			offset++
+			continue
+		}
 		switch {
 		case r == 0x200B || r == 0x200C || r == 0x200D || r == 0x2060 || r == 0xFEFF || r == 0x00AD:
 			// A zero-width character inside a word hides a name from a reader; the
@@ -571,7 +628,7 @@ func runeName(r rune) string {
 	return "U+" + strings.ToUpper(strconv.FormatInt(int64(r), 16))
 }
 
-// minInt and min keep the package dependency-free of generics.
+// min keeps the package dependency-free of generics.
 func min(a, b int) int {
 	if a < b {
 		return a

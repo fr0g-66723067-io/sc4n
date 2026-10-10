@@ -46,6 +46,10 @@ type Hit struct {
 	Redacted bool
 	// Extra carries machine-readable context (the indicator kind, a length).
 	Extra map[string]string
+	// codeOnly marks a hit that is a word rather than a use and is kept only when
+	// the buffer also names a decoder or second-stage callable. It is internal:
+	// callers see the filtered result.
+	codeOnly bool
 }
 
 // Kind selects which of the shared indicator rules apply to a buffer.
@@ -224,6 +228,12 @@ type indicator struct {
 	kind    string
 	// redact marks an indicator whose match must not be reproduced.
 	redact bool
+	// codeOnly marks an indicator that is a word rather than a use: a
+	// `chmod +x`, a `python -c`, a bare credential file name. It is reported only
+	// when the same buffer also names a decoder or second-stage callable, which is
+	// the decoder-chain context the fragment is diagnostic in. A README that
+	// mentions the word, or an install document that shows a command, is not.
+	codeOnly bool
 }
 
 func buildIndicatorTable() []indicator {
@@ -231,6 +241,15 @@ func buildIndicatorTable() []indicator {
 	add := func(rule *report.Rule, kind string, redact bool, literals ...string) {
 		for _, l := range literals {
 			out = append(out, indicator{literal: l, rule: rule, kind: kind, redact: redact})
+		}
+	}
+	// addCode registers a literal that is a word rather than a use: reported only
+	// when a decoder-chain context is present in the same buffer (see
+	// dropUncorroborated). It is how the prose-shaped shell fragments and bare
+	// credential names are kept out of ordinary documentation.
+	addCode := func(rule *report.Rule, kind string, literals ...string) {
+		for _, l := range literals {
+			out = append(out, indicator{literal: l, rule: rule, kind: kind, codeOnly: true})
 		}
 	}
 
@@ -251,14 +270,23 @@ func buildIndicatorTable() []indicator {
 	// because a legitimate dataset description has no reason to name one either.
 	add(ruleC2, "c2-overlay", false, ".onion", ".i2p", "onion.ws", "onion.pet", "onion.ly")
 
-	// Credential material and the paths that hold it.
+	// Credential material and the paths that hold it. A *path* is reported
+	// wherever it appears: a directory component is the use. A bare file *name*
+	// (id_rsa, known_hosts, credentials.json, …) is a word a document can mention
+	// without reaching for it — a GCP guide names credentials.json, an SSH guide
+	// names known_hosts — so it is code-only and needs the decoder-chain context.
+	// The path-anchored forms still catch the real reach: ~/.ssh covers
+	// ~/.ssh/id_rsa, ~/.ssh/known_hosts and ~/.ssh/authorized_keys.
 	add(ruleCredential, "credential-path", false,
-		"~/.ssh", "/.ssh/id_rsa", "/.ssh/id_ed25519", "id_rsa", "id_ed25519",
-		"authorized_keys", "known_hosts", "~/.aws", "/.aws/credentials",
+		"~/.ssh", "/.ssh/id_rsa", "/.ssh/id_ed25519", "~/.aws", "/.aws/credentials",
 		"~/.cache/huggingface/token", "/.cache/huggingface/token",
 		"/etc/shadow", "/etc/passwd", "/proc/self/environ", "/proc/self/mem",
 		".netrc", ".git-credentials", ".docker/config.json", ".kube/config",
-		".npmrc", ".pypirc", "wallet.dat", "login.keychain", "credentials.json",
+		".npmrc", ".pypirc",
+	)
+	addCode(ruleCredential, "credential-path",
+		"id_rsa", "id_ed25519", "authorized_keys", "known_hosts",
+		"wallet.dat", "login.keychain", "credentials.json",
 		"service-account.json", "macaroons", "cookies.sqlite",
 	)
 	// A credential environment variable is reported when it is *read*, not when it
@@ -290,13 +318,22 @@ func buildIndicatorTable() []indicator {
 		"SLACK_TOKEN=", "NPM_TOKEN=", "PYPI_TOKEN=", "PRIVATE KEY-----",
 	)
 
-	// Shell and process payloads.
+	// Shell and process payloads. The chains carry their own context — `curl | sh`
+	// and `wget -qO-` include the pipe — so they are reported wherever they
+	// appear. The interpreter-invocation fragments below are words an install
+	// document uses ("Run chmod +x run.sh"), so they are code-only: reported when
+	// the same buffer also names a decoder or second-stage callable. The bare
+	// `| sh` spellings are gone entirely: "| shape" in a Markdown table is not a
+	// pipe into a shell, and the real chains above already carry the pipe.
 	add(ruleShell, "shell-payload", false,
 		"bash -i", "sh -i", "/bin/sh -c", "/bin/bash -c", "bash -c",
-		"| sh", "|sh", "| bash", "|bash", "curl | sh", "wget -qO-",
-		"nc -e", "ncat -e", "socat exec:", "/dev/tcp/", "mkfifo",
+		"curl | sh", "wget -qO-",
+		"nc -e", "ncat -e", "socat exec:", "/dev/tcp/",
 		"powershell -e", "powershell -enc", "cmd.exe /c", "certutil -urlcache",
-		"chmod +x", "base64 -d", "base64 --decode", "whoami", "reverse shell",
+		"reverse shell",
+	)
+	addCode(ruleShell, "shell-payload",
+		"mkfifo", "chmod +x", "base64 -d", "base64 --decode", "whoami",
 		"python -c", "perl -e", "ruby -e",
 	)
 

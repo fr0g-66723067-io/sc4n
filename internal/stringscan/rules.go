@@ -39,13 +39,16 @@ var (
 		CWE:        []string{"CWE-522", "CWE-200"},
 		Class:      "content",
 		Description: "A string in the artifact references a credential store or *reads* a credential " +
-			"from the environment: ~/.ssh and id_rsa, ~/.aws/credentials, the Hugging Face token cache, " +
-			"/etc/shadow, /proc/self/environ, .netrc, .git-credentials, .docker/config.json, " +
-			".kube/config, wallet.dat, service-account.json, or a shell/batch expansion or environment " +
-			"lookup of AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, HF_TOKEN and their relatives. A model " +
-			"artifact has no functional reason to reach for any of these. The bare *name* of a credential " +
-			"environment variable is deliberately not an indicator: a tool schema or a deployment note " +
-			"naming GITHUB_TOKEN is describing which variables exist, not reading one.",
+			"from the environment: ~/.ssh and the files under it, ~/.aws/credentials, the Hugging Face " +
+			"token cache, /etc/shadow, /proc/self/environ, .netrc, .git-credentials, " +
+			".docker/config.json, .kube/config, or a shell/batch expansion or environment lookup of " +
+			"AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, HF_TOKEN and their relatives. A model artifact has no " +
+			"functional reason to reach for any of these. The rule distinguishes a *use* from a mention: " +
+			"the bare name of a credential environment variable is not an indicator (a tool schema or a " +
+			"deployment note naming GITHUB_TOKEN is describing which variables exist, not reading one), " +
+			"and a bare credential file name (id_rsa, known_hosts, credentials.json) is reported only " +
+			"beside a decoder or second-stage callable — a GCP guide that names credentials.json, or an " +
+			"SSH guide that names known_hosts, is not reaching for it.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/522.html"},
 		Tags: []string{"credential-access"},
 	})
@@ -76,9 +79,13 @@ var (
 		CWE:        []string{"CWE-78"},
 		Class:      "content",
 		Description: "A string in the artifact contains a shell payload fragment: an interactive shell " +
-			"(bash -i, /bin/sh -c), a pipe into an interpreter (| sh, curl | sh, base64 -d | sh), a " +
+			"(bash -i, /bin/sh -c), a pipe into an interpreter (curl | sh, wget -qO-), a " +
 			"reverse shell (nc -e, /dev/tcp/, socat exec:), a PowerShell or cmd encoder invocation, or a " +
-			"download-and-run chain. Inside a model or its metadata there is no benign reason for one.",
+			"download-and-run chain. These carry their own context and are reported wherever they appear. " +
+			"The interpreter-invocation fragments that are also ordinary install-document words " +
+			"(chmod +x, python -c, perl -e, base64 -d, whoami, mkfifo) are reported only when the same " +
+			"string also names a decoder or second-stage callable, which is the decoder-chain shape; " +
+			"naming one in a README is not a finding.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/78.html"},
 		Tags: []string{"execution"},
 	})
