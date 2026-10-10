@@ -822,21 +822,25 @@ func (w *walker) checkTensor(off int64, dims []int64, dataType int64, hasRaw boo
 		// check against.
 		return
 	}
-	expected, ok := dimsBits(dims, bits)
+	expected, ok := dimsBytes(dims, bits)
 	if !ok {
 		// Overflow or a negative dimension, already reported where it was seen.
 		return
 	}
-	if expected != uint64(rawLen)*8 {
+	if expected != uint64(rawLen) {
 		w.structAt(off, "raw_data length "+strconv.FormatInt(rawLen, 10)+
-			" bytes does not match product(dims) x element size ("+strconv.FormatUint(expected, 10)+" bits)")
+			" bytes does not match product(dims) x element size ("+strconv.FormatUint(expected, 10)+" bytes)")
 	}
 }
 
-// dimsBits returns product(dims) x bits, with the product computed in uint64 and
-// every step overflow-checked. ok is false for a negative dimension or an
-// overflowing product, where no size comparison is meaningful.
-func dimsBits(dims []int64, bits uint64) (uint64, bool) {
+// dimsBytes returns the number of raw_data bytes a tensor of the given dims and
+// element width occupies, with the product computed in uint64 and every step
+// overflow-checked. Sub-byte element types (UINT4/INT4/FLOAT4E2M1 at 4 bits,
+// UINT2/INT2 at 2 bits) are packed and the last byte is padded, so the count is
+// the specification's ceil(product(dims) x bits / 8); for byte-aligned types the
+// rounding is exact. ok is false for a negative dimension or an overflowing
+// product, where no size comparison is meaningful.
+func dimsBytes(dims []int64, bits uint64) (uint64, bool) {
 	prod := uint64(1)
 	zero := false
 	for _, d := range dims {
@@ -855,10 +859,12 @@ func dimsBits(dims []int64, bits uint64) (uint64, bool) {
 	if zero {
 		return 0, true
 	}
-	if bits != 0 && prod > math.MaxUint64/bits {
+	// The ceiling needs prod*bits + 7, so bound the multiply by MaxUint64-7 as
+	// well as by MaxUint64/bits.
+	if bits != 0 && prod > (math.MaxUint64-7)/bits {
 		return 0, false
 	}
-	return prod * bits, true
+	return (prod*bits + 7) / 8, true
 }
 
 // walkValueInfo walks a ValueInfoProto: its name and documentation are strings a

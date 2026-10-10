@@ -320,6 +320,34 @@ func TestWalkerTables(t *testing.T) {
 			forbid: []string{"SC4N-ONNX-STRUCT"},
 		},
 		{
+			name: "tensor-subbyte-padded",
+			data: tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tcat(
+				tstr(2, "g"),
+				// FLOAT4E2M1 (23) with dims [3]: ceil(3 x 4 / 8) = 2 bytes, and the
+				// last byte is padded, so 2 raw bytes are exactly right.
+				tbytes(5, tcat(tv(2, 23), tstr(8, "w"), tbytes(1, pbLocalVarint(3)), tbytes(9, make([]byte, 2)))),
+			))),
+			forbid: []string{"SC4N-ONNX-STRUCT"},
+		},
+		{
+			name: "tensor-subbyte-truncated",
+			data: tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tcat(
+				tstr(2, "g"),
+				// FLOAT4E2M1 (23) with dims [3]: 2 bytes are required, 1 is short.
+				tbytes(5, tcat(tv(2, 23), tstr(8, "w"), tbytes(1, pbLocalVarint(3)), tbytes(9, make([]byte, 1)))),
+			))),
+			want: []string{"SC4N-ONNX-STRUCT"},
+		},
+		{
+			name: "tensor-subbyte-2bit",
+			data: tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tcat(
+				tstr(2, "g"),
+				// UINT2 (25) with dims [3]: ceil(3 x 2 / 8) = 1 byte.
+				tbytes(5, tcat(tv(2, 25), tstr(8, "w"), tbytes(1, pbLocalVarint(3)), tbytes(9, make([]byte, 1)))),
+			))),
+			forbid: []string{"SC4N-ONNX-STRUCT"},
+		},
+		{
 			name: "valueinfo-walker",
 			data: tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tcat(
 				tstr(2, "g"),
