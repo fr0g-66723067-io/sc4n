@@ -25,8 +25,11 @@ flowchart TD
 Two invariants hold across the whole graph:
 
 1. **Nothing executes.** No parser calls an interpreter, a decompressor binary or
-   an extracted file; `source` is the only place bytes enter, and archive members
-   are parsed from memory or `io.ReaderAt`.
+   an extracted file; `source` is the only place bytes enter, and an archive member
+   reaches a parser three ways, none of which is "extracted": in memory when it is
+   small, as a zero-copy section of the parent mapping when it is stored and large,
+   or through a private unlinked temporary file that is mapped when it has to be
+   decompressed first.
 2. **A parser that fails is a finding, not a silence.** Any structural error
    becomes a finding at the offset where it happened, and the walk continues
    wherever continuing is meaningful. This is the counter to
@@ -46,8 +49,15 @@ Two invariants hold across the whole graph:
 | `internal/bytescan` | byte-level primitives shared by every parser: entropy, validated native magic, shebangs |
 | `internal/pickle` | the pickle engine: opcode table, total walker, weights-only allowlist, gadget tables |
 | `internal/stringscan` | the shared indicator engine (Aho–Corasick) applied to every string any parser materialises |
-| `internal/archive` | zip/tar/single-stream compression walking, with fail-closed member iteration |
-| `internal/*` (formats) | one package per format family, each registering a sniffer, a parser and its capability row |
+| `internal/archive` | zip/tar/single-stream compression walking, with fail-closed member iteration, section/spill member sources and CRC validation |
+| `internal/polyglot`, `internal/native` | the universal layer: validated native headers anywhere in a bounded head/tail window, container signatures, shebangs, extension mismatch |
+| `internal/safetensors`, `internal/gguf`, `internal/onnx`, `internal/tfmodel` | the deep model formats: header validation, metadata walking, external-data containment, template and class-allowlist rules |
+| `internal/torch`, `internal/numpy`, `internal/msgpack`, `internal/xgb`, `internal/coreml`, `internal/pte` | the remaining runtimes, each recognising its shapes by content |
+| `internal/pysrc`, `internal/repo`, `internal/content` | Python source and notebooks, install/startup hooks in a repository, and the JSON/text/metadata layer that routes cards, tokenizers, templates and HF config files |
+| `internal/jinja`, `internal/tokenizer`, `internal/cards` | the template, tokenizer-pattern and card analysers the content layer calls |
+| `internal/policy` | exit-code verdicts and baseline suppression |
+| `internal/hfcache` | the Hugging Face cache expander: symlink resolution, revision labels, blob de-duplication |
+| `internal/formats` | blank-imports every parser package so a binary states what it contains |
 | `internal/formats` | blank-imports every parser package so a binary states what it contains |
 | `cmd/sc4n` | flag parsing, output selection, exit codes |
 
@@ -68,8 +78,12 @@ type Ctx struct {
 }
 
 // A container parser recurses with this, so naming, depth accounting and the
-// depth budget are implemented exactly once.
-func ScanMember(parent *Ctx, name string, data []byte) (Format, error)
+// depth budget are implemented exactly once. It takes a Source rather than bytes
+// because a member can be larger than memory: the three paths above are all
+// Sources. ScanMemberBytes is the convenience wrapper for a member already in
+// hand.
+func ScanMember(parent *Ctx, name string, s source.Source) (Format, error)
+func ScanMemberBytes(parent *Ctx, name string, data []byte) (Format, error)
 ```
 
 Registration, from a format package's `init`:
