@@ -310,3 +310,82 @@ func TestJoblibMemoArgumentWidths(t *testing.T) {
 		}
 	}
 }
+
+// joblibP2Stream builds a protocol-2 joblib wrapper whose own opcodes are all in
+// the weights-only set, so nothing the stream contains forces the unsafe loader.
+// inline places the array payload at the wrapper's own position — joblib's real
+// layout — with the [padding][0xff x padding][data] frame; otherwise the payload
+// follows the stream's STOP, which is the committed benign fixture's layout.
+func joblibP2Stream(dtype string, shape, body []byte, inline bool) []byte {
+	binUni := func(s string) []byte {
+		return append([]byte{0x58, byte(len(s)), 0, 0, 0}, s...)
+	}
+	out := []byte{0x80, 0x02} // PROTO 2
+	out = append(out, 0x63)   // GLOBAL
+	out = append(out, []byte("joblib.numpy_pickle\nNumpyArrayWrapper\n")...)
+	out = append(out, 0x28) // MARK (args)
+	out = append(out, binUni(dtype)...)
+	out = append(out, 0x28)     // MARK (shape)
+	out = append(out, shape...) // dims
+	out = append(out, 0x74)     // TUPLE (shape)
+	out = append(out, binUni("C")...)
+	out = append(out, 0x89) // NEWFALSE
+	out = append(out, 0x4e) // NONE (subclass)
+	out = append(out, 0x74) // TUPLE (args)
+	out = append(out, 0x52) // REDUCE
+	out = append(out, 0x4e) // NONE (state)
+	out = append(out, 0x62) // BUILD
+	if !inline {
+		out = append(out, 0x2e, 0x00) // STOP, then the payload's zero padding
+		return append(out, body...)
+	}
+	payloadStart := len(out)
+	pad := 16 - (payloadStart+1)%16
+	if pad == 0 {
+		pad = 16
+	}
+	out = append(out, byte(pad))
+	for range pad {
+		out = append(out, 0xff)
+	}
+	out = append(out, body...)
+	return append(out, 0x2e) // STOP
+}
+
+// TestJoblibInlineMaskStaysWeightsOnly is the regression for the mask writing POP
+// (0x30), which is outside the weights-only opcode set. Masking an inline payload
+// therefore made the scanner's own injection set RequiresUnsafeLoader, so a
+// joblib file whose opcodes are all accepted was reported as
+// SC4N-PICKLE-REQUIRES-UNSAFE-LOADER with evidence claiming torch.load
+// (weights_only=True) cannot read it — on joblib's normal layout, and naming a
+// torch loader for a file torch never reads.
+func TestJoblibInlineMaskStaysWeightsOnly(t *testing.T) {
+	body := make([]byte, 48) // 2x3 f8
+	shape := []byte{0x4b, 2, 0x4b, 3}
+
+	after := joblibP2Stream("<f8", shape, body, false)
+	fs := parseJoblib(t, after)
+	want(t, fs, nil, []string{"SC4N-PICKLE-REQUIRES-UNSAFE-LOADER", "SC4N-JOBLIB-WRAPPER-MISMATCH"})
+
+	inline := joblibP2Stream("<f8", shape, body, true)
+	fs = parseJoblib(t, inline)
+	want(t, fs, nil, []string{"SC4N-PICKLE-REQUIRES-UNSAFE-LOADER", "SC4N-JOBLIB-WRAPPER-MISMATCH"})
+
+	// A payload large enough that a mask growing the operand stack would trip
+	// MaxStackDepth: 1 MiB is 131072 f8 elements.
+	big := joblibP2Stream("<f8", []byte{0x4a, 0x00, 0x00, 0x02, 0x00}, make([]byte, 1<<20), true)
+	fs = parseJoblib(t, big)
+	want(t, fs, nil, []string{"SC4N-PICKLE-REQUIRES-UNSAFE-LOADER", "SC4N-PICKLE-STACK", "SC4N-JOBLIB-WRAPPER-MISMATCH"})
+}
+
+// TestJoblibInlineMaskDoesNotHideRealUnsafeOpcodes guards the other half: a stream
+// that really does use an opcode outside the weights-only set must still say so
+// after masking, so the mask cannot be used to silence the finding.
+func TestJoblibInlineMaskDoesNotHideRealUnsafeOpcodes(t *testing.T) {
+	body := make([]byte, 48)
+	st := joblibP2Stream("<f8", []byte{0x4b, 2, 0x4b, 3}, body, true)
+	// A POP_MARK (0x31) the stream itself contains, outside the accepted set.
+	st = append(st[:len(st)-1], 0x31, 0x2e)
+	fs := parseJoblib(t, st)
+	want(t, fs, []string{"SC4N-PICKLE-REQUIRES-UNSAFE-LOADER"}, nil)
+}

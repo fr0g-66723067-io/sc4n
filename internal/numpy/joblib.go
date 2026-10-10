@@ -281,17 +281,20 @@ func dispatchInline(ctx *artifact.Ctx, data []byte, wrappers []joblibWrapper) {
 }
 
 // maskPayload overwrites b in place with a sequence of opcodes that leaves the
-// operand stack unchanged: "NONE POP" pairs, with a leading
-// "SHORT_BINSTRING 0 POP" (three bytes) when the length is odd. A pickle walk
-// over the masked buffer therefore reads the container's own opcodes only, while
-// the original array bytes are still dispatched as a member and scanned.
+// operand-stack depth unchanged and stays inside the weights-only opcode set:
+// "MARK TUPLE" pairs, plus a trailing NONE when the length is odd.
+//
+// MARK pushes a mark and TUPLE pops back to it and pushes the tuple, so each pair
+// is depth-neutral; the walker bounds the operand stack (MaxStackDepth), so a mask
+// that grew it would report a legitimate large payload as a stack overflow. The
+// mask used to write "NONE POP" pairs, and POP (0x30) is *not* in the weights-only
+// set, so masking an inline payload made the scanner's own injection set
+// RequiresUnsafeLoader and a joblib file whose opcodes were all accepted was
+// reported as SC4N-PICKLE-REQUIRES-UNSAFE-LOADER. A single surplus value from the
+// odd byte is harmless: the walker diagnoses stack underflow, not a leftover.
 func maskPayload(b []byte) {
-	if len(b)%2 == 1 && len(b) >= 3 {
-		b[0], b[1], b[2] = jbShortBinstring, 0x00, jbPop
-		b = b[3:]
-	}
 	for i := 0; i+1 < len(b); i += 2 {
-		b[i], b[i+1] = jbNone, jbPop
+		b[i], b[i+1] = jbMark, jbTuple
 	}
 	if len(b)%2 == 1 {
 		b[len(b)-1] = jbNone
