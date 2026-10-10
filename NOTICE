@@ -16,3 +16,16 @@ callables are reproduced.
 sc4n's GGML type table (internal/gguf/types.go) records the type identifiers and
 block sizes of ggml.h from the ggml-org/ggml project, distributed under the MIT
 licence, Copyright (c) 2023-2026 The ggml authors.
+
+sc4n's ONNX field tables (internal/onnx/types.go) record the field numbers, wire
+types and enum values of onnx.proto, and its CoreML field numbers
+(internal/coreml/coreml.go) record the field numbers of CoreML's Model and
+NeuralNetwork protobufs. Both are interface descriptions taken from the
+projects' published schema files (onnx/onnx, apple/coremltools), distributed
+under the Apache License 2.0 and the BSD-3-Clause licence respectively; only the
+numeric field identifiers and names are reproduced.
+
+sc4n's TensorFlow and Keras name tables (internal/tfmodel/) record operator,
+layer and configuration key names published by the tensorflow and keras
+projects, distributed under the Apache License 2.0. They are used as allowlists
+and denylists of names; no upstream source text is copied.
