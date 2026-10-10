@@ -202,6 +202,98 @@ func TestRunStdinRespectsMaxArtifactBytes(t *testing.T) {
 	}
 }
 
+// TestRunStdinRespectsMemBudget pins that a stdin stream is bounded by the run's
+// memory budget, not only by MaxArtifactBytes: a stdin artifact is buffered in
+// memory, so a stream larger than the budget must be reported rather than read
+// without limit and then scanned silently.
+func TestRunStdinRespectsMemBudget(t *testing.T) {
+	res, err := Run(context.Background(), Config{
+		StdinName: "stdin.bin",
+		Stdin:     bytes.NewReader(make([]byte, 64<<20)),
+		Limits:    limits.Default(),
+		MemBudget: 1 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Artifacts[0].Error == "" {
+		t.Fatal("64 MiB via stdin under a 1 MiB budget was accepted without a finding")
+	}
+	var found bool
+	for _, f := range res.Collector.Findings() {
+		if f.RuleID != "SC4N-LIMIT-ARTIFACT" {
+			continue
+		}
+		found = true
+		if f.Extra["limit"] != "MemBudget" {
+			t.Fatalf("limit = %q, want MemBudget (the binding cap)", f.Extra["limit"])
+		}
+	}
+	if !found {
+		t.Fatal("no SC4N-LIMIT-ARTIFACT finding for the over-budget stream")
+	}
+}
+
+// TestRunStdinRespectsMaxArtifactBytesReportsFinding pins that the
+// MaxArtifactBytes overflow is a finding, not only an artifact error: the file
+// path emits SC4N-LIMIT-ARTIFACT and the stdin path must report the same thing.
+func TestRunStdinRespectsMaxArtifactBytesReportsFinding(t *testing.T) {
+	l := limits.Default()
+	l.MaxArtifactBytes = 4
+	res, err := Run(context.Background(), Config{
+		StdinName: "stdin.bin",
+		Stdin:     bytes.NewReader(make([]byte, 64)),
+		Limits:    l,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range res.Collector.Findings() {
+		if f.RuleID == "SC4N-LIMIT-ARTIFACT" {
+			return
+		}
+	}
+	t.Fatalf("no SC4N-LIMIT-ARTIFACT finding; findings = %v", res.Collector.Findings())
+}
+
+// slowStdin delivers one byte per tick and never reaches EOF: the shape a shell
+// that holds a pipe's write end open produces. It proves the stdin read is
+// interruptible, not merely chunked.
+type slowStdin struct{ tick time.Duration }
+
+func (s slowStdin) Read(p []byte) (int, error) {
+	time.Sleep(s.tick)
+	p[0] = 'x'
+	return 1, nil
+}
+
+// TestRunStdinDeadlineInterruptsBlockedProducer pins that -timeout stops a stdin
+// read that would otherwise stay open: the read must be interruptible, so a
+// producer holding the write end open cannot pin the scan past the deadline.
+func TestRunStdinDeadlineInterruptsBlockedProducer(t *testing.T) {
+	start := time.Now()
+	res, err := Run(context.Background(), Config{
+		StdinName: "stdin.bin",
+		Stdin:     slowStdin{tick: 25 * time.Millisecond},
+		Limits:    limits.Default(),
+		Timeout:   time.Second,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Artifacts[0].Error; got != "scan deadline exceeded while reading stdin" {
+		t.Fatalf("error = %q, want the deadline message", got)
+	}
+	if res.Unreadable != 1 {
+		t.Fatalf("unreadable = %d, want 1 (the CLI exits 3 for this)", res.Unreadable)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("a 1 s deadline returned after %s", elapsed)
+	}
+	t.Logf("1 s deadline over a never-EOF stream returned in %s", elapsed.Round(time.Millisecond))
+}
+
 // TestRunAdmitsArtifactLargerThanTheWholeBudget pins the documented behaviour:
 // -mem-budget admits a single oversized artifact alone instead of turning into a
 // silent skip, which would be a fail-open.

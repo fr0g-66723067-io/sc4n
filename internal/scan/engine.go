@@ -141,7 +141,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res := &Result{Collector: collector, Timings: map[string]int64{}}
 
 	if cfg.StdinName != "" {
-		sum := scanStdin(sess, cfg, l)
+		// The stdin artifact goes through the same admission control as a file
+		// artifact: a stream's length is unknown up front, so the budget bounds
+		// how much may be buffered rather than being charged after the fact.
+		b := newMemBudget(budget)
+		sum := scanStdin(ctx, sess, cfg, l, b)
 		res.Artifacts = []report.ArtifactSummary{sum}
 		if sum.Error != "" {
 			res.Unreadable = 1
@@ -218,18 +222,49 @@ func noteFindingsCap(c *report.Collector, l limits.Limits) {
 		})
 }
 
-// scanStdin reads one artifact from the configured reader.
-func scanStdin(sess *artifact.Session, cfg Config, l limits.Limits) report.ArtifactSummary {
+// scanStdin reads one artifact from the configured reader through the same
+// admission control and deadline as a file artifact. A stream's length is not
+// known up front, so the read is bounded by min(MaxArtifactBytes, MemBudget): a
+// producer that never stops is reported as a limit finding rather than buffered
+// without bound, and the read loop observes ctx so -timeout stops a stream that
+// stays open without producing.
+func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits.Limits, b *memBudget) report.ArtifactSummary {
 	name := cfg.StdinName
 	sum := report.ArtifactSummary{Path: name, Format: artifact.FormatUnknown.String()}
-	data, err := readAllCapped(cfg.Stdin, l.MaxArtifactBytes)
+	capBytes, capLimit := readCap(l.MaxArtifactBytes, b.total)
+	data, err := readStdinCapped(ctx, cfg.Stdin, capBytes, capLimit)
 	if err != nil {
+		var capErr *stdinCapError
+		if errors.As(err, &capErr) {
+			// The same rule the file path emits when source.Open refuses an
+			// oversized file, so a consumer sees one cap finding shape whether
+			// the artifact came from a path or from stdin.
+			limits.Emit(sess.Collector.For(name), limits.RuleArtifact, capErr.limit, capErr.value, capErr.cap, name)
+		}
 		sum.Error = err.Error()
 		return sum
 	}
+	size := int64(len(data))
+
+	// The large-artifact slot is acquired before the byte budget, as in
+	// scanOne: a task holding a large slot and waiting for bytes cannot starve
+	// a task that holds bytes, because byte holders are already running.
+	if size >= largeArtifact {
+		if !b.acquireLarge(ctx) {
+			sum.Error = "scan deadline exceeded while waiting for a large-artifact slot"
+			return sum
+		}
+		defer b.releaseLarge()
+	}
+	if !b.acquire(ctx, size) {
+		sum.Error = "scan deadline exceeded while waiting for the memory budget"
+		return sum
+	}
+	defer b.release(size)
+
 	src := source.Mem(name, data)
 	defer src.Close()
-	sum.Size = int64(len(data))
+	sum.Size = size
 	// The same digestSource the file path uses, so a -stdin run past MaxHashBytes
 	// reports sha256Scope="prefix" instead of claiming a full digest it did not
 	// compute.
@@ -243,6 +278,102 @@ func scanStdin(sess *artifact.Session, cfg Config, l limits.Limits) report.Artif
 		sum.SubFormat = "parse-error: " + perr.Error()
 	}
 	return sum
+}
+
+// readCap returns the largest stdin stream that may be buffered and the name of
+// the limit that bound it. A stdin artifact is held in memory (it is not
+// memory-mapped and has no path to re-read), so the artifact-size cap alone is
+// not enough: the run's memory budget applies too, and the smaller of the two
+// wins. The name travels with the cap so the finding points at the knob the
+// operator can raise.
+func readCap(maxArtifact, memBudget int64) (int64, string) {
+	if memBudget > 0 && memBudget < maxArtifact {
+		return memBudget, "MemBudget"
+	}
+	return maxArtifact, "MaxArtifactBytes"
+}
+
+// stdinCapError reports that a stdin stream exceeded its read cap before EOF.
+// It is a distinct type so scanStdin can emit the limit finding with the right
+// cap name; a plain read error is reported only as the artifact's error.
+type stdinCapError struct {
+	limit string
+	value int64
+	cap   int64
+}
+
+func (e *stdinCapError) Error() string {
+	return "stdin exceeds " + strconv.FormatInt(e.cap, 10) + " bytes (" + e.limit + ")"
+}
+
+// errStdinDeadline is the exact message scanStdin reports when the deadline
+// stopped the read. It is a sentinel rather than a wrapped ctx.Err() so the
+// artifact's error text is fixed and a consumer can match it.
+var errStdinDeadline = errors.New("scan deadline exceeded while reading stdin")
+
+// stdinRead is one chunk, or a terminal error, from the background reader.
+type stdinRead struct {
+	buf []byte
+	err error
+}
+
+// readStdinCapped reads one artifact from r, bounded by capBytes. Reads run on a
+// background goroutine so that a producer which holds the write end open without
+// producing (a shell, a socket) cannot pin the scan past its deadline: the loop
+// returns as soon as ctx is done, whether or not the blocked Read ever returns.
+// A stream that exceeds capBytes is refused with a *stdinCapError rather than
+// truncated, so a partially read artifact is never scanned as if complete.
+func readStdinCapped(ctx context.Context, r io.Reader, capBytes int64, capLimit string) ([]byte, error) {
+	// done unblocks the reader goroutine when this function returns early, so a
+	// cap or deadline failure does not leak it to its next read.
+	done := make(chan struct{})
+	defer close(done)
+	ch := make(chan stdinRead, 1)
+	go func() {
+		defer close(ch)
+		for {
+			buf := make([]byte, 1<<20)
+			n, err := r.Read(buf)
+			if n > 0 {
+				select {
+				case ch <- stdinRead{buf: buf[:n]}:
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					select {
+					case ch <- stdinRead{err: err}:
+					case <-done:
+					case <-ctx.Done():
+					}
+				}
+				return
+			}
+		}
+	}()
+
+	var buf []byte
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, errStdinDeadline
+		case c, ok := <-ch:
+			if !ok {
+				return buf, nil
+			}
+			if c.err != nil {
+				return nil, c.err
+			}
+			if total := int64(len(buf)) + int64(len(c.buf)); total > capBytes {
+				return nil, &stdinCapError{limit: capLimit, value: total, cap: capBytes}
+			}
+			buf = append(buf, c.buf...)
+		}
+	}
 }
 
 // scanOne opens, hashes and scans one entry, releasing its budget when done.
@@ -459,29 +590,6 @@ func digestSource(s source.Source, max int64) (string, string) {
 func digestBytes(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
-}
-
-func readAllCapped(r io.Reader, max int64) ([]byte, error) {
-	if max <= 0 {
-		return io.ReadAll(r)
-	}
-	buf := make([]byte, 0, 1<<20)
-	tmp := make([]byte, 1<<20)
-	for {
-		n, err := r.Read(tmp)
-		if n > 0 {
-			if int64(len(buf))+int64(n) > max {
-				return nil, fmt.Errorf("%w: stdin exceeds %d bytes", source.ErrTooLarge, max)
-			}
-			buf = append(buf, tmp[:n]...)
-		}
-		if err == io.EOF {
-			return buf, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
 }
 
 // skipDirs are directory names that never hold scan targets. Everything else is
