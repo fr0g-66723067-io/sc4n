@@ -1,6 +1,7 @@
 package tfmodel
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -372,5 +373,45 @@ func TestBaseNameOf(t *testing.T) {
 	}
 	if !strings.HasSuffix(clip("abcdef", 3), "...") {
 		t.Error("clip did not truncate")
+	}
+}
+
+// TestTFLiteBrokenReferenceIsReported: the rule's text promises that the walk
+// stops at a broken reference and reports it. A file whose root table resolves but
+// whose operator-code vector points outside the file used to report clean, because
+// every walk site returned ok=false and the caller continued.
+func TestTFLiteBrokenReferenceIsReported(t *testing.T) {
+	// [root u32 = 24][TFL3][vtable @12: vtsize 8, tablesize 8, field0 0, field1 4]
+	// [table @24: soffset 12][field1 @28: uoffset 100000 -> outside the file]
+	buf := make([]byte, 64)
+	binary.LittleEndian.PutUint32(buf, 24)
+	copy(buf[4:8], "TFL3")
+	for i, v := range []uint16{8, 8, 0, 4} {
+		binary.LittleEndian.PutUint16(buf[12+2*i:], v)
+	}
+	binary.LittleEndian.PutUint32(buf[24:], 12)
+	binary.LittleEndian.PutUint32(buf[28:], 100000)
+
+	c := parseBytes(t, tfliteParser{}, "broken.tflite", buf)
+	if !ids(c)["SC4N-TFLITE-STRUCT"] {
+		t.Fatalf("broken reference not reported; got %v", ids(c))
+	}
+	for _, f := range c.Findings() {
+		if f.RuleID == "SC4N-TFLITE-STRUCT" && f.Evidence == "" {
+			t.Fatal("structural finding carries no evidence")
+		}
+	}
+
+	// The same layout with field 1 absent (a normal table) must not report: an
+	// absent field is not a broken reference.
+	ok := make([]byte, 64)
+	binary.LittleEndian.PutUint32(ok, 24)
+	copy(ok[4:8], "TFL3")
+	for i, v := range []uint16{8, 8, 0, 0} {
+		binary.LittleEndian.PutUint16(ok[12+2*i:], v)
+	}
+	binary.LittleEndian.PutUint32(ok[24:], 12)
+	if ids(parseBytes(t, tfliteParser{}, "ok.tflite", ok))["SC4N-TFLITE-STRUCT"] {
+		t.Fatalf("an absent field was reported as broken: %v", ids(parseBytes(t, tfliteParser{}, "ok.tflite", ok)))
 	}
 }

@@ -22,6 +22,8 @@ import (
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
+	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
@@ -39,10 +41,14 @@ const (
 // tfliteParser is the registered parser for FormatTFLite.
 type tfliteParser struct{}
 
-// fb is a bounds-checked little-endian view over a flatbuffer source.
+// fb is a bounds-checked little-endian view over a flatbuffer source. w is the
+// walk the reads belong to, so a reference that points outside the file can be
+// reported where it is detected rather than silently dropping the field. A nil w
+// (a caller that only probes the file) reports nothing.
 type fb struct {
 	s    source.Source
 	size int64
+	w    *tfliteWalk
 }
 
 func (f fb) u8(off int64) (byte, bool) {
@@ -124,7 +130,9 @@ func (t fbTable) field(i int) (int64, bool) {
 	return pos, true
 }
 
-// ref follows a table field's uoffset to the object it points at.
+// ref follows a table field's uoffset to the object it points at. An absent field
+// (the vtable slot is zero) is not a broken reference and is not reported; a
+// present field whose offset or target lies outside the file is.
 func (t fbTable) ref(i int) (int64, bool) {
 	pos, ok := t.field(i)
 	if !ok {
@@ -132,10 +140,12 @@ func (t fbTable) ref(i int) (int64, bool) {
 	}
 	rel, ok := t.f.u32(pos)
 	if !ok {
+		t.f.w.broken(t.f.size, "field "+itoa(i)+" of the table at "+itoa64(t.pos)+" reads past the end of the file")
 		return 0, false
 	}
 	target := pos + int64(rel)
 	if target < 0 || target >= t.f.size {
+		t.f.w.broken(t.f.size, "field "+itoa(i)+" of the table at "+itoa64(t.pos)+" points outside the file")
 		return 0, false
 	}
 	return target, true
@@ -146,7 +156,11 @@ func (t fbTable) u32Field(i int) (uint32, bool) {
 	if !ok {
 		return 0, false
 	}
-	return t.f.u32(pos)
+	v, ok := t.f.u32(pos)
+	if !ok {
+		t.f.w.broken(pos, "u32 field "+itoa(i)+" of the table at "+itoa64(t.pos)+" reads past the end of the file")
+	}
+	return v, ok
 }
 
 func (t fbTable) byteField(i int) (byte, bool) {
@@ -172,14 +186,17 @@ func (t fbTable) stringField(i int) (string, bool) {
 	}
 	n, ok := t.f.u32(target)
 	if !ok || n > maxFBVector {
+		t.f.w.broken(target, "string field "+itoa(i)+" declares a length outside the file")
 		return "", false
 	}
 	start := target + 4
 	if start+int64(n) > t.f.size {
+		t.f.w.broken(target, "string field "+itoa(i)+" of "+itoa64(int64(n))+" bytes extends past the end of the file")
 		return "", false
 	}
 	b, _ := t.f.s.Bytes(start, int64(n))
 	if int64(len(b)) < int64(n) {
+		t.f.w.broken(start, "string field "+itoa(i)+" could not be read in full")
 		return "", false
 	}
 	return string(b), true
@@ -201,10 +218,12 @@ func (t fbTable) vector(i int, elem int) (fbVector, bool) {
 	}
 	n, ok := t.f.u32(target)
 	if !ok || n > maxFBVector {
+		t.f.w.broken(target, "vector field "+itoa(i)+" declares a length outside the file")
 		return fbVector{}, false
 	}
 	data := target + 4
 	if data+int64(n)*int64(elem) > t.f.size {
+		t.f.w.broken(target, "vector field "+itoa(i)+" of "+itoa64(int64(n)*int64(elem))+" bytes extends past the end of the file")
 		return fbVector{}, false
 	}
 	return fbVector{f: t.f, data: data, n: int(n)}, true
@@ -215,13 +234,19 @@ func (v fbVector) tableAt(i int) (fbTable, bool) {
 	slot := v.data + int64(i)*4
 	rel, ok := v.f.u32(slot)
 	if !ok {
+		v.f.w.broken(slot, "vector element "+itoa(i)+" reads past the end of the file")
 		return fbTable{}, false
 	}
 	target := slot + int64(rel)
 	if target < 0 || target >= v.f.size {
+		v.f.w.broken(slot, "vector element "+itoa(i)+" points outside the file")
 		return fbTable{}, false
 	}
-	return v.f.table(target)
+	t, ok := v.f.table(target)
+	if !ok {
+		v.f.w.broken(target, "vector element "+itoa(i)+" does not resolve to a table (its vtable is outside the file)")
+	}
+	return t, ok
 }
 
 // bytes returns the vector's inline byte payload.
@@ -247,7 +272,8 @@ func (tfliteParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		ctx.Sink.Emit(ruleTFLiteStruct, 4, "identifier is not 'TFL3' at offset 4")
 		return nil
 	}
-	f := fb{s: s, size: s.Size()}
+	w := &tfliteWalk{ctx: ctx, itemsLeft: 1 << 20, scanBytesLeft: 64 << 20}
+	f := fb{s: s, size: s.Size(), w: w}
 	root, ok := f.u32(0)
 	if !ok || root == 0 || int64(root) >= f.size {
 		ctx.Sink.Emit(ruleTFLiteStruct, 0, "root table offset is outside the file")
@@ -258,7 +284,6 @@ func (tfliteParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		ctx.Sink.Emit(ruleTFLiteStruct, int64(root), "root table's vtable reference is outside the file")
 		return nil
 	}
-	w := &tfliteWalk{ctx: ctx, itemsLeft: 1 << 20, scanBytesLeft: 64 << 20}
 	w.parseOperatorCodes(model)
 	w.parseSubgraphs(model)
 	w.parseBuffers(model)
@@ -273,10 +298,40 @@ type tfliteWalk struct {
 	ctx           *artifact.Ctx
 	itemsLeft     int
 	scanBytesLeft int64
+	// reported guards the one structural finding the walk emits for a broken
+	// reference; budgetReported guards the one limit finding.
+	reported       bool
+	budgetReported bool
+}
+
+// broken reports the first reference that leaves the file, once per walk. The
+// rule's text promises that "the walk stops at the broken reference and reports
+// it"; before this the walk stopped and said nothing, so a file whose operator
+// vector pointed outside it reported clean. One finding per walk keeps a
+// malformed file from spending the whole finding budget on its own damage.
+func (w *tfliteWalk) broken(off int64, what string) {
+	if w == nil || w.reported {
+		return
+	}
+	w.reported = true
+	w.ctx.Sink.Emit(ruleTFLiteStruct, off, what)
+}
+
+// budget reports that a work budget stopped the walk, so the reader can see that
+// the file was not walked to the end rather than reading the absence of findings
+// as a clean file.
+func (w *tfliteWalk) budget(rule *report.Rule, limit string, reached, cap int64, what string) {
+	if w == nil || w.budgetReported {
+		return
+	}
+	w.budgetReported = true
+	limits.Emit(w.ctx.Sink, rule, limit, reached, cap, what)
 }
 
 func (w *tfliteWalk) take() bool {
 	if w.itemsLeft <= 0 {
+		w.budget(limits.RuleEntries, "MaxArrayElements", 0, 0,
+			"TFLite walk item budget exhausted, so the remaining tables were not walked")
 		return false
 	}
 	w.itemsLeft--
@@ -291,6 +346,8 @@ func (w *tfliteWalk) parseOperatorCodes(model fbTable) {
 	}
 	n := vec.n
 	if n > 65536 {
+		w.budget(limits.RuleEntries, "MaxArrayElements", int64(n), 65536,
+			"operator code vector was truncated, so the codes past the cap were not examined")
 		n = 65536
 	}
 	for i := range n {
@@ -324,6 +381,8 @@ func (w *tfliteWalk) parseSubgraphs(model fbTable) {
 	}
 	n := vec.n
 	if n > 1024 {
+		w.budget(limits.RuleEntries, "MaxArrayElements", int64(n), 1024,
+			"subgraph vector was truncated, so the subgraphs past the cap were not examined")
 		n = 1024
 	}
 	for i := range n {
@@ -340,6 +399,8 @@ func (w *tfliteWalk) parseSubgraphs(model fbTable) {
 		}
 		m := ops.n
 		if m > 65536 {
+			w.budget(limits.RuleEntries, "MaxArrayElements", int64(m), 65536,
+				"operator vector was truncated, so the operators past the cap were not examined")
 			m = 65536
 		}
 		for j := range m {
@@ -368,10 +429,17 @@ func (w *tfliteWalk) parseBuffers(model fbTable) {
 	}
 	n := vec.n
 	if n > 65536 {
+		w.budget(limits.RuleEntries, "MaxArrayElements", int64(n), 65536,
+			"buffer vector was truncated, so the buffers past the cap were not examined")
 		n = 65536
 	}
 	for i := range n {
-		if !w.take() || w.scanBytesLeft <= 0 {
+		if w.scanBytesLeft <= 0 {
+			w.budget(limits.RuleEntries, "MaxArrayElements", 0, 0,
+				"TFLite buffer scan byte budget exhausted, so the remaining buffers were not scanned")
+			return
+		}
+		if !w.take() {
 			return
 		}
 		buf, ok := vec.tableAt(i)
