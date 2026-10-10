@@ -392,6 +392,10 @@ over-read or mis-map tensor extents. Metadata poisoning is the *content* attack
 (template SSTI, backdoor templates, exfiltration URLs in `general.*` strings);
 structure bugs are the *parser* attack.
 
+A `tokenizer.chat_template` value is handed to the Jinja analyser — the same code
+path a `*.jinja` file takes — so a template inside a GGUF is judged by section
+7's rules rather than by a GGUF-specific subset of them.
+
 **Evidence.** `CVE-2024-21802`, `CVE-2024-23496`, `CVE-2024-23605`,
 `CVE-2025-53630`, `CVE-2026-33298`, `GHSA-8wwf-w4qm-gpqr`.
 
@@ -458,7 +462,13 @@ copy-paste from a rendered page leaves behind), `SC4N-CARD-PARSE` (frontmatter
 that does not parse — reported, then the raw text is still scanned),
 `SC4N-METADATA-INJECTION`, `SC4N-METADATA-CODE` (a metadata value that looks like
 code), `SC4N-UNICODE-ANOMALY`, and the shared indicator engine's `SC4N-STRING-C2`,
-`-RAW-IP-URL`, `-CREDENTIAL`, `-SECRET-VALUE` over every metadata string.
+`-RAW-IP-URL`, `-CREDENTIAL`, `-SECRET-VALUE` over every metadata string. The
+chat-control-tag half of `SC4N-METADATA-INJECTION` is exempt in the five documents
+that *declare* the tokenizer's tokens (`tokenizer.json`, `tokenizer_config.json`,
+`special_tokens_map.json`, `added_tokens.json`, `chat_template.json`): a file that
+defines `<|im_start|>` is naming its own token, not smuggling text into a model's
+input. The instruction phrases, the secrets and the endpoints are still reported
+there, and the same bytes under any other name are scanned as ordinary text.
 
 **Mitigation.** Treat card text as untrusted input, never as documentation to be
 obeyed. Datamarking/spotlighting reduces (does not eliminate) injection success.
