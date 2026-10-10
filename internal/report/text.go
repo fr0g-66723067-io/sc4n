@@ -173,8 +173,17 @@ func (r *Report) SummaryLine() string {
 	}
 	var b strings.Builder
 	b.WriteString("sc4n: ")
-	b.WriteString(strconv.Itoa(len(r.Artifacts)))
-	b.WriteString(" artifact(s), ")
+	b.WriteString(strconv.Itoa(r.Scanned()))
+	b.WriteString(" artifact(s)")
+	if declared := len(r.Artifacts) - r.Scanned(); declared > 0 {
+		// The row count and the scanned count differ when a finding named a path
+		// with no summary; saying so is what keeps "3 artifacts" from reading as
+		// three files.
+		b.WriteString(" (")
+		b.WriteString(strconv.Itoa(declared))
+		b.WriteString(" declared by a finding, not scanned)")
+	}
+	b.WriteString(", ")
 	b.WriteString(strconv.Itoa(len(r.Findings)))
 	b.WriteString(" finding(s)")
 	if len(r.Findings) > 0 {

@@ -141,12 +141,16 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 		if a.SubFormat != "" {
 			c.Properties = append(c.Properties, cdxProperty{Name: "sc4n:subFormat", Value: a.SubFormat})
 		}
-		// A CycloneDX hash is a claim about the whole component, so a capped
-		// digest must not be published as one: it is recorded as a property
-		// instead, where the scope is part of the value. This is the same rule the
-		// JSON report follows with sha256Scope.
+		// A CycloneDX hash is a claim about the whole component, so only a digest
+		// whose scope says "full" may be published as one; anything else — a
+		// prefix digest, or a summary built by a caller that left the scope empty
+		// — is recorded as a property, where the scope travels with the value.
+		// An empty scope is deliberately *not* treated as full: the JSON report
+		// promises sha256Scope accompanies sha256, so an absent scope means the
+		// producer did not say, and a whole-file claim must not be inferred from
+		// silence.
 		if a.SHA256 != "" {
-			if a.SHA256Scope == "" || a.SHA256Scope == "full" {
+			if a.SHA256Scope == "full" {
 				c.Hashes = []cdxHash{{Alg: "SHA-256", Content: a.SHA256}}
 			} else {
 				c.Properties = append(c.Properties,

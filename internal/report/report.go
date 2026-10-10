@@ -37,6 +37,12 @@ type ArtifactSummary struct {
 	// that hides a member from the scanner is exactly the modelscan fail-open
 	// shape.
 	Error string `json:"error,omitempty"`
+	// NotScanned marks a row that no scan produced: it exists only because a
+	// finding named a path that has no summary (the hf-cache expander reporting a
+	// missing blob, say), so every encoder's reference resolves. Such a row must
+	// not be counted as a scanned artifact — that is how a scan of one file
+	// declared three.
+	NotScanned bool `json:"notScanned,omitempty"`
 }
 
 // Limits is the effective budget echoed into the report, so a reader can tell a
@@ -101,9 +107,10 @@ func declareFindingArtifacts(arts []ArtifactSummary, findings []Finding) []Artif
 		}
 		declared[path] = true
 		extra = append(extra, ArtifactSummary{
-			Path:      path,
-			Format:    "unknown",
-			SubFormat: "not scanned: named by a finding",
+			Path:       path,
+			Format:     "unknown",
+			SubFormat:  "not scanned: named by a finding",
+			NotScanned: true,
 		})
 	}
 	if len(extra) == 0 {
@@ -172,6 +179,18 @@ type Report struct {
 	// that is told nothing about a partial scan records it as a full one.
 	Unreadable int  `json:"unreadable,omitempty"`
 	Cancelled  bool `json:"cancelled,omitempty"`
+}
+
+// Scanned is the number of artifact rows an actual scan produced, i.e. the rows
+// minus the ones synthesised only so a finding's reference resolves.
+func (r *Report) Scanned() int {
+	n := len(r.Artifacts)
+	for _, a := range r.Artifacts {
+		if a.NotScanned {
+			n--
+		}
+	}
+	return n
 }
 
 // ExecutionSuccessful reports whether the scan covered everything it was asked
@@ -260,6 +279,10 @@ type summaryJSON struct {
 	Suppressed     int            `json:"suppressed,omitempty"`
 	Dropped        int            `json:"dropped,omitempty"`
 	UnreadablePath int            `json:"unreadablePaths,omitempty"`
+	// Scanned counts the rows an actual scan produced, i.e. Artifacts minus the
+	// rows synthesised only so a finding's reference resolves. A consumer that
+	// wants "how many files did this scan read" reads this, not Artifacts.
+	Scanned int `json:"scanned"`
 	// Cancelled records that the walk stopped early (a deadline), so a consumer
 	// that reads only the summary cannot mistake a partial scan for a clean one.
 	// It sits beside unreadablePaths because both are run-level facts about how
@@ -315,9 +338,13 @@ func (r *Report) toJSON() reportJSON {
 		Dropped:     r.Dropped,
 		Cancelled:   r.Cancelled,
 	}
+	out.Summary.Scanned = len(r.Artifacts)
 	for _, a := range r.Artifacts {
 		if a.Error != "" {
 			out.Summary.UnreadablePath++
+		}
+		if a.NotScanned {
+			out.Summary.Scanned--
 		}
 	}
 	return out

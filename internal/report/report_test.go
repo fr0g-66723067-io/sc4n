@@ -332,7 +332,7 @@ func TestCycloneDXIsWellFormedAndDeterministic(t *testing.T) {
 		c := NewCollector(0)
 		c.For("m.keras").Emit(testRuleCritical, 3, "class_name Lambda")
 		return Build(Tool{Name: "sc4n", Version: "t"}, "",
-			[]ArtifactSummary{{Path: "m.keras", Size: 9, SHA256: "ff", Format: "keras"}}, c, Limits{}, nil, 0)
+			[]ArtifactSummary{{Path: "m.keras", Size: 9, SHA256: "ff", SHA256Scope: "full", Format: "keras"}}, c, Limits{}, nil, 0)
 	}
 	var a, b bytes.Buffer
 	if err := build().WriteCycloneDX(&a); err != nil {
@@ -386,6 +386,48 @@ func TestCycloneDXIsWellFormedAndDeterministic(t *testing.T) {
 	}
 	if doc.Vulnerabilities[0].Ratings[0].Severity != "critical" {
 		t.Fatalf("severity = %q", doc.Vulnerabilities[0].Ratings[0].Severity)
+	}
+}
+
+// TestCycloneDXHashScopeIsNotAssumed: a CycloneDX hash is a claim about the whole
+// component, so only a digest whose scope says "full" may be published as one. An
+// absent scope means the producer did not say, and a whole-file claim must not be
+// inferred from silence.
+func TestCycloneDXHashScopeIsNotAssumed(t *testing.T) {
+	c := NewCollector(0)
+	c.For("m.keras").Emit(testRuleCritical, 3, "class_name Lambda")
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "",
+		[]ArtifactSummary{{Path: "m.keras", Size: 9, SHA256: "ff", Format: "keras"}}, c, Limits{}, nil, 0)
+	var buf bytes.Buffer
+	if err := rep.WriteCycloneDX(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Components []struct {
+			Hashes []struct {
+				Alg string `json:"alg"`
+			} `json:"hashes"`
+			Properties []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			} `json:"properties"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Components) != 1 {
+		t.Fatalf("components = %d", len(doc.Components))
+	}
+	if len(doc.Components[0].Hashes) != 0 {
+		t.Fatalf("an unscoped digest was published as a component hash: %+v", doc.Components[0].Hashes)
+	}
+	got := map[string]string{}
+	for _, p := range doc.Components[0].Properties {
+		got[p.Name] = p.Value
+	}
+	if got["sc4n:sha256"] != "ff" {
+		t.Fatalf("digest not recorded as a property: %+v", got)
 	}
 }
 
@@ -682,5 +724,49 @@ func TestArtifactResolutionHandlesColons(t *testing.T) {
 	want := []string{"a:b.pkl", "outer.zip", "outer.zip:inner.zip", "dangling:thing"}
 	if strings.Join(paths, "|") != strings.Join(want, "|") {
 		t.Fatalf("rows = %v, want %v", paths, want)
+	}
+}
+
+// TestDeclaredRowsAreNotCountedAsScanned: report.Build synthesises a row for every
+// path a finding names that has no summary, so an encoder's reference resolves. A
+// scan of one file that also reports two hf-cache ref findings declared three
+// artifacts, and SARIF said artifactsScanned: 3.
+func TestDeclaredRowsAreNotCountedAsScanned(t *testing.T) {
+	c := NewCollector(0)
+	c.For("refs/main").EmitExtra(testRuleInfo, 0, "malformed ref", nil)
+	c.For("blobs/deadbeef").EmitExtra(testRuleInfo, 0, "missing blob", nil)
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "",
+		[]ArtifactSummary{{Path: "m.bin", Size: 1, Format: "text"}}, c, Limits{}, nil, 0)
+
+	if len(rep.Artifacts) != 3 {
+		t.Fatalf("rows = %d, want 3 (one scanned plus two declared)", len(rep.Artifacts))
+	}
+	if rep.Scanned() != 1 {
+		t.Fatalf("Scanned() = %d, want 1", rep.Scanned())
+	}
+	var buf bytes.Buffer
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Summary struct {
+			Artifacts int  `json:"artifacts"`
+			Scanned   int  `json:"scanned"`
+			Cancelled bool `json:"cancelled"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Summary.Artifacts != 3 || doc.Summary.Scanned != 1 {
+		t.Fatalf("summary = %+v, want artifacts 3 scanned 1", doc.Summary)
+	}
+	if !strings.Contains(rep.SummaryLine(), "1 artifact(s) (2 declared by a finding, not scanned)") {
+		t.Fatalf("SummaryLine() = %q", rep.SummaryLine())
+	}
+	for _, a := range rep.Artifacts {
+		if a.Path == "m.bin" && a.NotScanned {
+			t.Fatal("a scanned row was marked NotScanned")
+		}
 	}
 }

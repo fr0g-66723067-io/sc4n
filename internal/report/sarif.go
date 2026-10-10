@@ -174,9 +174,14 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 			}},
 			Results: make([]sarifResult, 0, len(r.Findings)),
 			Properties: map[string]any{
-				"artifactsScanned": len(r.Artifacts),
-				"suppressed":       r.Suppressed,
-				"dropped":          r.Dropped,
+				// artifactsScanned counts the rows a scan produced; the rows that
+				// exist only so a finding's location resolves are declared
+				// separately, so "3 artifacts" can no longer mean one file plus
+				// two synthetic rows.
+				"artifactsScanned":  r.Scanned(),
+				"artifactsDeclared": len(r.Artifacts) - r.Scanned(),
+				"suppressed":        r.Suppressed,
+				"dropped":           r.Dropped,
 			},
 		}},
 	}
