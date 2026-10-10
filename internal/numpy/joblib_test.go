@@ -1,6 +1,7 @@
 package numpy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -101,5 +102,211 @@ func TestJoblibSniff(t *testing.T) {
 	defer plain.Close()
 	if _, ok := sniffJoblib(plain, limits.Default()); ok {
 		t.Fatal("sniffJoblib claimed a non-joblib stream")
+	}
+}
+
+// joblibInlineStream builds the layout joblib 1.6 writes: a protocol-5 pickle
+// whose only object is a NumpyArrayWrapper created by NEWOBJ + BUILD, with the
+// array payload written immediately after the wrapper and before STOP. The byte
+// sequence reproduces `joblib.dump(np.zeros(4))` (joblib 1.6, numpy 2.3) with
+// dtype, shape and body parameterised; the BINGET(6) memo slot follows from the
+// fixed order of the MEMOIZE opcodes.
+func joblibInlineStream(dtype string, dims []byte, body []byte) []byte {
+	var b []byte
+	str := func(s string) {
+		b = append(b, 0x8c, byte(len(s)))
+		b = append(b, s...)
+	}
+	b = append(b, 0x80, 0x05) // PROTO 5
+	b = append(b, 0x95)       // FRAME
+	frameLenAt := len(b)
+	b = append(b, 0, 0, 0, 0, 0, 0, 0, 0)
+	str("joblib.numpy_pickle")
+	b = append(b, 0x94)
+	str("NumpyArrayWrapper")
+	b = append(b, 0x94, 0x93, 0x94, 0x29, 0x81, 0x94, 0x7d, 0x94, 0x28)
+	str("subclass")
+	b = append(b, 0x94)
+	str("numpy")
+	b = append(b, 0x94)
+	str("ndarray")
+	b = append(b, 0x94, 0x93, 0x94)
+	str("shape")
+	b = append(b, 0x94)
+	b = append(b, dims...)
+	b = append(b, 0x85, 0x94) // TUPLE1, MEMOIZE
+	str("order")
+	b = append(b, 0x94)
+	str("C")
+	b = append(b, 0x94)
+	str("dtype")
+	b = append(b, 0x94, 0x68, 0x06) // BINGET 6 = "numpy"
+	str("dtype")
+	b = append(b, 0x94, 0x93, 0x94)
+	str(dtype)
+	b = append(b, 0x94, 0x89, 0x88, 0x87, 0x94, 0x52, 0x94) // (dtype, False, True), REDUCE
+	b = append(b, 0x28, 0x4b, 0x03)
+	str("<")
+	b = append(b, 0x94, 0x4e, 0x4e, 0x4e)
+	b = append(b, 0x4a, 0xff, 0xff, 0xff, 0xff, 0x4a, 0xff, 0xff, 0xff, 0xff, 0x4b, 0x00)
+	b = append(b, 0x74, 0x94, 0x62) // TUPLE, MEMOIZE, BUILD (numpy.dtype)
+	str("allow_mmap")
+	b = append(b, 0x94, 0x88)
+	str("numpy_array_alignment_bytes")
+	b = append(b, 0x94, 0x4b, 0x10)
+	b = append(b, 0x75, 0x62) // SETITEMS, BUILD (wrapper)
+	payloadStart := len(b)
+	// joblib writes the padding frame only for numeric arrays; an object-dtype
+	// payload is the nested pickle dumped straight after the wrapper.
+	if !strings.Contains(dtype, "O") {
+		pad := 16 - (payloadStart+1)%16
+		if pad == 0 {
+			pad = 16
+		}
+		b = append(b, byte(pad))
+		for i := 0; i < pad; i++ {
+			b = append(b, 0xff)
+		}
+	}
+	b = append(b, body...)
+	b = append(b, 0x2e) // STOP
+	flen := payloadStart - 11
+	for i := 0; i < 8; i++ {
+		b[frameLenAt+i] = byte(flen >> (8 * i))
+	}
+	return b
+}
+
+// gadget4 is a protocol-4 pickle whose only object is os.system("id"), used as
+// array bytes to prove the payload is actually scanned.
+func gadget4() []byte {
+	return []byte{
+		0x80, 0x04,
+		0x8c, 0x02, 'o', 's',
+		0x8c, 0x06, 's', 'y', 's', 't', 'e', 'm',
+		0x93,
+		0x8c, 0x02, 'i', 'd',
+		0x85,
+		0x52,
+		0x2e,
+	}
+}
+
+func joblibEvidence(fs []report.Finding, substr string) bool {
+	for _, f := range fs {
+		if strings.Contains(f.Evidence, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestJoblibInlinePayloadNotReadAsOpcodes is the regression for the layout
+// defect: joblib writes the array bytes before STOP, so an unwarned walk read
+// them as opcodes and reported unknown-opcode/INCOMPLETE noise.
+func TestJoblibInlinePayloadNotReadAsOpcodes(t *testing.T) {
+	body := make([]byte, 32) // np.zeros(4): 4 x f8
+	st := joblibInlineStream("f8", []byte{0x4b, 0x04}, body)
+
+	ws := walkWrappers(st)
+	if len(ws) != 1 || !ws[0].inline || ws[0].payloadEnd != int64(len(st)-1) {
+		t.Fatalf("walkers = %+v (len %d)", ws, len(st))
+	}
+
+	fs := parseJoblib(t, st)
+	if joblibEvidence(fs, "is not an opcode") {
+		t.Errorf("payload bytes were read as opcodes: %v", fs)
+	}
+	want(t, fs, nil, []string{"SC4N-PICKLE-INCOMPLETE", "SC4N-JOBLIB-WRAPPER-MISMATCH"})
+}
+
+// TestJoblibInlinePayloadDispatched proves the numeric payload is handed to the
+// engine rather than ignored: a pickle gadget in the array bytes is reported.
+func TestJoblibInlinePayloadDispatched(t *testing.T) {
+	body := make([]byte, 32) // 4 x f8
+	copy(body, gadget4())
+	st := joblibInlineStream("f8", []byte{0x4b, 0x04}, body)
+	fs := parseJoblib(t, st)
+	want(t, fs, []string{"SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"}, []string{"SC4N-PICKLE-INCOMPLETE"})
+}
+
+// TestJoblibObjectInlinePayloadDispatched covers the object-dtype branch, whose
+// payload is a nested pickle located at the wrapper's own position.
+func TestJoblibObjectInlinePayloadDispatched(t *testing.T) {
+	st := joblibInlineStream("O8", []byte{0x4b, 0x01}, gadget4())
+	ws := walkWrappers(st)
+	if len(ws) != 1 || !ws[0].object || !ws[0].inline {
+		t.Fatalf("walkers = %+v", ws)
+	}
+	fs := parseJoblib(t, st)
+	want(t, fs, []string{"SC4N-PICKLE-GLOBAL-CRITICAL"}, []string{"SC4N-JOBLIB-WRAPPER-MISMATCH"})
+}
+
+// TestJoblibInlineFramingMismatch covers a payload that belongs inline but does
+// not carry the [padding][0xff x padding][data] framing its declared size
+// describes.
+func TestJoblibInlineFramingMismatch(t *testing.T) {
+	st := joblibInlineStream("f8", []byte{0x4b, 0x04}, make([]byte, 32))
+	ws := walkWrappers(st)
+	if len(ws) != 1 || !ws[0].inline {
+		t.Fatalf("walkers = %+v", ws)
+	}
+	st[ws[0].payloadStart+1] = 0x00 // break the 0xff padding run
+	fs := parseJoblib(t, st)
+	want(t, fs, []string{"SC4N-JOBLIB-WRAPPER-MISMATCH"}, nil)
+}
+
+// TestJoblibUnsizeableDtypeNoFalseMismatch covers a wrapper whose element size
+// is not a single number (a structured dtype writes dtype.descr as a list, which
+// this build cannot express; a zero-length void has the same property). The
+// payload cannot be bounded, so no framing violation is claimed.
+func TestJoblibUnsizeableDtypeNoFalseMismatch(t *testing.T) {
+	st := joblibInlineStream("V0", []byte{0x4b, 0x01}, make([]byte, 8))
+	fs := parseJoblib(t, st)
+	want(t, fs, nil, []string{"SC4N-JOBLIB-WRAPPER-MISMATCH"})
+}
+
+// joblibMemoStream builds a REDUCE-layout wrapper whose dtype is written once
+// and read back through the given memo opcodes, so a wrong argument width
+// desynchronises the walk and the wrapper is not decoded.
+func joblibMemoStream(putOp, getOp byte) []byte {
+	idx := []byte{0x00}
+	if putOp == 0x72 || getOp == 0x6a {
+		idx = []byte{0, 0, 0, 0}
+	}
+	out := []byte{0x80, 0x02} // PROTO 2
+	out = append(out, 0x8c, 0x03)
+	out = append(out, "<f8"...)
+	out = append(out, putOp)
+	out = append(out, idx...)
+	out = append(out, 0x63)
+	out = append(out, []byte("joblib.numpy_pickle\nNumpyArrayWrapper\n")...)
+	out = append(out, 0x28) // MARK (args)
+	out = append(out, getOp)
+	out = append(out, idx...)
+	out = append(out, 0x28, 0x4b, 0x02, 0x74) // shape (2,)
+	out = append(out, 0x8c, 0x01, 'C', 0x89, 0x4e, 0x74)
+	out = append(out, 0x52)       // REDUCE
+	out = append(out, 0x4e, 0x62) // NONE, BUILD
+	out = append(out, 0x2e)       // STOP
+	return append(out, append([]byte{0x00}, make([]byte, 16)...)...)
+}
+
+// TestJoblibMemoArgumentWidths is the regression for the one-byte BINPUT/BINGET
+// index: treating them as four bytes desynchronised every protocol <= 3 stream.
+func TestJoblibMemoArgumentWidths(t *testing.T) {
+	cases := map[string][]byte{
+		"BINPUT/BINGET (1 byte)":      joblibMemoStream(0x71, 0x68),
+		"LONG_BINPUT/LONG_BINGET (4)": joblibMemoStream(0x72, 0x6a),
+	}
+	for name, st := range cases {
+		ws := walkWrappers(st)
+		if len(ws) != 1 {
+			t.Fatalf("%s: wrappers = %+v", name, ws)
+		}
+		w := ws[0]
+		if w.dtype != "<f8" || len(w.shape) != 1 || w.shape[0] != 2 {
+			t.Fatalf("%s: decoded %q %v, want <f8 [2]", name, w.dtype, w.shape)
+		}
 	}
 }

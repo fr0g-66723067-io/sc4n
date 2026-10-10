@@ -137,6 +137,7 @@ func TestDtypeSize(t *testing.T) {
 		{"<c16", 16, true},
 		{"|b1", 1, true},
 		{"<U10", 40, true},
+		{"<U2305843009213693952", 0, false},
 		{"|S5", 5, true},
 		{"|V8", 8, true},
 		{"|O", 0, false},
@@ -149,6 +150,64 @@ func TestDtypeSize(t *testing.T) {
 			t.Errorf("dtypeSize(%q) = %d,%v want %d,%v", tc.dtype, got, ok, tc.size, tc.ok)
 		}
 	}
+}
+
+func TestDtypeSizeOverflow(t *testing.T) {
+	if _, ok := dtypeSize("<U2305843009213693952"); ok {
+		t.Error("dtypeSize accepted an overflowing U descriptor")
+	}
+	if !dtypeSizeOverflows("<U2305843009213693952") {
+		t.Error("dtypeSizeOverflows missed a U count above MaxInt64/4")
+	}
+	for _, ok := range []string{"<U10", "<f8", "|S5", "i4,i4", ""} {
+		if dtypeSizeOverflows(ok) {
+			t.Errorf("dtypeSizeOverflows(%q) fired on a size that fits", ok)
+		}
+	}
+}
+
+// TestParseNPYStructuredDescr covers numpy's dtype.descr: a record dtype writes
+// descr as a list, which the format docs define as "an object that can be passed
+// as an argument to numpy.dtype". It is valid and must not be a header error.
+func TestParseNPYStructuredDescr(t *testing.T) {
+	hdr := "{'descr': [('a', '<i4')], 'fortran_order': False, 'shape': (3,), }"
+	fs := parse(t, npyV1(hdr, make([]byte, 12)))
+	want(t, fs, nil, []string{"SC4N-NUMPY-STRUCT", "SC4N-NUMPY-TRAILING"})
+
+	// Sub-array fields and nested field lists are consumed as well.
+	for _, h := range []string{
+		"{'descr': [('a', '<i4', (2,))], 'shape': (3,)}",
+		"{'descr': [('a', [('x', '<f4'), ('y', '<f4')])], 'shape': (3,)}",
+		"{'descr': [('a', '<i4'), ('b', '<f8')], 'shape': (3,)}",
+	} {
+		hh, err := parseNPYHeader([]byte(h))
+		if err != nil {
+			t.Errorf("parseNPYHeader(%q) = %v, want nil", h, err)
+			continue
+		}
+		if !hh.structured || hh.dtype != "" {
+			t.Errorf("parseNPYHeader(%q) = dtype %q structured %v", h, hh.dtype, hh.structured)
+		}
+	}
+
+	// A descr that is neither a string nor a list is still rejected.
+	if _, err := parseNPYHeader([]byte("{'descr': 3, 'shape': (1,)}")); err == nil {
+		t.Error("numeric descr accepted")
+	}
+	// A structured dtype with an unsizeable shape is still a structural finding.
+	fs = parse(t, npyV1("{'descr': [('a', '<i4')], 'shape': (-1,)}", make([]byte, 4)))
+	want(t, fs, []string{"SC4N-NUMPY-STRUCT"}, nil)
+}
+
+// TestParseNPYUnicodeSizeOverflow is the regression for the U descriptor whose
+// byte size overflows int64: it must be reported as an overflow, and a
+// zero-element shape must not turn it into a trailing-data claim.
+func TestParseNPYUnicodeSizeOverflow(t *testing.T) {
+	fs := parse(t, npyV1("{'descr': '<U2305843009213693952', 'shape': (2,)}", make([]byte, 16)))
+	want(t, fs, []string{"SC4N-NUMPY-STRUCT"}, []string{"SC4N-NUMPY-TRAILING"})
+
+	fs = parse(t, npyV1("{'descr': '<U2305843009213693952', 'shape': (0,)}", make([]byte, 16)))
+	want(t, fs, []string{"SC4N-NUMPY-STRUCT"}, []string{"SC4N-NUMPY-TRAILING"})
 }
 
 // --- parseNPY ----------------------------------------------------------------

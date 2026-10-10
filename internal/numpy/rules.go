@@ -92,10 +92,13 @@ var (
 		Confidence: report.ConfidenceMedium,
 		CWE:        []string{"CWE-502"},
 		Class:      "joblib",
-		Description: "joblib.pickle writes an ndarray as a `NumpyArrayWrapper` (or the legacy " +
-			"`NDArrayWrapper`/`ZNDArrayWrapper`) pickle object plus a payload: a one-byte padding " +
-			"length, that many 0xff bytes and then dtype.itemsize x count raw bytes. When the payload " +
-			"length does not equal the declared size, the gap is exactly where a second object can ride " +
+		Description: "joblib writes an ndarray as a `NumpyArrayWrapper` (or the legacy " +
+			"`NDArrayWrapper`/`ZNDArrayWrapper`) pickle object followed by its payload: a one-byte " +
+			"padding length, that many 0xff bytes and then dtype.itemsize x count raw bytes, written " +
+			"into the file immediately after the wrapper and before the stream's STOP. This finding is " +
+			"the payload not fitting the wrapper's declared size: an inline payload that does not begin " +
+			"with the padding framing, or a payload a producer appended after a complete pickle whose " +
+			"length differs from the declared size. The gap is exactly where a second object can ride " +
 			"behind the array framing. Confidence is medium because joblib computes the count from the " +
 			"shape at load time and a wrapper the scanner cannot decode is skipped rather than guessed.",
 		Refs: []string{

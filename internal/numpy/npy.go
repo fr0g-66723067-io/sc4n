@@ -14,9 +14,12 @@
 //     so a member's own format decides its parser.
 //   - joblib: a pickle container whose ndarrays are `NumpyArrayWrapper` (legacy
 //     `NDArrayWrapper`/`ZNDArrayWrapper`) objects with the raw array bytes
-//     appended after the stream. The wrapper's declared shape/dtype is compared
-//     with the payload length, and an object-dtype payload is dispatched to the
-//     pickle engine.
+//     written into the file immediately after each wrapper and before the
+//     stream's STOP (the wrapper's declared dtype/shape bounds the payload). Each
+//     payload is located at its wrapper's own position, masked out of the
+//     object-graph walk so weight bytes are not read as opcodes, and dispatched
+//     as a member; an object-dtype payload is a nested pickle and reaches the
+//     pickle engine the same way.
 //
 // Nothing here executes, extracts or writes anything, and no length is trusted
 // before it is checked against the bytes remaining.
@@ -46,6 +49,11 @@ type npyHeader struct {
 	dtype   string
 	fortran bool
 	shape   []int64
+	// structured records that descr was written as a list rather than a string,
+	// which numpy does whenever the dtype has fields (dtype.descr is a list).
+	// Such a dtype has no single element size, so dtype is left empty and the
+	// declared length is not verified.
+	structured bool
 	// unknown lists top-level keys that are not one of descr, fortran_order,
 	// shape. numpy never writes any, so their presence is a structural finding.
 	unknown []string
@@ -160,10 +168,26 @@ func parseNPY(ctx *artifact.Ctx, s source.Source) error {
 		return nil
 	}
 
+	if h.structured {
+		// descr was a list (dtype.descr): a dtype with fields, whose element
+		// size is the sum of its fields and so is not a single number. The
+		// declared length is not verified, but the element count is still taken
+		// from shape so that an unsizeable shape is reported.
+		if _, ok := shapeElems(h.shape); !ok {
+			return structErr(ctx, headerStart, "shape "+shapeString(h.shape)+" cannot be sized without overflow")
+		}
+		return nil
+	}
+
 	esize, ok := dtypeSize(h.dtype)
 	if !ok {
-		// A structure we cannot size (structured dtype, void, an unrecognised
-		// descriptor): skip the length check rather than guess a wrong one.
+		// A structure we cannot size (void, an unrecognised descriptor): skip
+		// the length check rather than guess a wrong one. A descriptor whose
+		// element size overflows int64 is a structural violation in its own
+		// right, so it is reported rather than skipped.
+		if dtypeSizeOverflows(h.dtype) {
+			return structErr(ctx, headerStart, "the element size of dtype "+strconv.Quote(h.dtype)+" overflows")
+		}
 		return nil
 	}
 	elems, ok := shapeElems(h.shape)
@@ -200,7 +224,8 @@ func structErr(ctx *artifact.Ctx, off int64, detail string) error {
 // parseNPYHeader decodes the literal dict numpy writes.
 //
 // Grammar accepted (the subset numpy emits): a braces dict whose keys are
-// quoted strings and whose values are a quoted string (descr), True/False
+// quoted strings and whose values are a quoted string (descr), a list
+// (dtype.descr, written whenever the dtype has fields), True/False
 // (fortran_order), or a parenthesised/bracketed tuple of integers (shape). A
 // trailing comma is allowed. Nothing is evaluated, so a header such as
 // `{'descr': __import__('os').system('id')}` parses to an error rather than
@@ -229,11 +254,17 @@ func parseNPYHeader(b []byte) (npyHeader, error) {
 		p.ws()
 		switch key {
 		case "descr":
-			s, ok := p.str()
-			if !ok {
-				return h, errors.New("descr is not a string")
+			// numpy writes a string for a simple dtype and dtype.descr — a list —
+			// whenever the dtype has fields, and the format docs define the key as
+			// "an object that can be passed as an argument to numpy.dtype". Both
+			// shapes are accepted; a list is consumed without being interpreted.
+			if s, ok := p.str(); ok {
+				h.dtype = s
+			} else if p.list() {
+				h.structured = true
+			} else {
+				return h, errors.New("descr is neither a string nor a list")
 			}
-			h.dtype = s
 		case "fortran_order":
 			v, ok := p.boolLit()
 			if !ok {
@@ -373,6 +404,69 @@ func (p *litParser) tuple() ([]int64, bool) {
 	}
 }
 
+// list reads a bracketed list of literals, consuming it without interpreting
+// the elements. It is what a descr written as dtype.descr is: a list of field
+// tuples such as [('a', '<i4'), ('b', '<f8')] or [('a', '<i4', (2,))].
+func (p *litParser) list() bool {
+	if p.i >= len(p.b) || p.b[p.i] != '[' {
+		return false
+	}
+	return p.group()
+}
+
+// group consumes a bracketed or parenthesised sequence of literals, including
+// the ('name', '<dtype') field tuples and nested field lists inside dtype.descr.
+// Nothing it reads is returned or interpreted.
+func (p *litParser) group() bool {
+	if p.i >= len(p.b) || (p.b[p.i] != '[' && p.b[p.i] != '(') {
+		return false
+	}
+	close := byte(']')
+	if p.b[p.i] == '(' {
+		close = ')'
+	}
+	p.i++
+	for {
+		p.ws()
+		if p.eat(close) {
+			return true
+		}
+		if !p.skipValue() {
+			return false
+		}
+		p.ws()
+		if p.eat(',') {
+			continue
+		}
+		if p.eat(close) {
+			return true
+		}
+		return false
+	}
+}
+
+// skipValue consumes one literal value: a quoted string, a bracketed list, a
+// parenthesised tuple, a bool or a bare integer. It is used only to walk past
+// descr contents, so nothing it reads is returned or interpreted.
+func (p *litParser) skipValue() bool {
+	p.ws()
+	if p.i >= len(p.b) {
+		return false
+	}
+	switch p.b[p.i] {
+	case '\'', '"':
+		_, ok := p.str()
+		return ok
+	case '[', '(':
+		return p.group()
+	}
+	if _, ok := p.boolLit(); ok {
+		return true
+	}
+	_, ok := p.intLit()
+	return ok
+}
+
 // intLit reads a decimal integer, tolerating a leading + and the Python 2 'L'
 // suffix that a very old producer may emit.
 func (p *litParser) intLit() (int64, bool) {
@@ -423,7 +517,9 @@ func isObjectDtype(dtype string) bool {
 
 // dtypeSize returns the byte size of one element of a simple numpy descriptor,
 // or ok=false for object kinds and anything whose size is not a single number
-// (structured dtypes, sub-array fields, void with a comma).
+// (structured dtypes, sub-array fields, void with a comma). A descriptor whose
+// element size would overflow int64 is also ok=false; dtypeSizeOverflows
+// distinguishes that case so the caller can report it.
 func dtypeSize(dtype string) (int64, bool) {
 	s := dtype
 	if s == "" {
@@ -444,10 +540,33 @@ func dtypeSize(dtype string) (int64, bool) {
 	case 'f', 'i', 'u', 'b', 'c', 'V', 'S':
 		return int64(num), true
 	case 'U':
+		if int64(num) > math.MaxInt64/4 {
+			return 0, false
+		}
 		return 4 * int64(num), true
 	default:
 		return 0, false
 	}
+}
+
+// dtypeSizeOverflows reports whether a simple descriptor's element size is too
+// large for int64 to hold. A 'U' descriptor stores four bytes per character, so
+// a count above MaxInt64/4 overflows the byte size; numpy's own dtype rejects
+// such a descriptor, which makes it a structural violation rather than a
+// structure whose size is merely unknown (which dtypeSize reports as ok=false).
+func dtypeSizeOverflows(dtype string) bool {
+	s := dtype
+	if s == "" {
+		return false
+	}
+	if s[0] == '<' || s[0] == '>' || s[0] == '=' || s[0] == '|' {
+		s = s[1:]
+	}
+	if len(s) < 2 || s[0] != 'U' || strings.ContainsAny(s, ",[]()") {
+		return false
+	}
+	num, err := strconv.Atoi(s[1:])
+	return err == nil && int64(num) > math.MaxInt64/4
 }
 
 // shapeElems returns the product of the dimensions, or ok=false on a negative
