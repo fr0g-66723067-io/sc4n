@@ -906,6 +906,47 @@ func TestTextCountsNestedFindings(t *testing.T) {
 	}
 }
 
+// TestTextEscapesControlBytesInPaths is the regression for the text encoder
+// writing artifact paths raw: a file name may contain ESC, so a crafted name
+// emitted ANSI sequences into the terminal or CI log, and a tab or newline broke
+// the tabwriter table. JSON escapes them and SARIF percent-encodes them, so this
+// was text-only.
+func TestTextEscapesControlBytesInPaths(t *testing.T) {
+	const name = "\x1b[31mRED\x1b[0m\tnew\nline.pkl"
+	c := NewCollector(0)
+	c.For(name).Emit(testRuleCritical, 4, "os.system")
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "",
+		[]ArtifactSummary{{Path: name, Size: 12, Format: "pickle"}}, c, Limits{}, nil, 0)
+	var buf bytes.Buffer
+	if err := rep.WriteText(&buf, TextOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("an escape byte reached the terminal output: %q", out)
+	}
+	// Both the artifact row and the LOCATION column render the name, and both
+	// show the placeholder rather than the ESC bytes.
+	if strings.Count(out, "·[31mRED·[0m new line.pkl") != 2 {
+		t.Fatalf("the path was not escaped in both tables: %q", out)
+	}
+	// The tabs and the newline in the name became spaces, so the name did not
+	// split the artifact row into extra columns: it still ends with the size and
+	// finding-count columns.
+	row := ""
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "·[31mRED·[0m new line.pkl") {
+			row = l
+		}
+	}
+	if row == "" {
+		t.Fatalf("the artifact row was not rendered as one line: %q", out)
+	}
+	if !strings.HasSuffix(row, "12 B  1") {
+		t.Fatalf("the crafted name reflowed the artifact row: %q", row)
+	}
+}
+
 // TestArtifactResolutionHandlesColons: a path may itself contain ':' (a Windows
 // drive letter, a URL, a file literally named "a:b.pkl"), so the member separator
 // cannot be found by splitting at the first colon. The declared rows are the

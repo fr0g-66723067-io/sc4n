@@ -82,18 +82,18 @@ func (r *Report) WriteText(w io.Writer, o TextOptions) error {
 		}
 		for _, a := range r.Artifacts {
 			n := counts[a.Path] + nested[a.Path]
-			line := []string{a.Path, a.Format, humanBytes(a.Size), strconv.Itoa(n)}
+			line := []string{collapseControl(a.Path), collapseControl(a.Format), humanBytes(a.Size), strconv.Itoa(n)}
 			if a.Error != "" {
 				line[1] = "unreadable"
-				line[3] = a.Error
+				line[3] = collapseControl(a.Error)
 			} else if a.SubFormat != "" {
 				// The sub-format carries why a row was not fully scanned — a
 				// parser failure, a duplicate blob, a row declared by a finding.
 				// Printing the bare format would show such a row as clean.
 				if a.Format == "" {
-					line[1] = a.SubFormat
+					line[1] = collapseControl(a.SubFormat)
 				} else {
-					line[1] = a.Format + " (" + a.SubFormat + ")"
+					line[1] = collapseControl(a.Format) + " (" + collapseControl(a.SubFormat) + ")"
 				}
 			}
 			if _, err := io.WriteString(tw, strings.Join(line, "\t")+"\n"); err != nil {
@@ -115,7 +115,7 @@ func (r *Report) WriteText(w io.Writer, o TextOptions) error {
 				} else {
 					sev = strings.ToUpper(sev)
 				}
-				loc := f.Artifact
+				loc := collapseControl(f.Artifact)
 				if f.Line != nil {
 					loc += ":" + strconv.Itoa(*f.Line)
 					if f.Col != nil {
@@ -236,10 +236,15 @@ func humanBytes(n int64) string {
 	return strconv.FormatFloat(v, 'f', 1, 64) + " " + units[i]
 }
 
-// oneLine collapses whitespace and truncates, so one crafted string cannot
-// reflow a terminal or a log.
-func oneLine(s string, width int) string {
-	s = strings.Map(func(r rune) rune {
+// collapseControl maps every control byte to a visible placeholder and turns
+// newlines and tabs into spaces, so one crafted string cannot reflow a terminal,
+// a log, or a tab-separated table. It is the escaping half of oneLine, split out
+// because a path must not be truncated — a reader needs the whole name to find the
+// file — while the escape sequences inside it must never reach the terminal. A
+// file name may contain ESC, so a name is as attacker-controlled as any evidence
+// string.
+func collapseControl(s string) string {
+	return strings.Map(func(r rune) rune {
 		switch r {
 		case '\n', '\r', '\t':
 			return ' '
@@ -249,7 +254,12 @@ func oneLine(s string, width int) string {
 		}
 		return r
 	}, s)
-	return TruncateEvidence(s, width)
+}
+
+// oneLine collapses whitespace and truncates, so one crafted string cannot
+// reflow a terminal or a log.
+func oneLine(s string, width int) string {
+	return TruncateEvidence(collapseControl(s), width)
 }
 
 // TruncateEvidence cuts s to at most n bytes for a one-line finding and appends an
