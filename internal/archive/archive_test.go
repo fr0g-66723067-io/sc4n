@@ -2,6 +2,7 @@ package archive_test
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
@@ -312,6 +313,87 @@ func TestZipSlipPathAndLink(t *testing.T) {
 func TestZipNameMismatch(t *testing.T) {
 	data := buildZip(t, []zspec{{name: "good.txt", localName: "evil.txt", data: []byte("x\n")}}, false)
 	got := scanZip(t, "mismatch.zip", data, limits.Default())
+	want(t, got, "SC4N-ARCHIVE-NAME-MISMATCH")
+}
+
+// TestZipDataDescriptorIsNotAMismatch pins the C1 fix. Go's archive/zip.Writer
+// (and Java, and Python's force_zip64 output) set general-purpose bit 3 and leave
+// the local header's CRC and both sizes zero, because the writer had not computed
+// them when it wrote the header; the real values follow the member data and are
+// mirrored in the central directory. Comparing those zeroes against the central
+// directory reported every such archive as SC4N-ARCHIVE-NAME-MISMATCH — including
+// the committed benign/model.npz fixture, which is produced by Python's zipfile.
+func TestZipDataDescriptorIsNotAMismatch(t *testing.T) {
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	f, err := w.Create("a.txt")
+	if err != nil {
+		t.Fatalf("zip.Create: %v", err)
+	}
+	if _, err := f.Write([]byte("hello world\n")); err != nil {
+		t.Fatalf("zip write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("zip.Close: %v", err)
+	}
+	if buf.Bytes()[6]&0x8 == 0 {
+		t.Fatal("the test's zip does not set the data-descriptor bit; it no longer covers the case")
+	}
+	got := scanZip(t, "descriptor.zip", buf.Bytes(), limits.Default())
+	forbid(t, got, "SC4N-ARCHIVE-NAME-MISMATCH")
+}
+
+// TestZipZip64LocalSizesAreNotAMismatch is the same for a per-entry zip64 record:
+// the local 32-bit size fields hold 0xFFFFFFFF and the real values are in the
+// local header's zip64 extra field, so the comparison must read that field rather
+// than compare the sentinel.
+func TestZipZip64LocalSizesAreNotAMismatch(t *testing.T) {
+	data := []byte("hello world\n")
+	crc := crc32.ChecksumIEEE(data)
+
+	var buf bytes.Buffer
+	// Local header with the zip64 sentinel in both size fields and a zip64 extra
+	// field carrying the real values, in the spec's order (uncompressed first).
+	var lh [30]byte
+	binary.LittleEndian.PutUint32(lh[0:], 0x04034b50)
+	binary.LittleEndian.PutUint16(lh[4:], 45)
+	binary.LittleEndian.PutUint32(lh[14:], crc)
+	binary.LittleEndian.PutUint32(lh[18:], 0xffffffff)
+	binary.LittleEndian.PutUint32(lh[22:], 0xffffffff)
+	binary.LittleEndian.PutUint16(lh[26:], uint16(len("a.txt")))
+	binary.LittleEndian.PutUint16(lh[28:], 20)
+	buf.Write(lh[:])
+	buf.WriteString("a.txt")
+	var ex [20]byte
+	binary.LittleEndian.PutUint16(ex[0:], 0x0001)
+	binary.LittleEndian.PutUint16(ex[2:], 16)
+	binary.LittleEndian.PutUint64(ex[4:], uint64(len(data)))  // uncompressed
+	binary.LittleEndian.PutUint64(ex[12:], uint64(len(data))) // compressed
+	buf.Write(ex[:])
+	buf.Write(data)
+	cdOff := uint32(buf.Len())
+	writeCentral(&buf, "a.txt", 0, crc, uint32(len(data)), uint32(len(data)), 0, 0)
+	cdSize := uint32(buf.Len()) - cdOff
+	var eocd [22]byte
+	binary.LittleEndian.PutUint32(eocd[0:], 0x06054b50)
+	binary.LittleEndian.PutUint16(eocd[8:], 1)
+	binary.LittleEndian.PutUint16(eocd[10:], 1)
+	binary.LittleEndian.PutUint32(eocd[12:], cdSize)
+	binary.LittleEndian.PutUint32(eocd[16:], cdOff)
+	buf.Write(eocd[:])
+
+	got := scanZip(t, "zip64entry.zip", buf.Bytes(), limits.Default())
+	forbid(t, got, "SC4N-ARCHIVE-NAME-MISMATCH")
+}
+
+// TestZipLocalSizeMismatchStillReported guards the other half: a local header
+// that genuinely disagrees with the central directory, with the data-descriptor
+// bit clear and no zip64 sentinel, must still be reported.
+func TestZipLocalSizeMismatchStillReported(t *testing.T) {
+	data := buildZip(t, []zspec{{name: "a.txt", data: []byte("hello world\n")}}, false)
+	// Corrupt the local header's compressed-size field only.
+	binary.LittleEndian.PutUint32(data[18:], 0xdeadbeef)
+	got := scanZip(t, "badsize.zip", data, limits.Default())
 	want(t, got, "SC4N-ARCHIVE-NAME-MISMATCH")
 }
 

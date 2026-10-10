@@ -343,18 +343,56 @@ func resolveLocal(s source.Source, e zipEntry) (bodyOff int64, localName, mismat
 	}
 	// The fields a loader uses to find and decompress the data. A disagreement
 	// here means the bytes sc4n read are not the bytes a loader would use.
+	//
+	// Two conformant encodings make the local fields legitimately differ from the
+	// central directory's, and both are common, so comparing them literally
+	// reported every such archive as a mismatch:
+	//
+	//   - general-purpose bit 3 (data descriptor): the local header carries no
+	//     CRC and no sizes, because the writer did not know them when it wrote it.
+	//     Go's archive/zip.Writer sets this by default, and Java and Python set it
+	//     for non-seekable or force_zip64 output. The real values follow the member
+	//     data and are mirrored in the central directory, which is where this
+	//     parser read them.
+	//   - per-entry zip64: the local 32-bit fields hold the sentinel 0xFFFFFFFF
+	//     and the real values are in the local header's zip64 extra field.
+	//
+	// The name and method are always present and always compared.
 	var diffs []string
 	if lm := le16(hdr[8:]); lm != e.method {
 		diffs = append(diffs, "method "+itoa(int(lm))+" vs "+itoa(int(e.method)))
 	}
-	if lc := le32(hdr[14:]); lc != e.crc {
-		diffs = append(diffs, "crc32 0x"+strconv.FormatUint(uint64(lc), 16)+" vs 0x"+strconv.FormatUint(uint64(e.crc), 16))
-	}
-	if lc := uint64(le32(hdr[18:])); lc != e.comp {
-		diffs = append(diffs, "compressed size "+itoa64(int64(lc))+" vs "+itoa64(int64(e.comp)))
-	}
-	if lu := uint64(le32(hdr[22:])); lu != e.uncomp {
-		diffs = append(diffs, "uncompressed size "+itoa64(int64(lu))+" vs "+itoa64(int64(e.uncomp)))
+	if e.flags&0x8 == 0 {
+		lcrc := le32(hdr[14:])
+		lcomp := uint64(le32(hdr[18:]))
+		luncomp := uint64(le32(hdr[22:]))
+		compareSizes := true
+		if lcomp == 0xffffffff || luncomp == 0xffffffff {
+			// The 32-bit fields are the zip64 sentinel; the local extra field
+			// holds the real sizes. Without it there is nothing to compare, and
+			// guessing would report a conformant archive.
+			if u, c, ok := localZip64Sizes(s, e.localOff, nameLen, extraLen); ok {
+				if luncomp == 0xffffffff {
+					luncomp = u
+				}
+				if lcomp == 0xffffffff {
+					lcomp = c
+				}
+			} else {
+				compareSizes = false
+			}
+		}
+		if lcrc != e.crc {
+			diffs = append(diffs, "crc32 0x"+strconv.FormatUint(uint64(lcrc), 16)+" vs 0x"+strconv.FormatUint(uint64(e.crc), 16))
+		}
+		if compareSizes {
+			if lcomp != e.comp {
+				diffs = append(diffs, "compressed size "+itoa64(int64(lcomp))+" vs "+itoa64(int64(e.comp)))
+			}
+			if luncomp != e.uncomp {
+				diffs = append(diffs, "uncompressed size "+itoa64(int64(luncomp))+" vs "+itoa64(int64(e.uncomp)))
+			}
+		}
 	}
 	if len(diffs) > 0 {
 		extra := "local header disagrees with the central directory about " + strings.Join(diffs, ", ")
@@ -365,6 +403,42 @@ func resolveLocal(s source.Source, e zipEntry) (bodyOff int64, localName, mismat
 		}
 	}
 	return bodyOff, localName, mismatch, ""
+}
+
+// localZip64Sizes reads the local file header's zip64 extra field, which holds
+// the real uncompressed and compressed sizes when the 32-bit fields carry the
+// 0xFFFFFFFF sentinel. ok is false when the field is absent or unreadable, in
+// which case the caller must not compare sizes.
+func localZip64Sizes(s source.Source, localOff, nameLen, extraLen int64) (uncomp, comp uint64, ok bool) {
+	if extraLen <= 0 {
+		return 0, 0, false
+	}
+	off := localOff + 30 + nameLen
+	if off+extraLen > s.Size() {
+		return 0, 0, false
+	}
+	b, err := s.Bytes(off, extraLen)
+	if err != nil && int64(len(b)) < extraLen {
+		return 0, 0, false
+	}
+	for i := 0; i+4 <= len(b); {
+		id := le16(b[i:])
+		sz := int(le16(b[i+2:]))
+		i += 4
+		if i+sz > len(b) {
+			return 0, 0, false
+		}
+		if id == 0x0001 {
+			p := b[i : i+sz]
+			// The spec fixes the order: uncompressed, compressed, offset, disk.
+			if len(p) < 16 {
+				return 0, 0, false
+			}
+			return le64(p), le64(p[8:]), true
+		}
+		i += sz
+	}
+	return 0, 0, false
 }
 
 // openZipMember returns a reader over one member's decompressed bytes. It
