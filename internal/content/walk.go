@@ -201,13 +201,13 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 			tokenizer.AnalyzeJSON(ctx.Sink, 0, name, data)
 		}
 		chatTemplateRule(ctx, name, data)
-		stringscan.Emit(ctx.Sink, 0, data)
+		stringscan.EmitKind(ctx.Sink, 0, data, declarationKind(base))
 	case base == "tokenizer_config.json" || base == "special_tokens_map.json":
 		if !truncated {
 			tokenizer.AnalyzeJSON(ctx.Sink, 0, name, data)
 		}
 		chatTemplateRule(ctx, name, data)
-		stringscan.Emit(ctx.Sink, 0, data)
+		stringscan.EmitKind(ctx.Sink, 0, data, declarationKind(base))
 	case base == "chat_template.json" || base == "added_tokens.json":
 		// chat_template.json is the processor-side document that carries the same
 		// templates tokenizer_config.json does (MiniMax-H3's FL2VA/processor/
@@ -217,7 +217,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		if base == "chat_template.json" {
 			chatTemplateRule(ctx, name, data)
 		}
-		stringscan.Emit(ctx.Sink, 0, data)
+		stringscan.EmitKind(ctx.Sink, 0, data, declarationKind(base))
 	case isHFMetaName(base):
 		hfMeta(ctx, name, base, data, truncated)
 	case base == ".gitattributes":
@@ -227,6 +227,17 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		stringscan.Emit(ctx.Sink, 0, data)
 	}
 	return nil
+}
+
+// declarationKind is the indicator tier a raw tokenizer document is scanned with.
+// The five declaration files are scanned as KindDeclaration: they are where the
+// tokenizer defines `<|im_start|>` and `[INST]`, so the control-tag indicator
+// reports the file's own vocabulary. The instruction *phrases* still apply.
+func declarationKind(base string) stringscan.Kind {
+	if tokenizer.IsDeclarationName(base) {
+		return stringscan.KindDeclaration
+	}
+	return stringscan.KindText
 }
 
 // stringscanBytes runs the shared indicator engine over a raw buffer. It exists
