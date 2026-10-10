@@ -238,6 +238,13 @@
       ],
       "notes": "The wrapper declares 48 bytes of f8 but the payload carries 47, the gap SC4N-JOBLIB-WRAPPER-MISMATCH exists to expose."
     },
+    "joblib_zstd.joblib": {
+      "expect": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH",
+        "SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION"
+      ],
+      "notes": "A zstd stream named .joblib. joblib ships no zstd compressor (its magic table is \\x78, \\x1f\\x8b, BZ, \\xfd7zXZ, \\x5d\\x00, \\x04\\x22\\x4d\\x18 and ZF), so joblib.load cannot read it and the name really does contradict the content. This is the boundary of the .joblib exemption: the seven joblib accepts are plausible, anything else still reports."
+    },
     "keras_lambda.keras": {
       "expect": [
         "SC4N-KERAS-LAMBDA"
@@ -479,6 +486,12 @@
         "SC4N-PICKLE-BUILD-STATE"
       ],
       "notes": "STACK_GLOBAL os.system + REDUCE. The name never appears as the literal os.system in the bytes, so a scanner that greps for it finds nothing."
+    },
+    "pickle_gzip.pkl": {
+      "expect": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A gzip stream named .pkl holding a pickle. pickle.load does not transparently decompress, so the name lies about what a loader reading it gets — the same bytes under .joblib would be loadable and exempt. The finding is the extension check's purpose, not a false positive."
     },
     "pickle_leading_bytes.pkl": {
       "expect": [
