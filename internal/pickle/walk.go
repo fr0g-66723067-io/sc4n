@@ -1525,13 +1525,52 @@ func argPair(a any) (string, string, bool) {
 
 // latin1String widens each byte to a rune, matching CPython's latin-1 decode of a
 // STRING/BINSTRING payload.
+// latin1String renders bytes as text the way Python's Latin-1 codec would.
+//
+// It is only used for constants that are actually text. Decoding an arbitrary
+// 64 KiB binary constant — which is what the bulk of a state_dict pickle is — into
+// UTF-8 doubles its size and spends a per-rune loop on it, for a string the
+// indicator engine then reads byte by byte and never matches. Binary constants are
+// therefore handed over as a plain byte string: the engine's automaton is
+// byte-oriented, so the matches it can find are exactly the ASCII ones, and the
+// Latin-1 decode is only what makes the handful of non-ASCII indicators reachable
+// in text.
 func latin1String(b []byte) string {
-	var sb strings.Builder
-	sb.Grow(len(b))
-	for _, c := range b {
-		sb.WriteRune(rune(c))
+	if !mostlyText(b) {
+		return string(b)
 	}
-	return sb.String()
+	// Exact size first: a strings.Builder would double its buffer as the runes
+	// expand, which for a 64 KiB constant is megabytes of needless garbage.
+	n := 0
+	for _, c := range b {
+		if c < 0x80 {
+			n++
+		} else {
+			n += 2
+		}
+	}
+	out := make([]byte, 0, n)
+	for _, c := range b {
+		out = utf8.AppendRune(out, rune(c))
+	}
+	return string(out)
+}
+
+// mostlyText reports whether b is plausibly text rather than a binary blob. The
+// threshold is deliberately high: a tensor constant is binary almost throughout,
+// while a config or a tokenizer entry is printable almost throughout, and the two
+// want opposite treatment.
+func mostlyText(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	text := 0
+	for _, c := range b {
+		if c >= 0x20 && c < 0x7f || c == '\t' || c == '\n' || c == '\r' || c >= 0xa0 {
+			text++
+		}
+	}
+	return text*10 >= len(b)*9
 }
 
 func utf8String(b []byte) string { return string(b) }

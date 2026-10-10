@@ -4,95 +4,171 @@ import "strings"
 
 // Aho–Corasick over the indicator literals.
 //
-// Two design choices matter for the scanner's cost:
+// Three design choices matter for the scanner's cost:
 //
 //   - the automaton is built once at init from a data table, so adding an indicator
-//     costs one line and no per-scan work; and
-//   - case folding is *in* the automaton. Literals are stored lowercased and the
+//     costs one line and no per-scan work;
+//   - case folding is *in* the automaton: literals are stored lowercased and the
 //     walk lowercases each byte before its transition, so matching is
-//     case-insensitive without allocating a lowercased copy of a
-//     multi-gigabyte artifact.
+//     case-insensitive without allocating a lowercased copy of a multi-gigabyte
+//     artifact; and
+//   - the goto table is *class-compressed*.
 //
-// The goto table is a flat [256]int32 per node. At roughly 2.5k nodes that is
-// ~2.5 MB of resident memory, which is the price of a single-pass scan and is paid
-// once per process.
-
-type acNode struct {
-	// next is the goto table. Index 256 is the fail link, kept in the same array so
-	// that the walk touches one cache line per byte instead of two structures.
-	next [257]int32
-	// out holds the indexes into indicatorTable that end at this node.
-	out []int16
-}
+// The class compression is the non-obvious one. The textbook encoding is a
+// [256]int32 per node, which is a kilobyte per node and, on a 2.5k-node automaton,
+// 2.5 MB of resident memory: every byte then costs a jump into L3 or RAM, and the
+// measured rate on the reference host was 74 MB/s. Only the bytes that actually
+// appear inside some indicator ever have an edge, though — about seventy of the 256
+// — and a byte that appears in no indicator can never match anything at any node,
+// so its transition is always the root. So bytes are mapped to classes (0 means "no
+// indicator contains this byte"), each node carries one int16 per class, and fail
+// transitions are materialised at build time. The walk is then two dependent loads
+// and a multiply with no fail loop, and the whole table is a few hundred kilobytes:
+// the shallow states that running text actually visits stay in L1.
 
 type acAutomaton struct {
-	nodes []acNode
+	// class maps a *lowercased* byte to its column in table; 0 is "never matches".
+	class [256]byte
+	// cols is the number of columns in table (classes + the zero class).
+	cols int
+	// table is nodes x cols, flattened, with materialised fail transitions.
+	table []int16
+	// out holds the indexes into indicatorTable that end at each node, including
+	// those inherited from the fail chain.
+	out [][]int16
 }
 
 var automaton = buildAutomaton()
 
 func buildAutomaton() *acAutomaton {
-	a := &acAutomaton{nodes: make([]acNode, 1)}
-	for i := range a.nodes[0].next {
-		a.nodes[0].next[i] = 0
-	}
-	for idx, ind := range indicatorTable {
-		lit := strings.ToLower(ind.literal)
-		state := int32(0)
+	// Build on a sparse representation first: a map per node. This is build-time
+	// only, so its cost does not matter; only the flattened table does.
+	edges := []map[byte]int32{{}}
+	out := make([][]int16, 1)
+	state := int32(0)
+	for idx := range indicatorTable {
+		lit := strings.ToLower(indicatorTable[idx].literal)
+		state = 0
 		for i := 0; i < len(lit); i++ {
 			c := lit[i]
-			nxt := a.nodes[state].next[c]
-			if nxt == 0 {
-				a.nodes = append(a.nodes, acNode{})
-				nxt = int32(len(a.nodes) - 1)
-				for j := range a.nodes[nxt].next {
-					a.nodes[nxt].next[j] = 0
-				}
-				a.nodes[state].next[c] = nxt
+			next, ok := edges[state][c]
+			if !ok {
+				edges = append(edges, map[byte]int32{})
+				out = append(out, nil)
+				next = int32(len(edges) - 1)
+				edges[state][c] = next
 			}
-			state = nxt
+			state = next
 		}
-		a.nodes[state].out = append(a.nodes[state].out, int16(idx))
+		out[state] = append(out[state], int16(idx))
 	}
-	a.buildFailLinks()
+
+	a := &acAutomaton{out: make([][]int16, len(edges))}
+	for i := range edges {
+		if len(out[i]) > 0 {
+			a.out[i] = out[i]
+		}
+	}
+
+	// Class table: one column per byte value that occurs somewhere in the
+	// indicators, plus column 0 for everything else.
+	for i := range indicatorTable {
+		lit := strings.ToLower(indicatorTable[i].literal)
+		for j := 0; j < len(lit); j++ {
+			if a.class[lit[j]] == 0 {
+				a.class[lit[j]] = byte(a.cols)
+				a.cols++
+			}
+		}
+	}
+	a.cols++ // column 0
+	var value [256]byte
+	for c := 0; c < 256; c++ {
+		if a.class[c] != 0 {
+			value[a.class[c]] = byte(c)
+		}
+	}
+
+	// Failure links, breadth-first, over the sparse edges.
+	fail := make([]int32, len(edges))
+	queue := make([]int32, 0, len(edges))
+	for _, next := range sortedTargets(edges[0]) {
+		fail[next] = 0
+		queue = append(queue, next)
+	}
+	step := func(from int32, c byte) int32 {
+		for {
+			if next, ok := edges[from][c]; ok {
+				return next
+			}
+			if from == 0 {
+				return 0
+			}
+			from = fail[from]
+		}
+	}
+	for head := 0; head < len(queue); head++ {
+		cur := queue[head]
+		for _, e := range sortedEdges(edges[cur]) {
+			fail[e.next] = step(fail[cur], e.c)
+			if inherited := a.out[fail[e.next]]; len(inherited) > 0 {
+				a.out[e.next] = append(a.out[e.next], inherited...)
+			}
+			queue = append(queue, e.next)
+		}
+	}
+
+	// Flatten with every transition materialised, in BFS order so that the fail
+	// target's row is already written when a node's row is filled.
+	a.table = make([]int16, len(edges)*a.cols)
+	for col := 1; col < a.cols; col++ {
+		c := value[col]
+		if next, ok := edges[0][c]; ok {
+			a.table[col] = int16(next)
+		}
+	}
+	for head := 0; head < len(queue); head++ {
+		cur := queue[head]
+		base := int(cur) * a.cols
+		failBase := int(fail[cur]) * a.cols
+		copy(a.table[base:base+a.cols], a.table[failBase:failBase+a.cols])
+		for _, e := range sortedEdges(edges[cur]) {
+			a.table[base+int(a.class[e.c])] = int16(e.next)
+		}
+	}
 	return a
 }
 
-// buildFailLinks fills the fail transitions with a breadth-first sweep, then
-// replaces every unset goto with the fail target's goto so the walk needs no
-// per-byte fail loop.
-func (a *acAutomaton) buildFailLinks() {
-	queue := make([]int32, 0, len(a.nodes))
-	for c := 0; c < 256; c++ {
-		n := a.nodes[0].next[c]
-		if n == 0 {
-			continue
-		}
-		a.nodes[n].next[256] = 0
-		queue = append(queue, n)
-	}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		fail := a.nodes[cur].next[256]
-		if len(a.nodes[fail].out) > 0 {
-			a.nodes[cur].out = append(a.nodes[cur].out, a.nodes[fail].out...)
-		}
-		for c := 0; c < 256; c++ {
-			n := a.nodes[cur].next[c]
-			if n == 0 {
-				a.nodes[cur].next[c] = a.nodes[a.nodes[cur].next[256]].next[c]
-				continue
-			}
-			a.nodes[n].next[256] = a.nodes[fail].next[c]
-			queue = append(queue, n)
-		}
-	}
+type acEdge struct {
+	c    byte
+	next int32
 }
 
-// fold lowercases an ASCII byte for the transition. High bytes pass through, which
-// is what the non-ASCII indicators rely on.
-func fold(c byte) byte {
+func sortedEdges(m map[byte]int32) []acEdge {
+	out := make([]acEdge, 0, len(m))
+	for c, next := range m {
+		out = append(out, acEdge{c, next})
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j].c < out[j-1].c; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
+func sortedTargets(m map[byte]int32) []int32 {
+	es := sortedEdges(m)
+	out := make([]int32, len(es))
+	for i, e := range es {
+		out[i] = e.next
+	}
+	return out
+}
+
+// lowerASCII lowercases an ASCII byte. High bytes pass through, which is what the
+// non-ASCII indicators rely on.
+func lowerASCII(c byte) byte {
 	if c >= 'A' && c <= 'Z' {
 		return c + ('a' - 'A')
 	}
@@ -101,19 +177,14 @@ func fold(c byte) byte {
 
 // scanLiterals appends every literal match in b to hits.
 func (a *acAutomaton) scanLiterals(b []byte, hits []Hit) []Hit {
-	state := int32(0)
-	// seen deduplicates (rule, offset) pairs: several literals can belong to one
-	// rule and end at the same offset, and reporting the same rule twice at one
-	// offset is noise a reviewer has to filter by hand.
+	state := 0
 	for i := 0; i < len(b); i++ {
-		state = a.nodes[state].next[fold(b[i])]
-		if state == 0 {
+		state = int(a.table[state*a.cols+int(a.class[lowerASCII(b[i])])])
+		out := a.out[state]
+		if len(out) == 0 {
 			continue
 		}
-		if len(a.nodes[state].out) == 0 {
-			continue
-		}
-		for _, idx := range a.nodes[state].out {
+		for _, idx := range out {
 			ind := indicatorTable[idx]
 			start := int64(i+1) - int64(len(ind.literal))
 			if start < 0 {

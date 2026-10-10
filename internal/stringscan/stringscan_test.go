@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 )
@@ -297,5 +298,27 @@ func TestKernelHistogramAndEntropy(t *testing.T) {
 	}
 	if got := entropyBits(uniform); got < 7.99 {
 		t.Fatalf("entropy of a uniform 0..255 block = %v", got)
+	}
+}
+
+// TestURLHuntTerminatesOnBareH is a regression test for an infinite loop: the URL
+// hunt advances with two bytes.IndexByte calls that resume from the current index,
+// so a candidate that turns out not to be a URL must be stepped over explicitly.
+func TestURLHuntTerminatesOnBareH(t *testing.T) {
+	for _, in := range []string{
+		"h",
+		"hhh",
+		"http:/h h h h h h h h",
+		"a hostile hunch, hush hush hush",
+		"http://h",
+		"h https://example.com/x",
+	} {
+		done := make(chan []Hit, 1)
+		go func() { done <- Scan([]byte(in)) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Scan(%q) did not terminate", in)
+		}
 	}
 }

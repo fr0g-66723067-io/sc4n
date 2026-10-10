@@ -89,13 +89,29 @@ func truncate(s string, n int) string {
 }
 
 // sortedHits orders hits deterministically.
+//
+// The insertion sort for short slices is not a micro-optimisation for its own sake:
+// sort.SliceStable allocates a swapper, and a buffer with no indicators must cost
+// no allocation at all (TestScanIntoCostsNothingWhenThereIsNothingToReport).
 func sortedHits(hits []Hit) []Hit {
-	sort.SliceStable(hits, func(i, j int) bool {
+	if len(hits) < 2 {
+		return hits
+	}
+	less := func(i, j int) bool {
 		if hits[i].Off != hits[j].Off {
 			return hits[i].Off < hits[j].Off
 		}
 		return hits[i].Rule.ID < hits[j].Rule.ID
-	})
+	}
+	if len(hits) < 16 {
+		for i := 1; i < len(hits); i++ {
+			for j := i; j > 0 && less(j, j-1); j-- {
+				hits[j], hits[j-1] = hits[j-1], hits[j]
+			}
+		}
+		return hits
+	}
+	sort.SliceStable(hits, less)
 	return hits
 }
 
