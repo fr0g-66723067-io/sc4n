@@ -289,6 +289,13 @@ func looksLikePython(b string) bool {
 // pathEscapeReason reports why v cannot be a plain relative path inside the model
 // directory, or "" when it can. The check runs on the raw value: a '..' that
 // path.Clean would erase is still the value the loader sees.
+//
+// Every arm requires the shape a real path has, because this runs over printable
+// runs extracted from *tensor bytes*: a 40 KB Keras weights file produced seven
+// high-severity findings from runs like "d=t", "J:=J.", "~&=Sa" and "<:c>@_F"
+// before the arms were tightened. The measured false positives were a bare "~",
+// a drive letter whose first byte need not be a letter, and a 4-character
+// absolute path.
 func pathEscapeReason(v string) string {
 	if v == "" {
 		return ""
@@ -297,13 +304,16 @@ func pathEscapeReason(v string) string {
 		return "contains NUL"
 	}
 	switch {
-	case strings.HasPrefix(v, "/"):
+	case strings.HasPrefix(v, "/") && len(v) >= 5:
+		// "/etc/passwd" escapes; "d=t" does not.
 		return "absolute path"
-	case strings.HasPrefix(v, "~"):
+	case strings.HasPrefix(v, "~/") || strings.HasPrefix(v, `~\`):
+		// "~/.ssh/id_rsa" escapes; a bare "~" or "~&=Sa" does not.
 		return "home-relative path"
 	case strings.HasPrefix(v, `\\`):
 		return "UNC path"
-	case len(v) >= 2 && v[1] == ':':
+	case len(v) >= 4 && isDriveLetter(v[0]) && (v[1] == ':' || v[1] == '$') && (v[2] == '/' || v[2] == '\\'):
+		// "C:\x" and "C:/x" escape; "J:=J." and "d=t" do not.
 		return "drive letter"
 	}
 	if i := strings.Index(v, "://"); i > 0 && isSchemePrefix(v[:i]) {
@@ -313,6 +323,10 @@ func pathEscapeReason(v string) string {
 		return "'..' segment"
 	}
 	return ""
+}
+
+func isDriveLetter(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
 func isSchemePrefix(s string) bool {
@@ -387,11 +401,20 @@ func extractJSONObjects(data []byte, cap int64, max int) []jsonBlob {
 func scanExternalPaths(ctx *artifact.Ctx, base int64, data []byte) {
 	const maxHits = 8
 	hits := 0
+	// The runs come out of tensor bytes, so the floor is higher here than in
+	// printableRuns' other callers: the seven false positives measured on a 40 KB
+	// Keras weights file were 4 to 7 characters ("/d=t", "J:=J.", "~&=Sa"), and
+	// the shortest real path this caller has to keep is the fixture's
+	// "/etc/shadow" at 11. Eight is above every measured false positive and below
+	// every path.
 	for _, run := range printableRuns(data) {
 		if hits >= maxHits {
 			return
 		}
-		if len(run) < 4 {
+		if len(run) < 8 {
+			continue
+		}
+		if !strings.ContainsAny(run, `/\`) {
 			continue
 		}
 		why := pathEscapeReason(run)

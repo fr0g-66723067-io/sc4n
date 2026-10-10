@@ -344,6 +344,16 @@ func TestPathEscapeReason(t *testing.T) {
 		{"~/.ssh/id_rsa", "home-relative path"},
 		{"C:\\x", "drive letter"},
 		{"", ""},
+		// The false positives measured on a real 40 KB Keras weights file: these
+		// are printable runs out of tensor bytes, not paths.
+		{"~&=Sa", ""},
+		{"~?=t", ""},
+		{"~e=)", ""},
+		{"~k>Y", ""},
+		{"J:=J.", ""},
+		{"d=t", ""},
+		{"<:c>@_F", ""},
+		{"/d=t", ""},
 	}
 	for _, tc := range cases {
 		if got := pathEscapeReason(tc.in); got != tc.want {
