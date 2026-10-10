@@ -100,6 +100,12 @@ func writeBigSafetensors(tb testing.TB, dir string, size int64) string {
 		}
 		written += n
 	}
+	// Sync before returning: without it the timed scan competes with the
+	// writeback of the fixture the benchmark just wrote, and measures the disk
+	// rather than the scanner. The setup cost is deliberately outside the timing.
+	if err := f.Sync(); err != nil {
+		tb.Fatal(err)
+	}
 	if err := f.Close(); err != nil {
 		tb.Fatal(err)
 	}

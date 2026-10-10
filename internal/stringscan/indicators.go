@@ -30,6 +30,7 @@ func init() {
 	// report it in a metadata value. The dependency runs one way: stringscan knows
 	// about pickle's hook, and pickle knows nothing about this package.
 	pickle.StringScan = EmitString
+	pickle.BytesScan = Emit
 	pickle.StringUse = EmitUse
 }
 

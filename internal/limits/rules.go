@@ -149,3 +149,19 @@ var RuleSpill = report.DefineRule(report.Rule{
 		"not analysed, and the finding says so rather than leaving a reader to assume a clean member.",
 	Refs: []string{"https://cwe.mitre.org/data/definitions/770.html"},
 })
+
+// RuleRetained fires when an artifact's parse has retained as much text as it is
+// allowed to, so later values keep their length and kind but not their content.
+var RuleRetained = report.DefineRule(report.Rule{
+	ID:         "SC4N-LIMIT-RETAINED",
+	Title:      "Retained text exceeds MaxRetainedText",
+	Severity:   report.SeverityLow,
+	Confidence: report.ConfidenceHigh,
+	CWE:        []string{"CWE-770"},
+	Class:      "limits",
+	Description: "The parse has kept as much string/blob content alive as MaxRetainedText allows, so " +
+		"later values were recorded by length and kind without their text. Indicator matching still ran " +
+		"on each value as it was read; what is lost is the ability to re-inspect them later in the walk " +
+		"(and the evidence text for any finding that would have quoted them).",
+	Refs: []string{"https://cwe.mitre.org/data/definitions/770.html"},
+})

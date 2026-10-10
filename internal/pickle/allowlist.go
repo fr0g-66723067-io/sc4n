@@ -1,6 +1,9 @@
 package pickle
 
-import "strings"
+import (
+	"strings"
+	"sync"
+)
 
 // Allowlist by name, transcribed from PyTorch's weights-only unpickler.
 //
@@ -292,6 +295,37 @@ func resolveGlobal(module, name string) (string, string, bool) {
 	return module, name, remapped
 }
 
+// registeredAllowed holds the globals a format parser has declared safe *as data
+// constructors*. It exists because the allowlist is a policy about loaders, and a
+// format that legitimately uses a wrapper global is the format's own business:
+// joblib, for example, replaces every ndarray with
+// joblib.numpy_pickle.NumpyArrayWrapper, so a *benign* joblib file is
+// indistinguishable from a malicious one by global name alone — and reporting
+// every joblib array as a gadget would make the rule worthless.
+//
+// Registration is deliberately narrow: it adds a constructor to the allowlist, and
+// the parser that registers it is responsible for the payload that constructor
+// carries (internal/numpy walks the nested object-dtype pickle the wrapper can
+// hold). A registration is global and permanent for the process, which is why the
+// duplicate guard is a panic rather than a silent overwrite.
+var (
+	registeredMu      sync.Mutex
+	registeredAllowed = map[string]bool{}
+)
+
+// RegisterAllowedGlobal adds (module, name) to the allowlist consulted by
+// isAllowed. It panics if the pair is already registered, so the set of globals
+// sc4n treats as safe stays enumerable.
+func RegisterAllowedGlobal(module, name string) {
+	q := module + "." + name
+	registeredMu.Lock()
+	defer registeredMu.Unlock()
+	if registeredAllowed[q] {
+		panic("pickle: global already registered as allowed: " + q)
+	}
+	registeredAllowed[q] = true
+}
+
 // isAllowed evaluates the allowlist for a qualified name. The order of the checks
 // is the loader's order: blocked modules first, then the exact dictionary, then
 // the derived families.
@@ -300,7 +334,10 @@ func isAllowed(module, name string) AllowVerdict {
 		return AllowBlocked
 	}
 	q := module + "." + name
-	if allowedStatic[q] || allowedDtypes[q] || tensorClassNames[q] ||
+	registeredMu.Lock()
+	reg := registeredAllowed[q]
+	registeredMu.Unlock()
+	if reg || allowedStatic[q] || allowedDtypes[q] || tensorClassNames[q] ||
 		storageClassNames[q] || rebuildFunctions[q] || quantLayouts[q] {
 		return AllowDefault
 	}

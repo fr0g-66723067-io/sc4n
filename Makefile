@@ -36,10 +36,18 @@ test-simd:
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem ./...
 
-# Generates a 13 GiB F16 safetensors in $TMPDIR, scans it and asserts the wall
-# time and RSS budget from docs/architecture.md. Never committed.
+# Generates a 13 GiB F16 safetensors, scans it and asserts the wall-time and RSS
+# budget from docs/architecture.md. Never committed.
+#
+# Two environment knobs, both of which exist because the defaults are wrong on a
+# small machine: SC4N_BIG_DIR picks where the ~13 GiB fixture is written (it
+# defaults to $TMPDIR, which on the reference host is a 7.5 GiB tmpfs — point it
+# at a real filesystem) and SC4N_BIG_GB scales the fixture down for a smoke run.
+# The test skips loudly when the target has no room rather than shrinking itself.
+# -timeout is raised because writing 13 GiB on a slow disk takes minutes before
+# the scan is even timed.
 bench-big:
-	$(GO) test -tags=bigfixtures -run '^$$' -bench Big -benchtime 1x ./internal/scan
+	$(GO) test -tags=bigfixtures -run TestBigSafetensors -v -timeout 30m ./internal/scan
 
 # Regenerates testdata/fixtures. Deterministic: a second run produces no diff.
 fixtures:

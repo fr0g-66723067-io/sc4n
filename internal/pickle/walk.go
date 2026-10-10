@@ -24,6 +24,12 @@ import (
 // its own, and in the fuzz targets, without the tables linked.
 var StringScan = func(sink *report.Sink, off int64, text string) {}
 
+// BytesScan is installed by internal/stringscan alongside StringScan. It exists so
+// that a binary constant can be scanned without first being decoded into a string:
+// the automaton is byte-oriented, so the decode bought nothing for a tensor blob
+// and cost a copy of every one of them.
+var BytesScan = func(sink *report.Sink, off int64, b []byte) {}
+
 // StringUse is installed by internal/stringscan and called for a string that is an
 // argument to a named callable. It exists because one of the strongest shapes in
 // the whole engine is only visible with both halves at once: a long opaque literal
@@ -130,6 +136,10 @@ type walker struct {
 	// globals is keyed by qualified name so that a state_dict's hundreds of
 	// references to one rebuild function produce one finding.
 	globals map[string]*Global
+
+	// retained is how much text the walk is keeping alive, against
+	// Limits.MaxRetainedText.
+	retained int64
 
 	// structs deduplicates structural violations by kind.
 	structs map[string]*structStat
@@ -1092,19 +1102,61 @@ func (w *walker) stringValue(arg any, off int) Val {
 		s = s[:maxRetainString]
 	}
 	w.scanString(s, int64(off))
-	return Val{kind: kStr, text: s, n: full}
+	return Val{kind: kStr, text: w.retain(s), n: full}
 }
 
-// bytesValue builds a bytes value, keeping the raw bytes' text form for matching.
+// retain applies the walk's total retention budget. Indicator matching has already
+// run on the value by the time this is called, so what the budget costs is the
+// ability to re-inspect the text later in the walk — not the ability to see it at
+// all — and the truncation is reported once through SC4N-LIMIT-RETAINED rather
+// than being invisible.
+func (w *walker) retain(s string) string {
+	if w.lim.MaxRetainedText <= 0 || w.retained+int64(len(s)) <= w.lim.MaxRetainedText {
+		w.retained += int64(len(s))
+		return s
+	}
+	w.emitOnce("limit-retained", limits.RuleRetained, 0,
+		"retained text budget reached; later values keep their length and kind but not their text")
+	if len(s) > retainAfterBudget {
+		return s[:retainAfterBudget]
+	}
+	return s
+}
+
+// retainAfterBudget is how much of a value survives once the budget is spent. It
+// is enough for evidence to name the value and for a rule that inspects a prefix
+// (a magic, a `#!` line, an opcode word) to still work.
+const retainAfterBudget = 256
+
+// bytesValue builds a bytes value.
+//
+// A constant that is text is decoded and kept (subject to the retention budget),
+// because rules later in the walk inspect it — the ShadowPickle case is a code
+// string passed to an allowlisted callable. A constant that is binary is scanned
+// *in place*: the indicator engine reads bytes, so materialising a 64 KiB tensor
+// blob as a string only to scan it and drop it is pure waste, and on a
+// state_dict-shaped pickle that waste was the walk's largest allocation.
 func (w *walker) bytesValue(arg any, off int, kind valKind) Val {
 	b := argBytes(arg)
 	full := len(b)
 	if len(b) > maxRetainString {
 		b = b[:maxRetainString]
 	}
+	if !mostlyText(b) {
+		w.scanBytes(b, int64(off))
+		return Val{kind: kind, text: "", n: full}
+	}
 	s := latin1String(b)
 	w.scanString(s, int64(off))
-	return Val{kind: kind, text: s, n: full}
+	return Val{kind: kind, text: w.retain(s), n: full}
+}
+
+// scanBytes runs the indicator engine over a byte constant without decoding it.
+func (w *walker) scanBytes(b []byte, off int64) {
+	if w.silent || len(b) < 8 {
+		return
+	}
+	BytesScan(w.sink, off, b)
 }
 
 func (w *walker) scanString(s string, off int64) {
@@ -1556,21 +1608,49 @@ func latin1String(b []byte) string {
 	return string(out)
 }
 
+// textSample is how many bytes mostlyText looks at. A constant is either text
+// throughout (a config, a tokenizer entry) or binary throughout (tensor bytes), so
+// sampling the head answers the question, and sampling keeps this decision off the
+// walk's hot path: measured over the whole of a 64 KiB constant it was 28% of the
+// walk's CPU on a state_dict-shaped pickle, which is a lot of time to spend
+// deciding whether to run a decode that is usually skipped.
+const textSample = 4096
+
+// printable marks the bytes that count as text: printable ASCII, the three
+// whitespace controls, and the upper Latin-1 range that a Latin-1 decode would
+// expand. A table beats five comparisons in a per-byte loop.
+var printable = func() [256]bool {
+	var t [256]bool
+	for c := 0x20; c < 0x7f; c++ {
+		t[c] = true
+	}
+	t['\t'], t['\n'], t['\r'] = true, true, true
+	for c := 0xa0; c < 0x100; c++ {
+		t[c] = true
+	}
+	return t
+}()
+
 // mostlyText reports whether b is plausibly text rather than a binary blob. The
 // threshold is deliberately high: a tensor constant is binary almost throughout,
 // while a config or a tokenizer entry is printable almost throughout, and the two
 // want opposite treatment.
 func mostlyText(b []byte) bool {
-	if len(b) == 0 {
+	n := len(b)
+	if n == 0 {
 		return false
 	}
+	sample := b
+	if n > textSample {
+		sample = b[:textSample]
+	}
 	text := 0
-	for _, c := range b {
-		if c >= 0x20 && c < 0x7f || c == '\t' || c == '\n' || c == '\r' || c >= 0xa0 {
+	for _, c := range sample {
+		if printable[c] {
 			text++
 		}
 	}
-	return text*10 >= len(b)*9
+	return text*10 >= len(sample)*9
 }
 
 func utf8String(b []byte) string { return string(b) }

@@ -48,6 +48,14 @@ type Limits struct {
 	// JSON). Default 16 MiB.
 	MaxStringBlob int64
 
+	// MaxRetainedText caps the total text a single artifact's parse may keep
+	// alive for matching and evidence. Default 64 MiB. Per-value retention is
+	// already capped (MaxStringBlob, and the pickle engine's own 64 KiB per
+	// constant), but a structure with a million small values would still retain
+	// a gigabyte between them; this bounds the total. Past it, values keep their
+	// length and kind and lose their text, and SC4N-LIMIT-RETAINED says so.
+	MaxRetainedText int64
+
 	// MaxHashBytes caps how much of an artifact the scan digests. Default
 	// 256 MiB. The digest identifies an artifact and de-duplicates a blob
 	// reachable from several cache revisions; it is not a provenance proof, and
@@ -92,6 +100,7 @@ func Default() Limits {
 		MaxDecompressedBytes: 8 << 30,
 		MaxRatio:             200,
 		MaxStringBlob:        16 << 20,
+		MaxRetainedText:      64 << 20,
 		MaxHashBytes:         256 << 20,
 		MaxSpillBytes:        4 << 30,
 		MaxFindings:          100_000,
@@ -123,6 +132,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxStringBlob == 0 {
 		l.MaxStringBlob = d.MaxStringBlob
+	}
+	if l.MaxRetainedText == 0 {
+		l.MaxRetainedText = d.MaxRetainedText
 	}
 	if l.MaxHashBytes == 0 {
 		l.MaxHashBytes = d.MaxHashBytes
@@ -156,6 +168,7 @@ func (l Limits) Normalize() (Limits, error) {
 		{"MaxDecompressedBytes", l.MaxDecompressedBytes},
 		{"MaxRatio", l.MaxRatio},
 		{"MaxStringBlob", l.MaxStringBlob},
+		{"MaxRetainedText", l.MaxRetainedText},
 		{"MaxHashBytes", l.MaxHashBytes},
 		{"MaxSpillBytes", l.MaxSpillBytes},
 		{"MaxFindings", int64(l.MaxFindings)},
@@ -193,6 +206,9 @@ func (l *Limits) SetMaxDecompressedBytes(v int64) { l.MaxDecompressedBytes = v }
 
 // SetMaxRatio overrides the decompression ratio cap.
 func (l *Limits) SetMaxRatio(v int64) { l.MaxRatio = v }
+
+// SetMaxRetainedText overrides the retained-text cap.
+func (l *Limits) SetMaxRetainedText(v int64) { l.MaxRetainedText = v }
 
 // SetMaxHashBytes overrides the digest cap.
 func (l *Limits) SetMaxHashBytes(v int64) { l.MaxHashBytes = v }
