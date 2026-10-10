@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -469,5 +470,27 @@ func TestDigestFailureIsReported(t *testing.T) {
 	}
 	if digest != "" || scope != "" {
 		t.Fatalf("digest=%q scope=%q on failure, want both empty", digest, scope)
+	}
+}
+
+// TestSubFormatReportsBothFailures: the row's sub-format was an `else if`, so an
+// artifact that failed to parse and could not be hashed reported only the parse
+// error, leaving the empty digest unexplained.
+func TestSubFormatReportsBothFailures(t *testing.T) {
+	perr := errors.New("header: not a numpy file")
+	derr := errors.New("source: read failed")
+
+	both := subFormatFor(perr, derr)
+	if !strings.Contains(both, perr.Error()) || !strings.Contains(both, derr.Error()) {
+		t.Fatalf("both failures were not reported: %q", both)
+	}
+	if got := subFormatFor(perr, nil); got != "parse-error: "+perr.Error() {
+		t.Fatalf("parse-only sub-format = %q", got)
+	}
+	if got := subFormatFor(nil, derr); got != "digest unavailable: "+derr.Error() {
+		t.Fatalf("digest-only sub-format = %q", got)
+	}
+	if got := subFormatFor(nil, nil); got != "" {
+		t.Fatalf("a clean row carried a sub-format: %q", got)
 	}
 }

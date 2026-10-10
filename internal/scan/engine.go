@@ -483,14 +483,13 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	sum.SHA256Scope = scope
 	sum.Format = f.String()
 	sum.Revision = e.Revision
+	// A row can fail both ways, and each failure is a separate fact about it: the
+	// `else if` meant a parse failure hid the missing digest, which the report
+	// otherwise states rather than leaving an empty digest unexplained.
 	if perr != nil {
 		sess.Collector.For(name).EmitExtra(artifact.RuleParseFailed, 0, perr.Error(), nil)
-		sum.SubFormat = "parse-error: " + perr.Error()
-	} else if digestErr != nil {
-		// The artifact was read and parsed but could not be hashed, so the row
-		// must say why it carries no digest.
-		sum.SubFormat = "digest unavailable: " + digestErr.Error()
 	}
+	sum.SubFormat = subFormatFor(perr, digestErr)
 	if e.Digest != "" {
 		// A guard, not the primary mechanism: the hf-cache expander already
 		// de-duplicates a cache on the resolved blob path, so this normally never
@@ -505,6 +504,22 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 		}
 	}
 	return sum
+}
+
+// subFormatFor describes why a row was not fully scanned. A parse failure and a
+// digest failure are separate facts and can both be true, so neither may hide the
+// other: a row whose bytes could not be read for hashing says so even when the
+// parser also rejected it.
+func subFormatFor(perr, digestErr error) string {
+	switch {
+	case perr != nil && digestErr != nil:
+		return "parse-error: " + perr.Error() + "; digest unavailable: " + digestErr.Error()
+	case perr != nil:
+		return "parse-error: " + perr.Error()
+	case digestErr != nil:
+		return "digest unavailable: " + digestErr.Error()
+	}
+	return ""
 }
 
 // scanGuarded runs the dispatch and parser for one artifact, converting a parser
