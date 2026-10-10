@@ -53,14 +53,18 @@ func readWindow(s source.Source, off, n int64) Window {
 	return Window{Base: off, Data: b}
 }
 
-// MagicWindows returns the head and tail windows. When the artifact is no larger
-// than one window the tail coincides with the head and is omitted, so the same
-// bytes are never reported twice. It is exported for internal/native, which
-// applies the same bound to a native artifact.
+// MagicWindows returns the head and tail windows. The tail is emitted only when
+// it does not overlap the head: the tail range is [size-WindowBytes, size) and
+// the head's is [0, WindowBytes), so below two windows the tail is a subset of
+// the head, and emitting it would scan those bytes twice and report every
+// indicator in them once per window at the same offset. At exactly two windows
+// the two are disjoint and both are needed — the second window is not covered by
+// the head. It is exported for internal/native, which applies the same bound to a
+// native artifact.
 func MagicWindows(s source.Source, size int64) []Window {
 	head := readWindow(s, 0, WindowBytes)
 	out := []Window{head}
-	if size > WindowBytes {
+	if size >= 2*WindowBytes {
 		out = append(out, readWindow(s, size-WindowBytes, WindowBytes))
 	}
 	return out

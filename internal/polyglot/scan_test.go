@@ -262,3 +262,42 @@ func TestEvidenceIsBounded(t *testing.T) {
 		}
 	}
 }
+
+// TestMagicWindowsNeverOverlap pins the window bound. The tail range is
+// [size-WindowBytes, size) and the head's is [0, WindowBytes), so below two
+// windows the tail is a subset of the head: emitting it scanned the same bytes
+// twice and reported every indicator in the overlap once per window at the same
+// offset — a 1.5 MiB native artifact with one webhook produced two identical
+// SC4N-STRING-C2 findings. At exactly two windows the two are disjoint and the
+// tail is still needed, so the bound is "at least two windows", not "more than".
+func TestMagicWindowsNeverOverlap(t *testing.T) {
+	sizes := []int64{
+		0, 1, WindowBytes - 1, WindowBytes, WindowBytes + 1,
+		2*WindowBytes - 1, 2 * WindowBytes, 2*WindowBytes + 1,
+	}
+	for _, size := range sizes {
+		src := source.Mem("w.bin", deterministicNoise(int(size)))
+		ws := MagicWindows(src, size)
+		src.Close()
+		var ranges [][2]int64
+		for _, w := range ws {
+			ranges = append(ranges, [2]int64{w.Base, w.Base + int64(len(w.Data))})
+		}
+		for i := range ranges {
+			for j := i + 1; j < len(ranges); j++ {
+				if ranges[i][0] < ranges[j][1] && ranges[j][0] < ranges[i][1] {
+					t.Errorf("size %d: windows %v overlap", size, ranges)
+				}
+			}
+		}
+	}
+
+	// The second window of an exactly-two-window artifact must still be scanned:
+	// an ELF at the very end is reported.
+	data := deterministicNoise(2 * WindowBytes)
+	copy(data[len(data)-len(tinyELF()):], tinyELF())
+	got := ids(run(t, "two.bin", data, artifact.FormatSafetensors, 0))
+	if !got["SC4N-POLYGLOT-NATIVE"] {
+		t.Fatalf("the second window of a two-window artifact was not scanned; findings=%v", got)
+	}
+}
