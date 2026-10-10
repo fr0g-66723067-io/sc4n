@@ -48,9 +48,10 @@ the model:
 | Parsers | Bounded by `limits.Limits`; no allocation from an attacker-controlled length before it is validated against the bytes remaining; no panics (a parser panic is caught and reported as `SC4N-INTERNAL-PANIC` rather than killing the scan) |
 | Memory | One mapping per file, reused by every parser; large members are zero-copy sections or spilled to an unlinked temporary file (`source.Section`/`source.Spill`); anonymous RSS stays flat on multi-gigabyte artifacts |
 | Recursion | `MaxDepth` with a per-artifact budget; containers recurse, they do not loop |
-| Disk | Nothing is written except `-out`; spilled members are unlinked before they are mapped |
+| Disk | Nothing is written permanently except `-out`; a spilled member is materialised in an unlinked temporary file under `TMPDIR`, so it is never visible to another process and never left behind by a crash |
 | Execution | No `os/exec` in the tree; unsupported compression is *reported*, never delegated to a system tool |
 | Paths | Every path-shaped value that is resolved goes through `os.Root` containment; escape is `SC4N-PATH-ESCAPE`, never a silent read |
+| Output | The report is escaped, not echoed: every artifact path, evidence string and parser error goes through the same control-byte filter (ESC and other C0 bytes become a visible placeholder, tab and newline become spaces) and evidence is truncated at a rune boundary. JSON escapes them and SARIF percent-encodes them, so a crafted file name cannot inject terminal escapes into a CI log or split the text report's columns |
 
 ## 2. Taxonomy
 

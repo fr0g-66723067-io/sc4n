@@ -19,7 +19,9 @@ headers, Python source, chat templates, cards — and never by running anything.
   archive and `.bin` may be a pickle — the torch and Hugging Face save conventions —
   so neither is reported as a mismatch.
 - **Report-only.** sc4n never rewrites, repairs or quarantines an artifact. It
-  emits findings, plus an exit code a CI job can gate on.
+  emits findings, plus an exit code a CI job can gate on. The report itself is
+  escaped, not echoed: a crafted file name or evidence string cannot inject
+  terminal escapes into a log or reflow the text table.
 - **Bounded and deterministic.** One worker per artifact, a size-weighted memory
   budget, memory-mapped reads, and sorted output: two runs over the same bytes
   produce byte-identical JSON.
