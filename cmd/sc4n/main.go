@@ -7,7 +7,8 @@
 //	0  clean: no finding at or above -fail-on
 //	1  findings at or above -fail-on
 //	2  usage error
-//	3  a path the user named could not be opened (never a finding)
+//	3  a path the user named could not be opened, or the scan was cancelled by
+//	   -timeout (never a finding)
 package main
 
 import (
@@ -103,7 +104,8 @@ scan flags:
   -color                       force ANSI colour (text only; default: only on a terminal)
 
 exit codes: 0 clean, 1 findings at or above -fail-on, 2 usage error,
-            3 a named path could not be opened.
+            3 a named path could not be opened, or the scan was cancelled by
+            -timeout (the report then carries "cancelled": true).
 
 sc4n never executes, extracts or rewrites anything it scans; -out is the only path
 it writes permanently. A member too large to hold in memory is materialised in an
