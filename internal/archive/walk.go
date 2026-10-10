@@ -8,6 +8,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -57,7 +58,8 @@ const (
 type Members struct {
 	Format    artifact.Format
 	Members   []Member
-	Truncated bool // the member cap was hit
+	Truncated bool  // the member cap was hit
+	Trailing  int64 // bytes between the end-of-central-directory record and EOF
 }
 
 // ErrNotArchive is returned by Collect for content that is neither a zip nor a tar.
@@ -71,11 +73,11 @@ func Collect(s source.Source, l limits.Limits) (Members, error) {
 		return Members{}, ErrNotArchive
 	}
 	if looksZip(s, l) {
-		entries, truncated, err := readZipDirectory(s, l)
+		entries, info, err := readZipDirectory(s, l)
 		if err != nil {
 			return Members{}, err
 		}
-		ms := Members{Format: artifact.FormatZip, Truncated: truncated}
+		ms := Members{Format: artifact.FormatZip, Truncated: info.Truncated, Trailing: info.Trailing}
 		ms.Members = make([]Member, 0, len(entries))
 		for i := range entries {
 			e := &entries[i]
@@ -136,6 +138,11 @@ func (ms Members) Check(ctx *artifact.Ctx) {
 	}
 	if ms.Truncated {
 		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxEntries", int64(len(ms.Members)), int64(ctx.Limits.MaxEntries), "archive member cap reached")
+	}
+	if ms.Trailing > 0 {
+		ctx.Sink.EmitExtra(ruleArchiveTrailingData, 0,
+			strconv.FormatInt(ms.Trailing, 10)+" byte(s) follow the end-of-central-directory record, so the container and the appended region disagree about where it ends",
+			map[string]string{"trailingBytes": strconv.FormatInt(ms.Trailing, 10)})
 	}
 	seen := make(map[string]bool, len(ms.Members))
 	for i := range ms.Members {

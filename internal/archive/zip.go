@@ -56,19 +56,25 @@ func looksZip(s source.Source, l limits.Limits) bool {
 		_ = err
 		return true
 	}
-	_, err := findEOCD(s)
+	_, _, err := findEOCD(s)
 	return err == nil
 }
 
-// findEOCD returns the absolute offset of the end-of-central-directory record.
+// findEOCD returns the absolute offset of the end-of-central-directory record and
+// the number of bytes that follow it.
 //
 // Searching backwards for the signature and then requiring the comment length to
 // reach exactly the end of the file is what makes this robust against the
-// signature occurring inside member data.
-func findEOCD(s source.Source) (int64, error) {
+// signature occurring inside member data, so that exact match is tried first. A
+// zip with bytes appended after the EOCD (the polyglot shape) has no exact match;
+// the second pass accepts a candidate whose comment fits inside the file and
+// reports the trailing count so the caller can report it. Both passes scan
+// backwards, so the *last* plausible record wins, which is what the reference
+// readers do.
+func findEOCD(s source.Source) (int64, int64, error) {
 	size := s.Size()
 	if size < 22 {
-		return 0, errors.New("archive: file too small for a zip")
+		return 0, 0, errors.New("archive: file too small for a zip")
 	}
 	window := int64(22 + 65535)
 	if size < window {
@@ -77,32 +83,54 @@ func findEOCD(s source.Source) (int64, error) {
 	start := size - window
 	b, err := s.Bytes(start, window)
 	if err != nil && int64(len(b)) < window {
-		return 0, err
+		return 0, 0, err
 	}
+	trailing := int64(-1)
+	pos := int64(-1)
 	for i := len(b) - 22; i >= 0; i-- {
 		if le32(b[i:]) != sigEOCD {
 			continue
 		}
-		commentLen := int64(le16(b[i+20:]))
-		if start+int64(i)+22+commentLen != size {
+		end := start + int64(i) + 22 + int64(le16(b[i+20:]))
+		if end > size {
+			// The declared comment runs past EOF: not a record.
 			continue
 		}
-		return start + int64(i), nil
+		if end == size {
+			return start + int64(i), 0, nil
+		}
+		if trailing < 0 {
+			// The last plausible record wins, matching the reference readers.
+			pos, trailing = start+int64(i), size-end
+		}
 	}
-	return 0, errors.New("archive: no end-of-central-directory record")
+	if trailing >= 0 {
+		return pos, trailing, nil
+	}
+	return 0, 0, errors.New("archive: no end-of-central-directory record")
+}
+
+// zipDirInfo carries the directory-level facts a caller needs to report.
+type zipDirInfo struct {
+	// Truncated records that the member cap stopped the directory read.
+	Truncated bool
+	// Trailing is the number of bytes between the end of the
+	// end-of-central-directory record and the end of the file.
+	Trailing int64
 }
 
 // readZipDirectory parses the central directory without decompressing anything.
 // A corrupt container (no EOCD, malformed central record) is an error; a member
 // with a corrupt local header is not, and is reported later.
-func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, bool, error) {
-	eocdPos, err := findEOCD(s)
+func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, zipDirInfo, error) {
+	eocdPos, trailing, err := findEOCD(s)
 	if err != nil {
-		return nil, false, err
+		return nil, zipDirInfo{}, err
 	}
+	info := zipDirInfo{Trailing: trailing}
 	end, err := s.Bytes(eocdPos, 22)
 	if err != nil && len(end) < 22 {
-		return nil, false, err
+		return nil, zipDirInfo{}, err
 	}
 	entriesTotal := int64(le16(end[10:]))
 	cdSize := int64(le32(end[12:]))
@@ -156,21 +184,21 @@ func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, bool, error
 	// the arithmetic once keeps the loop (and the allocation) bounded by the file
 	// size rather than by a declared count.
 	if count > 0 && cdStart+46*count > s.Size() {
-		return nil, false, errors.New("archive: central directory truncated")
+		return nil, zipDirInfo{}, errors.New("archive: central directory truncated")
 	}
 
 	entries := make([]zipEntry, 0, min64int(count, 4096))
 	off := cdStart
 	for range count {
 		if off+46 > s.Size() {
-			return nil, false, errors.New("archive: central directory truncated")
+			return nil, zipDirInfo{}, errors.New("archive: central directory truncated")
 		}
 		hdr, err := s.Bytes(off, 46)
 		if err != nil && len(hdr) < 46 {
-			return nil, false, err
+			return nil, zipDirInfo{}, err
 		}
 		if le32(hdr) != sigCentral {
-			return nil, false, errors.New("archive: bad central directory record signature")
+			return nil, zipDirInfo{}, errors.New("archive: bad central directory record signature")
 		}
 		var e zipEntry
 		e.flags = le16(hdr[8:])
@@ -187,7 +215,7 @@ func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, bool, error
 
 		body, berr := s.Bytes(off, nameLen+extraLen+commentLen)
 		if berr != nil && int64(len(body)) < nameLen+extraLen+commentLen {
-			return nil, false, berr
+			return nil, zipDirInfo{}, berr
 		}
 		e.name = string(body[:nameLen])
 		if nameLen+extraLen <= int64(len(body)) {
@@ -200,7 +228,8 @@ func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, bool, error
 
 		entries = append(entries, e)
 	}
-	return entries, truncated, nil
+	info.Truncated = truncated
+	return entries, info, nil
 }
 
 // readZip64 parses the zip64 end-of-central-directory record and its locator.

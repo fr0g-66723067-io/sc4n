@@ -186,6 +186,29 @@ var (
 			"interpreter name so the reader can see what the artifact intended to run.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/78.html"},
 	})
+
+	// ruleArchiveTrailingData fires when bytes follow the zip's
+	// end-of-central-directory record. It is medium: appending to a zip is the
+	// standard polyglot trick (a file that is both a zip and something else), and
+	// the appended region is not described by the container's own directory, so a
+	// reader that stops at the EOCD and a reader that scans to EOF disagree about
+	// where the artifact ends.
+	ruleArchiveTrailingData = report.DefineRule(report.Rule{
+		ID:         "SC4N-ARCHIVE-TRAILING-DATA",
+		Title:      "Bytes follow the end-of-central-directory record",
+		Severity:   report.SeverityMedium,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-436"},
+		Class:      "structure",
+		Description: "The zip's end-of-central-directory record does not end at the end of the file: a " +
+			"region follows it. Appending bytes after the EOCD is the standard polyglot technique, and the " +
+			"appended region is invisible to a reader that trusts the central directory while a reader that " +
+			"scans the whole file sees it, so two tools can disagree about what the artifact contains. " +
+			"sc4n still walks the central directory (the members it describes are analysed), and reports " +
+			"the byte count so the appended region can be examined.",
+		Refs: []string{"https://cwe.mitre.org/data/definitions/436.html"},
+		Tags: []string{"polyglot", "structure"},
+	})
 )
 
 // algorithmName maps a zip compression method to the name used in evidence.

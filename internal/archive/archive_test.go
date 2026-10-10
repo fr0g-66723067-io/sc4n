@@ -586,3 +586,28 @@ func gzipBytes(t testing.TB, b []byte) []byte {
 	}
 	return buf.Bytes()
 }
+
+// TestZipTrailingDataIsScannedAndReported: bytes appended after the
+// end-of-central-directory record are the standard polyglot shape. The members
+// the central directory describes must still be walked, and the appended region
+// must be reported rather than making the whole container unreadable.
+func TestZipTrailingDataIsScannedAndReported(t *testing.T) {
+	data := buildZip(t, []zspec{
+		{name: "../evil.txt", data: []byte("x")},
+	}, false)
+	data = append(data, []byte("EVIL")...)
+
+	got := scanZip(t, "poly.zip", data, limits.Default())
+	want(t, got, "SC4N-ARCHIVE-PATH")
+	want(t, got, "SC4N-ARCHIVE-TRAILING-DATA")
+	forbid(t, got, "SC4N-PARSE-FAILED")
+
+	// The clean zip must not carry the rule.
+	clean := buildZip(t, []zspec{{name: "ok.txt", data: []byte("x")}}, false)
+	forbid(t, scanZip(t, "ok.zip", clean, limits.Default()), "SC4N-ARCHIVE-TRAILING-DATA")
+
+	// A prefix (the torch prefixed-archive shape) is not trailing data: the
+	// directory offsets are rebased, not appended to.
+	prefixed := append([]byte("STUB"), clean...)
+	forbid(t, scanZip(t, "stub.zip", prefixed, limits.Default()), "SC4N-ARCHIVE-TRAILING-DATA")
+}
