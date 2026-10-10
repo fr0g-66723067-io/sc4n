@@ -7,6 +7,13 @@
 // across function boundaries or through containers. That trade is the reason
 // sc4n can analyse Python with no Python on the host at all, and every rule
 // description states it, so a clean result is not read as a proof of safety.
+//
+// Cost is bounded by this package's own caps, not by the scan deadline: -timeout
+// is observed between artifacts (see internal/scan), never inside a parse, so a
+// single artifact must not be able to run without bound. capSource bounds the
+// buffer by MaxStringBlob, and the call analysis — the one quadratic walk here,
+// because parseArgs scans from a call's `(` to the end of its statement — is
+// bounded by maxCallTokens. Both truncations are reported rather than silent.
 package pysrc
 
 import "strings"
@@ -85,17 +92,19 @@ func Statements(src []byte, toks []Token) [][]Token {
 	return out
 }
 
-// Calls indexes the call expressions in one statement. A call is a dotted name
-// immediately followed by `(`. Every token of the callee's chain is consumed, so
-// that `os.system` yields one call (`os.system`) rather than two (`os.system` and
-// `system`), while a call nested inside another call's arguments is still found
-// because the scan does not skip the argument tokens. A chain that is not a call
-// is consumed as well, because none of its elements can be a call either and the
-// alternative re-walks the whole chain once per element.
-func Calls(src []byte, stmt []Token) []Call {
-	var calls []Call
+// Calls indexes the call expressions in one statement. budget bounds the number
+// of statement tokens the argument scans may read in total: parseArgs scans from
+// a call's `(` to the end of the statement, so one call costs O(len(stmt)) and a
+// statement of n nested calls costs O(n^2) — 60 000 nested `exec(` in one
+// statement measured over 60 s. It returns the calls found, the tokens read, and
+// whether the budget stopped the scan; a negative budget means unbounded, which
+// only tests use.
+//
+// The budget is checked *before* the scan it bounds, so the cost is bounded
+// rather than measured after the fact.
+func Calls(src []byte, stmt []Token, budget int64) (calls []Call, read int64, exhausted bool) {
 	if len(stmt) == 0 {
-		return nil
+		return nil, 0, false
 	}
 	consumed := make([]bool, len(stmt))
 	for i := range stmt {
@@ -122,6 +131,11 @@ func Calls(src []byte, stmt []Token) []Call {
 		if j+1 >= len(stmt) || !isOpenParen(src, stmt[j+1]) {
 			continue
 		}
+		cost := int64(len(stmt) - (j + 1))
+		if budget >= 0 && read+cost > budget {
+			return calls, read, true
+		}
+		read += cost
 		c := Call{
 			Dotted: strings.Join(parts, "."),
 			Off:    stmt[i].Off,
@@ -130,7 +144,7 @@ func Calls(src []byte, stmt []Token) []Call {
 		c.Args, c.Kwargs, c.argToks, c.kwToks = parseArgs(src, stmt, j+1)
 		calls = append(calls, c)
 	}
-	return calls
+	return calls, read, false
 }
 
 // parseArgs parses the argument list whose `(` is at stmt[open].

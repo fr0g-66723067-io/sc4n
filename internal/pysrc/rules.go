@@ -377,6 +377,7 @@ func analyze(ctx *artifact.Ctx, src []byte, cellLines []int) {
 		cell:       cellLines,
 		tainted:    map[string]bool{},
 		netTainted: map[string]bool{},
+		callBudget: maxCallTokens,
 	}
 	stmts := Statements(src, Lex(src))
 	for _, st := range stmts {
@@ -436,6 +437,46 @@ type analyzer struct {
 	// netTainted is the subset of tainted assigned from a network/download source,
 	// used by the pickle-load-of-remote-data rule.
 	netTainted map[string]bool
+	// callBudget is the statement tokens the call analysis may still scan; see
+	// maxCallTokens. callRead and callReported exist so the truncation is reported
+	// once, with the amount actually read.
+	callBudget   int64
+	callRead     int64
+	callReported bool
+}
+
+// maxCallTokens bounds the total statement tokens one artifact's call analysis
+// may scan. Calls is O(statement length) per call, because parseArgs scans from a
+// call's `(` to the end of the statement, so a statement of n nested calls is
+// O(n^2): 60 000 nested `exec(` in one statement (480 KB) measured over 60 s.
+// There is no deadline check inside a parser — the scan deadline is observed
+// between artifacts, by design — so a cap is what bounds the cost, not -timeout.
+//
+// The budget is about 40 ms of scanning and far above what a real module needs;
+// a file that exhausts it is reported (SC4N-LIMIT-ENTRIES) rather than analysed
+// at quadratic cost.
+const maxCallTokens = 1 << 24
+
+// callsFor indexes the statement's calls within the artifact's call-analysis
+// budget. Once the budget is exhausted the rest of the file gets no call
+// analysis, which is reported once so a truncated file is not read as clean.
+func (a *analyzer) callsFor(st []Token) []Call {
+	if a.callBudget <= 0 {
+		return nil
+	}
+	calls, read, exhausted := Calls(a.src, st, a.callBudget)
+	a.callBudget -= read
+	a.callRead += read
+	if !exhausted {
+		return calls
+	}
+	a.callBudget = 0
+	if !a.callReported {
+		a.callReported = true
+		limits.Emit(a.ctx.Sink, limits.RuleEntries, "MaxCallTokens", a.callRead, maxCallTokens,
+			"python call analysis stopped; later statements' calls were not indexed")
+	}
+	return calls
 }
 
 func (a *analyzer) at(off int32) (int, int) {
@@ -466,7 +507,7 @@ func (a *analyzer) stmt(st []Token) {
 			a.netTainted = map[string]bool{}
 		}
 	}
-	calls := Calls(a.src, st)
+	calls := a.callsFor(st)
 	text := spanText(a.src, Span{st[0].Off, st[len(st)-1].End})
 
 	// Loader lint and standalone obfuscation detectors run on every statement.
