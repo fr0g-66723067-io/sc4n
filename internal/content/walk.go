@@ -29,6 +29,7 @@ package content
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -165,8 +166,18 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	}
 	if !texty(data) {
 		// The fallback classifier called it text, but it is not valid UTF-8.
-		// Analysing arbitrary binary as text manufactures findings from random
-		// bytes, so nothing is reported.
+		// Analysing arbitrary binary as prose would manufacture findings from
+		// random bytes — a NUL-free symbol table such as cscope.out yields dozens
+		// of "injection" hits from its own symbol names — so the prose-shaped
+		// rules are skipped, as are the text-only layers (cards, tokenizer, jinja,
+		// the Unicode-anomaly pass). What still runs is the byte-safe tier: the
+		// literal table, the raw-IP URL hunt and the credential/secret
+		// assignments, which are structural and correct on any buffer. The skip
+		// itself is reported rather than the artifact being dropped in silence.
+		stringscan.EmitKind(ctx.Sink, 0, data, stringscan.KindSecrets)
+		ctx.Sink.EmitExtra(ruleNotUTF8, 0,
+			"the artifact is not valid UTF-8, so the text-only layers did not run",
+			map[string]string{"invalidAt": strconv.Itoa(firstInvalidUTF8(data))})
 		return nil
 	}
 
@@ -246,6 +257,20 @@ func texty(b []byte) bool {
 		return true
 	}
 	return false
+}
+
+// firstInvalidUTF8 returns the offset of the first byte that starts an invalid
+// UTF-8 sequence, or len(b) when the buffer is valid. It walks rune by rune so
+// the answer names the byte a reader can look at.
+func firstInvalidUTF8(b []byte) int {
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && size <= 1 {
+			return i
+		}
+		i += size
+	}
+	return len(b)
 }
 
 // looksLikeJSON reads one JSON token, which is enough to tell a JSON document

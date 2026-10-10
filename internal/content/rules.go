@@ -216,4 +216,28 @@ var (
 		},
 		Tags: []string{"gitattributes", "command-execution"},
 	})
+
+	// ruleNotUTF8 is low: the fallback classifier claimed the artifact as text
+	// (no NUL byte in its first kilobyte) but the bytes are not valid UTF-8, so
+	// the text-only layers — the model-card detector, the tokenizer analyser, the
+	// Jinja2 analyser and the Unicode-anomaly pass — cannot run on it. The
+	// byte-level indicators still run. Low because an invalid byte is usually an
+	// encoding accident; the finding exists so that the layers that did not run
+	// are visible instead of the artifact being dropped in silence.
+	ruleNotUTF8 = define(report.Rule{
+		ID:         "SC4N-CONTENT-NOT-UTF8",
+		Title:      "Text artifact is not valid UTF-8",
+		Severity:   report.SeverityLow,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-838"},
+		Class:      "content",
+		Description: "The artifact was classified as text (its first kilobyte holds no NUL byte) but its " +
+			"bytes are not valid UTF-8, so the text-only layers did not run: the model-card injection " +
+			"detector, the tokenizer analyser, the Jinja2 analyser and the Unicode-anomaly pass all " +
+			"require a valid UTF-8 document. The byte-level indicators (the literal table, the raw-IP " +
+			"URL hunt and the obfuscation pass) did run over the whole buffer and are reported " +
+			"alongside this finding. The offset of the first invalid byte is in the finding's extra " +
+			"data. Re-encode the file as UTF-8 to have the remaining layers applied.",
+		Tags: []string{"content", "encoding"},
+	})
 )

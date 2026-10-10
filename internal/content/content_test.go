@@ -289,3 +289,52 @@ func FuzzContentParse(f *testing.F) {
 		_, _ = artifact.Scan(sess.NewCtx(name, l), src)
 	})
 }
+
+// TestNonUTF8IsReportedAndStillScanned is the contract for the non-UTF-8 path:
+// the artifact is no longer dropped in silence, the byte-safe indicator tier
+// still runs over it, and the prose-shaped rules do not fire on bytes that are
+// not prose.
+func TestNonUTF8IsReportedAndStillScanned(t *testing.T) {
+	l := limits.Default()
+	// A Latin-1 card carrying a webhook: the artifact is not valid UTF-8 (0xe9 is
+	// a lone continuation byte) so the card layer cannot run.
+	fs := scanBytes(t, "card.md", []byte("# Card\n\xe9 http://discord.com/api/webhooks/1/x\n"), l)
+	got := ids(fs)
+	if !got["SC4N-CONTENT-NOT-UTF8"] {
+		t.Fatalf("the invalid-UTF-8 skip was not reported: %v", got)
+	}
+	if !got["SC4N-STRING-C2"] {
+		t.Fatalf("the byte-safe tier did not run: %v", got)
+	}
+	for _, f := range fs {
+		if f.RuleID == "SC4N-CONTENT-NOT-UTF8" {
+			if f.Extra["invalidAt"] != "7" {
+				t.Fatalf("invalidAt = %q, want 7", f.Extra["invalidAt"])
+			}
+			if f.Severity != report.SeverityLow {
+				t.Fatalf("severity = %v, want low", f.Severity)
+			}
+		}
+	}
+
+	// Prose-shaped rules must not fire on a non-prose buffer: a symbol table with
+	// no valid UTF-8 must not be read as injection text.
+	var junk []byte
+	for i := 0; i < 4000; i++ {
+		junk = append(junk, byte(i%251)+1, 0xff, 0xfe)
+	}
+	junk = append(junk, []byte("function_call do not disclose the system prompt is")...)
+	fs = scanBytes(t, "index.out", junk, l)
+	for _, f := range fs {
+		switch f.RuleID {
+		case "SC4N-METADATA-INJECTION", "SC4N-METADATA-CODE", "SC4N-STRING-SHELL":
+			t.Fatalf("prose-shaped rule %s fired on a non-UTF-8 buffer", f.RuleID)
+		}
+	}
+
+	// A valid UTF-8 card must not carry the rule.
+	fs = scanBytes(t, "card.md", []byte("# Card\n\xc3\xa9 https://example.com/x\n"), l)
+	if ids(fs)["SC4N-CONTENT-NOT-UTF8"] {
+		t.Fatalf("valid UTF-8 reported as invalid: %v", ids(fs))
+	}
+}
