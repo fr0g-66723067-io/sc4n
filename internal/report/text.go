@@ -73,6 +73,15 @@ func (r *Report) WriteText(w io.Writer, o TextOptions) error {
 			if a.Error != "" {
 				line[1] = "unreadable"
 				line[3] = a.Error
+			} else if a.SubFormat != "" {
+				// The sub-format carries why a row was not fully scanned — a
+				// parser failure, a duplicate blob, a row declared by a finding.
+				// Printing the bare format would show such a row as clean.
+				if a.Format == "" {
+					line[1] = a.SubFormat
+				} else {
+					line[1] = a.Format + " (" + a.SubFormat + ")"
+				}
 			}
 			if _, err := io.WriteString(tw, strings.Join(line, "\t")+"\n"); err != nil {
 				return err

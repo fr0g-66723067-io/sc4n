@@ -146,6 +146,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		if sum.Error != "" {
 			res.Unreadable = 1
 		}
+		noteFindingsCap(collector, l)
 		res.Timings["total_ms"] = report.Millis(time.Since(start))
 		return res, nil
 	}
@@ -236,6 +237,9 @@ func scanStdin(sess *artifact.Session, cfg Config, l limits.Limits) report.Artif
 	f, perr := scanGuarded(sess, src, name, l)
 	sum.Format = f.String()
 	if perr != nil {
+		// The same finding the file path emits: without it a -stdin run reports a
+		// clean row for an artifact whose parser failed.
+		sess.Collector.For(name).EmitExtra(ruleParseFailed, 0, perr.Error(), nil)
 		sum.SubFormat = "parse-error: " + perr.Error()
 	}
 	return sum
