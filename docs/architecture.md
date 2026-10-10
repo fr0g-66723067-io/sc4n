@@ -183,8 +183,7 @@ today, with the honest gaps marked.
 |---|---|---|---|
 | pickle walk, opcode-dense state_dict (4000 entries × 256 B) | ≥ 300 MB/s/core | **359 MB/s**, 14719 allocs/1.2 MB | per-opcode cost, not per-byte |
 | pickle walk, blob-dense (16 × 64 KiB constants) | — | **20 GB/s** | this is the shape a real torch storage pickle has |
-| entropy pass (256-bin count, full file) | ≥ 1 GB/s/core | **1.44 GB/s**, 0 allocs | the full-file pass, `bytescan.Entropy` |
-| byte-class histogram (tensor body / prose) | ≥ 1 GB/s/core | **0.10 / 0.53 GB/s**, 0 allocs | **not met**, and no detector calls it: the SIMD experiment's kernel, kept for the record |
+| entropy pass (256-bin count, full file) | ≥ 1 GB/s/core | **1.1-1.2 GB/s**, 0 allocs | the full-file pass, `bytescan.Entropy`, measured by `BenchmarkEntropy` |
 | indicator engine over prose + indicators | ≥ 1 GB/s/core | **131 MB/s** | **not met** — see below |
 | — of which: Aho–Corasick literals | — | 220 MB/s | one dependent load chain per byte |
 | — of which: Unicode anomaly walk | — | 550 MB/s | ASCII fast path, `utf8.DecodeRune` only for non-ASCII |
@@ -197,14 +196,14 @@ today, with the honest gaps marked.
 ### The one budget that is not met, and why
 
 The plan asked for a full-file string/entropy scan at ≥ 1 GB/s per core. The
-entropy pass meets it (1.44 GB/s). The indicator engine does not: a byte-at-a-time
-Aho–Corasick walk is a *dependent* chain — the transition for byte *i+1* cannot
-start until byte *i*'s table load has completed — and that chain costs about 4.5 ns
-per byte on this CPU regardless of how the table is laid out. The obvious encoding
-(`[256]int32` per node) was measured at 74 MB/s; class-compressing the goto table
-so that only the ~70 bytes that actually occur in an indicator get a column, and
-materialising fail transitions so the walk has no fail loop, brought it to
-220 MB/s; the ASCII fast paths in the Unicode and URL scanners removed the two
+entropy pass meets it (1.1-1.2 GB/s, `BenchmarkEntropy`). The indicator engine does
+not: a byte-at-a-time Aho–Corasick walk is a *dependent* chain — the transition for
+byte *i+1* cannot start until byte *i*'s table load has completed — and that chain
+costs about 4.5 ns per byte on this CPU regardless of how the table is laid out. The
+obvious encoding (`[256]int32` per node) was measured at 74 MB/s; class-compressing
+the goto table so that only the ~70 bytes that actually occur in an indicator get a
+column, and materialising fail transitions so the walk has no fail loop, brought it
+to 220 MB/s; the ASCII fast paths in the Unicode and URL scanners removed the two
 scanners that were *slower* than the automaton.
 
 What is not on that path, and why the end-to-end number is what it is: the
@@ -245,13 +244,15 @@ build tag with a pure-stdlib counterpart and each shipped only if `make bench`
 showed at least 1.5× on its own kernel. **Neither is shipped**, and the reasons are
 measurements rather than opinions:
 
-- **SIMD byte-class histogram** (`goexperiment.simd`, `simd/archsimd`): the kernel
-  it would accelerate has no caller. No detector reads the byte-class histogram —
-  the entropy pass over the same bytes is `bytescan.Entropy`, whose 256-bin count
-  runs at 1.44 GB/s — and the string engine's bottleneck is the automaton's
-  dependent load chain, which a histogram kernel does not touch. Measured, the
-  histogram itself is 0.10 GB/s on tensor-body bytes and 0.53 GB/s on prose, so
-  there was no kernel for it to accelerate by 1.5× on the path that runs.
+- **SIMD byte-class histogram** (`goexperiment.simd`, `simd/archsimd`): evaluated,
+  dropped, and then deleted. No detector reads a byte-class histogram — the entropy
+  pass over the same bytes is `bytescan.Entropy`, whose 256-bin count runs at
+  1.1-1.2 GB/s — and the string engine's bottleneck is the automaton's dependent load
+  chain, which a histogram kernel does not touch. Measured before it was removed, the
+  histogram itself ran at 0.10 GB/s on tensor-body bytes and 0.53 GB/s on prose: an
+  order of magnitude below the ≥ 1 GB/s budget, with no caller that wanted it. There
+  was nothing for a SIMD kernel to accelerate, so the kernel is gone from the tree
+  and this note is the record of why.
 - **`encoding/json/v2` header decoding** (`goexperiment.jsonv2`): the header decode
   is microseconds per artifact against a scan dominated by I/O and hashing, so no
   end-to-end win was measurable.

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 )
 
@@ -279,24 +280,21 @@ func TestEmitSetsAbsoluteOffsets(t *testing.T) {
 	}
 }
 
-func TestKernelHistogramAndEntropy(t *testing.T) {
-	var counts [7]int64
-	b := []byte("abc123 \xff\x00")
-	histogram(b, &counts)
-	if counts[classLower] != 3 || counts[classDigit] != 3 || counts[classSpace] != 1 || counts[classHigh] != 1 || counts[classOther] != 1 {
-		t.Fatalf("histogram = %v", counts)
-	}
-	if got := entropyBits([]byte("aaaaaaaa")); got != 0 {
+func TestKernelEntropyBounds(t *testing.T) {
+	// The Shannon entropy of a constant block is 0, of an empty block 0, and of a
+	// block holding every byte value once is 8 — the pass the string engine's
+	// callers use (bytescan.Entropy) has to agree with those three anchors.
+	if got := bytescan.Entropy([]byte("aaaaaaaa")); got != 0 {
 		t.Fatalf("entropy of a constant = %v", got)
 	}
-	if got := entropyBits(nil); got != 0 {
+	if got := bytescan.Entropy(nil); got != 0 {
 		t.Fatalf("entropy of nothing = %v", got)
 	}
 	uniform := make([]byte, 256)
 	for i := range uniform {
 		uniform[i] = byte(i)
 	}
-	if got := entropyBits(uniform); got < 7.99 {
+	if got := bytescan.Entropy(uniform); got < 7.99 {
 		t.Fatalf("entropy of a uniform 0..255 block = %v", got)
 	}
 }

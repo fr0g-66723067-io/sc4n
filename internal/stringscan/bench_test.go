@@ -54,69 +54,6 @@ func BenchmarkScanIndicators(b *testing.B) {
 	_ = dst
 }
 
-// benchKernelCorpus builds the buffer the full-file histogram/entropy pass sees:
-// a checkpoint body, i.e. bytes with no text structure to predict. It is a
-// deterministic LCG, so the measurement is reproducible.
-func benchKernelCorpus(n int) []byte {
-	b := make([]byte, n)
-	x := uint32(0x2545f491)
-	for i := range b {
-		x = x*1664525 + 1013904223
-		b[i] = byte(x >> 24)
-	}
-	return b
-}
-
-// BenchmarkKernelHistogram measures the byte-class histogram on the two shapes it
-// could be applied to: a checkpoint body (bytes with no text structure to predict)
-// and prose. It is the measurement behind the throughput figure quoted in
-// docs/architecture.md, the Makefile and kernel.go's header: those sites agreed on
-// no single number, and nothing in the tree measured it.
-func BenchmarkKernelHistogram(b *testing.B) {
-	for _, tc := range []struct {
-		name string
-		buf  []byte
-	}{
-		{"tensor-body", benchKernelCorpus(1 << 20)},
-		{"text", benchCorpus(1 << 20)},
-	} {
-		b.Run(tc.name, func(b *testing.B) {
-			var counts [7]int64
-			b.SetBytes(int64(len(tc.buf)))
-			b.ReportAllocs()
-			b.ResetTimer()
-			for b.Loop() {
-				histogram(tc.buf, &counts)
-			}
-			_ = counts
-		})
-	}
-}
-
-// BenchmarkKernelEntropy measures the Shannon entropy pass — the 256-bin count —
-// over the same two shapes. It is the other half of the same row in
-// docs/architecture.md.
-func BenchmarkKernelEntropy(b *testing.B) {
-	for _, tc := range []struct {
-		name string
-		buf  []byte
-	}{
-		{"tensor-body", benchKernelCorpus(1 << 20)},
-		{"text", benchCorpus(1 << 20)},
-	} {
-		b.Run(tc.name, func(b *testing.B) {
-			b.SetBytes(int64(len(tc.buf)))
-			b.ReportAllocs()
-			b.ResetTimer()
-			var h float64
-			for b.Loop() {
-				h = entropyBits(tc.buf)
-			}
-			_ = h
-		})
-	}
-}
-
 // TestScanIntoCostsNothingWhenThereIsNothingToReport is the plan's zero-allocation
 // assertion for the shared engine. It is exact rather than a bound because the
 // engine's contract on the hot path is that a clean buffer costs no allocation at
