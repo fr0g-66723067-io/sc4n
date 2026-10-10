@@ -73,6 +73,11 @@ type baselineReport struct {
 		RuleID   string `json:"ruleId"`
 		Artifact string `json:"artifact"`
 		Evidence string `json:"evidence"`
+		// Offset and EvidenceRedacted are carried because a redacted finding's
+		// identity is its position (its evidence is a constant mask), so the
+		// fingerprint of a redacted finding is built from the offset.
+		Offset           int64 `json:"offset"`
+		EvidenceRedacted bool  `json:"evidenceRedacted"`
 	} `json:"findings"`
 }
 
@@ -82,7 +87,9 @@ type baselineReport struct {
 // The fingerprint is (rule, artifact, hash of the evidence window) and
 // deliberately excludes the byte offset: editing an unrelated part of a file
 // shifts every later offset, and a baseline that un-suppresses on such an edit is
-// worse than no baseline at all.
+// worse than no baseline at all. A redacted finding is the exception — its
+// evidence is a constant mask, so its position is its identity — which is why the
+// offset is decoded here and passed to Fingerprint.
 func LoadBaseline(path string) (map[string]bool, error) {
 	blob, err := os.ReadFile(path)
 	if err != nil {
@@ -98,9 +105,11 @@ func LoadBaseline(path string) (map[string]bool, error) {
 	out := make(map[string]bool, len(doc.Findings))
 	for _, f := range doc.Findings {
 		out[report.Fingerprint(report.Finding{
-			RuleID:   f.RuleID,
-			Artifact: f.Artifact,
-			Evidence: f.Evidence,
+			RuleID:           f.RuleID,
+			Artifact:         f.Artifact,
+			Evidence:         f.Evidence,
+			Offset:           f.Offset,
+			EvidenceRedacted: f.EvidenceRedacted,
 		})] = true
 	}
 	return out, nil

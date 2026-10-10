@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -361,14 +362,26 @@ func colOf(f Finding) int {
 // the byte offset, because editing an unrelated part of a file shifts every later
 // offset and would otherwise un-suppress an entire baseline. The evidence is
 // hashed rather than embedded so a baseline never contains payload text.
+//
+// A *redacted* finding is the exception: its evidence is a constant masking
+// string, so without a position every redacted finding of one rule in one file
+// collides, and baselining a file with two secrets then suppresses a third secret
+// added later. For a redacted finding the byte offset is the only identity it has,
+// and the offset-stability argument above is about evidence windows, not about
+// secrets: a secret's identity is where it sits.
 func Fingerprint(f Finding) string {
-	sum := sha256.Sum256([]byte(f.Evidence))
 	var b strings.Builder
 	b.Grow(len(f.RuleID) + len(f.Artifact) + 40)
 	b.WriteString(f.RuleID)
 	b.WriteByte('\x00')
 	b.WriteString(f.Artifact)
 	b.WriteByte('\x00')
+	if f.EvidenceRedacted {
+		b.WriteString("at:")
+		b.WriteString(strconv.FormatInt(f.Offset, 10))
+		return b.String()
+	}
+	sum := sha256.Sum256([]byte(f.Evidence))
 	b.WriteString(hex.EncodeToString(sum[:12]))
 	return b.String()
 }

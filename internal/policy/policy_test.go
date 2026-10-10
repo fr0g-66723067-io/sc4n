@@ -138,3 +138,53 @@ func TestRuleCountsOrdersByCountThenName(t *testing.T) {
 		t.Fatalf("ties are not broken by name: %+v", got)
 	}
 }
+
+// TestBaselineRedactedFindingUsesOffset: a redacted finding's evidence is a
+// constant mask, so without the offset every redacted finding of one rule in one
+// file shares a fingerprint — baselining a file with two secrets then suppressed a
+// third secret added later, and the baseline reported a clean run.
+func TestBaselineRedactedFindingUsesOffset(t *testing.T) {
+	c := report.NewCollector(0)
+	s := c.For("secrets.txt")
+	r := report.DefineRule(report.Rule{
+		ID: "SC4N-TEST-REDACTED", Title: "t", Severity: report.SeverityHigh,
+		Confidence: report.ConfidenceHigh, Class: "test", Description: "d",
+	})
+	s.EmitRedacted(r, 0, "a secret assignment", nil)
+	s.EmitRedacted(r, 63, "a secret assignment", nil)
+
+	rep := report.Build(report.Tool{Name: "sc4n", Version: "t"}, "", nil, c, report.Limits{}, nil, 0)
+	path := filepath.Join(t.TempDir(), "base.json")
+	var buf bytes.Buffer
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base, err := LoadBaseline(path)
+	if err != nil {
+		t.Fatalf("LoadBaseline: %v", err)
+	}
+
+	same := []report.Finding{
+		{RuleID: r.ID, Artifact: "secrets.txt", Evidence: "a secret assignment", Offset: 0, EvidenceRedacted: true},
+		{RuleID: r.ID, Artifact: "secrets.txt", Evidence: "a secret assignment", Offset: 63, EvidenceRedacted: true},
+	}
+	kept, suppressed := Unsuppressed(same, base)
+	if len(kept) != 0 || suppressed != 2 {
+		t.Fatalf("unchanged file: kept %d, suppressed %d; want 0, 2", len(kept), suppressed)
+	}
+
+	// A third secret added after the two baselined ones must not be suppressed by
+	// their shared evidence string.
+	added := append(append([]report.Finding{}, same...),
+		report.Finding{RuleID: r.ID, Artifact: "secrets.txt", Evidence: "a secret assignment", Offset: 126, EvidenceRedacted: true})
+	kept, suppressed = Unsuppressed(added, base)
+	if len(kept) != 1 || suppressed != 2 {
+		t.Fatalf("third secret: kept %d, suppressed %d; want 1, 2", len(kept), suppressed)
+	}
+	if kept[0].Offset != 126 {
+		t.Fatalf("kept the wrong finding: offset %d", kept[0].Offset)
+	}
+}
