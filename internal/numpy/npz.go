@@ -98,14 +98,22 @@ func (npzParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 func dispatchMember(ctx *artifact.Ctx, s source.Source, m archive.Member, max int64) {
 	rc, err := archive.Open(s, ctx.Limits, m)
 	if err != nil {
-		ctx.Sink.Emit(RuleStruct, 0, "npz member "+snippet(m.Name)+" cannot be read: "+err.Error())
+		archive.EmitOpenError(ctx, m.Name, err)
 		return
 	}
 	probe, rerr := io.ReadAll(io.LimitReader(rc, max+1))
 	if rerr != nil && len(probe) == 0 {
 		rc.Close()
-		ctx.Sink.Emit(RuleStruct, 0, "npz member "+snippet(m.Name)+" cannot be read: "+rerr.Error())
+		archive.EmitOpenError(ctx, m.Name, rerr)
 		return
+	}
+	if rerr != nil {
+		// Some bytes arrived but the member did not read to its declared end — a
+		// limit, or a checksum mismatch. The archive layer's limitReader returns a
+		// *LimitError rather than emitting, so reporting is the caller's job; the
+		// zip path does exactly this and then scans the prefix that arrived. Doing
+		// it here too means a truncated member is never parsed as if complete.
+		archive.EmitOpenError(ctx, m.Name, rerr)
 	}
 	if int64(len(probe)) > max {
 		cap := ctx.Limits.MaxSpillBytes

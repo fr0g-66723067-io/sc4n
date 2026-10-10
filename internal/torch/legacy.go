@@ -192,11 +192,17 @@ func readMemberBounded(ctx *artifact.Ctx, s source.Source, m archive.Member) ([]
 	}
 	rc, err := archive.Open(s, ctx.Limits, m)
 	if err != nil {
+		// The generic archive walker reports exactly this condition; a legacy tar
+		// member that cannot be opened must not be dropped in silence, or a .pth
+		// truncated inside its pickle member is parsed as an empty structure with
+		// no findings.
+		archive.EmitOpenError(ctx, m.Name, err)
 		return nil, false
 	}
 	defer rc.Close()
 	data, err := io.ReadAll(io.LimitReader(rc, max+1))
 	if err != nil {
+		archive.EmitOpenError(ctx, m.Name, err)
 		return nil, false
 	}
 	if int64(len(data)) > max {

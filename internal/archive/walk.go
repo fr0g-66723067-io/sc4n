@@ -308,7 +308,7 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 		if m.Method == 0 && m.Size > max {
 			src, err := source.Section(s, m.dataOff, m.CompressedSize, m.Name)
 			if err != nil {
-				emitOpenError(ctx, m.Name, err)
+				EmitOpenError(ctx, m.Name, err)
 				continue
 			}
 			checkNativeShebang(ctx, m.Name, sourcePrefix(src))
@@ -329,7 +329,7 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 		}
 		rc, err := Open(s, ctx.Limits, m)
 		if err != nil {
-			emitOpenError(ctx, m.Name, err)
+			EmitOpenError(ctx, m.Name, err)
 			continue
 		}
 		// The zip member's expansion is already bounded by the ratio cap in
@@ -470,7 +470,7 @@ func processReader(ctx *artifact.Ctx, name string, declared, stretch int64, r io
 		// it is still meaningful.
 		artifact.ScanMemberBytes(ctx, name, probe)
 	default:
-		emitOpenError(ctx, name, rerr)
+		EmitOpenError(ctx, name, rerr)
 		scanPrefix(ctx, name, probe)
 	}
 	return n
@@ -578,8 +578,12 @@ func sourcePrefix(s source.Source) []byte {
 	return b[:n]
 }
 
-// emitOpenError classifies a failure to open/read a member.
-func emitOpenError(ctx *artifact.Ctx, name string, err error) {
+// EmitOpenError classifies a failure to open or read a member and reports it. It
+// is exported because the container parsers that read members themselves
+// (internal/torch's legacy tar, internal/numpy's npz) must report the same way the
+// generic walker does: a member that cannot be read is a finding, never a silent
+// skip, or a truncated member is parsed as if it were complete.
+func EmitOpenError(ctx *artifact.Ctx, name string, err error) {
 	var le *LimitError
 	var um *unsupportedMethodError
 	switch {
@@ -608,7 +612,7 @@ func scanCompressed(ctx *artifact.Ctx, s source.Source) error {
 	}
 	r, closer, err := decompressor(s, ctx.Limits, c)
 	if err != nil {
-		emitOpenError(ctx, ctx.Sink.Artifact(), err)
+		EmitOpenError(ctx, ctx.Sink.Artifact(), err)
 		return nil
 	}
 	if closer != nil {
