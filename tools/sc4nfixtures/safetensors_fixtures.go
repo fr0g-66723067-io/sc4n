@@ -15,8 +15,8 @@ import (
 // format has no field for).
 func init() {
 	register(contributor{
-		name:      "safetensors",
-		fixtures:  safetensorsFixtures,
+		name:     "safetensors",
+		fixtures: safetensorsFixtures,
 		expectations: func() (malicious, benign map[string]expectation) {
 			return safetensorsExpectations(), safetensorsBenignExpectations()
 		},

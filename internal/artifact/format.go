@@ -79,7 +79,6 @@ const (
 	FormatMarkdown
 	FormatYAML
 	FormatText
-	FormatWheel // a .whl/.tar.gz archive scanned as a package
 
 	// Executables.
 	FormatNative // ELF / PE / Mach-O / OLE, identified by magic
@@ -127,7 +126,6 @@ var formatNames = map[Format]string{
 	FormatMarkdown:         "markdown",
 	FormatYAML:             "yaml",
 	FormatText:             "text",
-	FormatWheel:            "python-wheel",
 	FormatNative:           "native",
 }
 
@@ -291,7 +289,7 @@ var extensions = map[string][]Format{
 	"pickle":      {FormatPickle, FormatJoblib},
 	"pcl":         {FormatPickle},
 	"joblib":      {FormatJoblib},
-	"pt":          {FormatTorchNew, FormatTorchLegacy, FormatTorchScript, FormatPT2, FormatPickle, FormatSevenZip, FormatZip},
+	"pt":          {FormatTorchNew, FormatTorchLegacy, FormatTorchScript, FormatPT2, FormatPickle, FormatSevenZip, FormatZip, FormatNPZ},
 	"pth":         {FormatTorchNew, FormatTorchLegacy, FormatPickle, FormatPython},
 	"ptl":         {FormatTorchScript, FormatPTE, FormatPickle},
 	"pt2":         {FormatPT2, FormatZip},
@@ -307,12 +305,12 @@ var extensions = map[string][]Format{
 	"tflite":      {FormatTFLite},
 	"h5":          {FormatHDF5},
 	"hdf5":        {FormatHDF5},
-	"keras":       {FormatKeras, FormatZip},
+	"keras":       {FormatKeras, FormatZip, FormatNPZ},
 	"mlmodel":     {FormatCoreML},
 	"mlpackage":   {FormatCoreML},
 	"msgpack":     {FormatMsgpack},
 	"ubj":         {FormatXGBoostUBJ},
-	"json":        {FormatJSON, FormatXGBoostUBJ},
+	"json":        {FormatJSON, FormatXGBoostUBJ, FormatTFSavedModel, FormatNotebook},
 	"zip":         {FormatZip, FormatTorchNew, FormatPT2, FormatKeras, FormatNPZ, FormatTorchScript},
 	"tar":         {FormatTar},
 	"gz":          {FormatGzip},
@@ -325,6 +323,7 @@ var extensions = map[string][]Format{
 	"py":          {FormatPython},
 	"ipynb":       {FormatNotebook},
 	"jinja":       {FormatJinja, FormatText},
+	"jinja2":      {FormatJinja, FormatText},
 	"j2":          {FormatJinja, FormatText},
 	"tmpl":        {FormatJinja, FormatText},
 	"md":          {FormatMarkdown, FormatText},
@@ -332,13 +331,12 @@ var extensions = map[string][]Format{
 	"yml":         {FormatYAML, FormatText},
 	"txt":         {FormatText},
 	"jsonl":       {FormatJSONLines},
-	"whl":         {FormatWheel, FormatZip},
+	"whl":         {FormatZip, FormatNPZ},
 	"so":          {FormatNative},
 	"dll":         {FormatNative},
 	"dylib":       {FormatNative},
 	"exe":         {FormatNative},
 	"start":       {FormatText},
-	"pth.txt":     {FormatText},
 }
 
 // ExtensionPlausible reports whether the sniffed format is a plausible content

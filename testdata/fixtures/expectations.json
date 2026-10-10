@@ -192,6 +192,15 @@
       ],
       "notes": "model_config holds a Lambda, and Keras ignores safe_mode for H5 (GHSA-36rr-ww3j-vrjv), so this is the .keras critical reached through the H5 loader."
     },
+    "jinja_looks_python.jinja": {
+      "expect": [
+        "SC4N-JINJA-PY-OBJECT"
+      ],
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A chat template whose first three lines are a comment pair and an import, the shape that made the Python content heuristic score it as source. The name says template, so the template analyser must run (and the extension must not be reported as contradicting the content)."
+    },
     "jinja_ssti.jinja": {
       "expect": [
         "SC4N-JINJA-PY-OBJECT",

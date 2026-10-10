@@ -353,8 +353,6 @@ func init() {
 		Notes: "no YAML library is linked, so YAML is scanned as text for string indicators, prompt-injection content and the GitHub Actions pull_request_target pattern; it is not parsed into a document tree."})
 	RegisterFormat(Info{Format: FormatText, Magic: "(fallback)", Depth: DepthShallow,
 		Notes: "any file with no NUL byte in its first kilobyte and no structural sniffer match is scanned with the string-indicator engine at depth shallow. Extension-specific rules (.pth, .start, .pyc, Dockerfile) still apply."})
-	RegisterFormat(Info{Format: FormatWheel, Magic: "PK\\x03\\x04 with a .dist-info directory", Depth: DepthDeep, Container: true,
-		Notes: "wheels are archives, so every member is scanned and members that are Python, .pth, .pyc or native code reach their own engines; a wheel inside a model repository is a build-time supply-chain path."})
 }
 
 func sniffMagic(s source.Source, l limits.Limits) (Format, bool) {

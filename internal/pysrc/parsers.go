@@ -71,6 +71,12 @@ func lowerExt(name string) string {
 
 var pythonExts = map[string]bool{"py": true, "pyi": true, "pyw": true, "pth": true}
 
+// templateExts are the names a chat template is shipped under. A template is not
+// Python source even when its first lines are comments and `import`s: llama.cpp's
+// models/templates holds three templates that pythonLooksLike scored as Python,
+// which cost them their template analysis and added a false extension-mismatch.
+var templateExts = map[string]bool{"jinja": true, "jinja2": true, "j2": true, "tmpl": true}
+
 // sniffPython recognises Python source.
 func sniffPython(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	n := s.Size()
@@ -88,7 +94,14 @@ func sniffPython(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if bytes.IndexByte(head, 0) >= 0 {
 		return artifact.FormatUnknown, false
 	}
-	if pythonExts[lowerExt(s.Name())] {
+	ext := lowerExt(s.Name())
+	if templateExts[ext] {
+		// The name says template. jinja-template (67) runs before this sniffer
+		// and will have claimed it; this guard keeps the answer the same if that
+		// registration is ever reordered.
+		return artifact.FormatUnknown, false
+	}
+	if pythonExts[ext] {
 		return artifact.FormatPython, true
 	}
 	if pythonLooksLike(head) {

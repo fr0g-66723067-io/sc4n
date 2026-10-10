@@ -135,6 +135,20 @@ const (
 
 var errStop = errors.New("xgb: stop")
 
+// stopKind records how a walk ended, for the sniffer's verdict.
+type stopKind uint8
+
+const (
+	// stopRunning is the zero value: the walk has not stopped.
+	stopRunning stopKind = iota
+	// stopExhausted means the bytes available ran out while the document was
+	// still consistent. A head-limited sniff of a real (larger) document looks
+	// exactly like this, so it is not evidence against UBJSON.
+	stopExhausted
+	// stopInvalid means the bytes contradict the format.
+	stopInvalid
+)
+
 // uwalk defers structural errors to the walker so a single finding is emitted and
 // the walk stops.
 type uwalker struct {
@@ -149,7 +163,44 @@ type uwalker struct {
 	elems    int64
 	elemsHi  bool
 	structHi bool
+
+	// quiet suppresses every finding and every member dispatch. The sniffer
+	// walks a head with quiet set: it asks whether the bytes look like UBJSON
+	// rather than reporting on them.
+	quiet bool
+	// stop is how the walk ended. It is the sniffer's whole answer.
+	stop stopKind
 }
+
+// mark records a stop, keeping the strongest verdict: an invalid document stays
+// invalid even if a later path is reached with the bytes exhausted.
+func (w *uwalker) mark(k stopKind) {
+	if k > w.stop {
+		w.stop = k
+	}
+}
+
+// looksLikeUBJ is the sniffer's verdict on a quiet head walk.
+//
+// A document that parsed to its end is UBJSON. So is one that ran out of bytes
+// after making real progress, because that is what a large document looks like
+// when only its first bytes are available. A structural failure is only evidence
+// against the format when it happens in the ambiguous prefix — the first bytes,
+// where `{` plus `#` is both a UBJSON object with a count and a Jinja comment
+// opener, and the two only diverge when the bytes after the marker are read.
+func (w *uwalker) looksLikeUBJ() bool {
+	if w.stop == stopRunning {
+		return true
+	}
+	return w.off >= ubjSniffProgress
+}
+
+// ubjSniffProgress is how far a quiet walk must get before a structural failure
+// counts as a property of the document rather than of its ambiguous prefix.
+const ubjSniffProgress = 16
+
+// ubjSniffHead bounds how much of an artifact the sniffer walks.
+const ubjSniffHead = 64 << 10
 
 func (w *uwalker) run() {
 	// XGBoost's UBJSON writer emits no magic prefix, but some producer of a
@@ -159,12 +210,15 @@ func (w *uwalker) run() {
 	}
 	if err := w.value(0); err != nil {
 		if errors.Is(err, errStop) {
+			// A structural stop: fail() or failShort() recorded which.
 			return
 		}
+		w.mark(stopExhausted)
 		w.fail("truncated UBJSON value: " + err.Error())
 		return
 	}
-	if w.off < w.size {
+	// The walk completed; stopRunning (the zero value) is the verdict.
+	if w.off < w.size && !w.quiet {
 		w.sink.EmitExtra(RuleTrailing, w.off,
 			fmt.Sprintf("%d byte(s) follow the root UBJSON value; the XGBoost reader stops at the root and never sees them",
 				w.size-w.off),
@@ -178,7 +232,9 @@ func (w *uwalker) count() bool {
 	if w.elems > int64(w.l.MaxEntries) {
 		if !w.elemsHi {
 			w.elemsHi = true
-			limits.Emit(w.sink, limits.RuleEntries, "MaxEntries", w.elems, int64(w.l.MaxEntries), "ubjson elements")
+			if !w.quiet {
+				limits.Emit(w.sink, limits.RuleEntries, "MaxEntries", w.elems, int64(w.l.MaxEntries), "ubjson elements")
+			}
 		}
 		return false
 	}
@@ -187,14 +243,26 @@ func (w *uwalker) count() bool {
 
 // emitStruct emits the structural rule once per artifact.
 func (w *uwalker) emitStruct(msg string) {
-	if w.structHi {
+	if w.structHi || w.quiet {
 		return
 	}
 	w.structHi = true
 	w.sink.Emit(RuleStruct, w.off, msg)
 }
 
+// fail records a structural error — the bytes contradict UBJSON — emits the
+// structural finding once, and stops the walk.
 func (w *uwalker) fail(msg string) error {
+	w.mark(stopInvalid)
+	w.emitStruct(msg)
+	return errStop
+}
+
+// failShort records an error that is indistinguishable from the document simply
+// continuing past the bytes available. The parser reports it exactly as fail
+// does; only the sniffer's verdict differs.
+func (w *uwalker) failShort(msg string) error {
+	w.mark(stopExhausted)
 	w.emitStruct(msg)
 	return errStop
 }
@@ -341,10 +409,12 @@ func (w *uwalker) stringValue() error {
 		return w.fail("UBJSON string declares a negative length")
 	}
 	if n > w.remaining() {
-		return w.fail("UBJSON string length exceeds the bytes remaining")
+		return w.failShort("UBJSON string length exceeds the bytes remaining")
 	}
 	if n > w.l.MaxStringBlob {
-		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "ubjson string")
+		if !w.quiet {
+			limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "ubjson string")
+		}
 		w.discard(n)
 		return nil
 	}
@@ -373,11 +443,16 @@ func (w *uwalker) key() error {
 	if err != nil {
 		return w.fail("UBJSON object key: " + err.Error())
 	}
-	if n < 0 || n > w.remaining() {
-		return w.fail("UBJSON object key length is invalid")
+	if n < 0 {
+		return w.fail("UBJSON object key length is negative")
+	}
+	if n > w.remaining() {
+		return w.failShort("UBJSON object key length exceeds the bytes remaining")
 	}
 	if n > w.l.MaxStringBlob {
-		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "ubjson key")
+		if !w.quiet {
+			limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "ubjson key")
+		}
 		w.discard(n)
 		return nil
 	}
@@ -394,6 +469,11 @@ func (w *uwalker) key() error {
 // the value begins with native-executable magic or a pickle protocol header,
 // re-dispatches it so the polyglot and pickle engines can classify it.
 func (w *uwalker) scanString(off int64, buf []byte) {
+	if w.quiet {
+		// The sniffer walks a head to classify it, not to report on it: no
+		// finding and no member dispatch comes out of a sniff.
+		return
+	}
 	stringscan.EmitString(w.sink, off, string(buf))
 	if len(buf) >= 8 && bytescan.MagicAt(buf) != bytescan.NativeNone {
 		artifact.ScanMemberBytes(w.ctx, "ubjson-string", buf)
@@ -407,7 +487,7 @@ func (w *uwalker) scanString(off int64, buf []byte) {
 func (w *uwalker) array(depth int) error {
 	pb, err := w.peek()
 	if err != nil {
-		return w.fail("unterminated UBJSON array")
+		return w.failShort("unterminated UBJSON array")
 	}
 	if pb == mType {
 		w.discard(1)
@@ -440,7 +520,7 @@ func (w *uwalker) array(depth int) error {
 	for {
 		pb, err := w.peek()
 		if err != nil {
-			return w.fail("unterminated UBJSON array")
+			return w.failShort("unterminated UBJSON array")
 		}
 		if pb == mEndArr {
 			w.discard(1)
@@ -455,7 +535,7 @@ func (w *uwalker) array(depth int) error {
 func (w *uwalker) object(depth int) error {
 	pb, err := w.peek()
 	if err != nil {
-		return w.fail("unterminated UBJSON object")
+		return w.failShort("unterminated UBJSON object")
 	}
 	if pb == mType {
 		w.discard(1)
@@ -499,7 +579,7 @@ func (w *uwalker) object(depth int) error {
 	for {
 		pb, err := w.peek()
 		if err != nil {
-			return w.fail("unterminated UBJSON object")
+			return w.failShort("unterminated UBJSON object")
 		}
 		if pb == mEndObj {
 			w.discard(1)
@@ -550,7 +630,9 @@ func (w *uwalker) typedValues(t byte, n int64, depth int) error {
 		return nil
 	case mString, mHigh:
 		if n > int64(w.l.MaxEntries) {
-			limits.Emit(w.sink, limits.RuleEntries, "MaxEntries", n, int64(w.l.MaxEntries), "ubjson typed string array")
+			if !w.quiet {
+				limits.Emit(w.sink, limits.RuleEntries, "MaxEntries", n, int64(w.l.MaxEntries), "ubjson typed string array")
+			}
 			return errStop
 		}
 		for range n {
@@ -593,21 +675,31 @@ func (w *uwalker) typedValue(t byte, depth int) error {
 func (w *uwalker) skipFixed(n, size int64) error {
 	remaining := w.remaining()
 	if size <= 0 || n > remaining/size {
-		return w.fail("typed UBJSON array extent exceeds the bytes remaining")
+		// A declared extent that runs past the bytes available is a structural
+		// error for the parser and, to the sniffer, indistinguishable from a real
+		// document whose array data continues past the head it was given.
+		return w.failShort("typed UBJSON array extent exceeds the bytes remaining")
 	}
 	w.discard(n * size)
 	return nil
 }
 
-// sniff recognises UBJSON by content. It never claims ordinary JSON: a UBJSON
-// object opens with `{` followed by an integer length marker or `$`/`#`, and a
-// UBJSON array is claimed only for markers a JSON array cannot begin with.
-func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
+// sniff recognises UBJSON by content. The two-byte shape check is only a cheap
+// gate; the document is then claimed only if a bounded, quiet walk of its head is
+// consistent with UBJSON. The shape check alone is not enough: `{` followed by
+// `#` is both a UBJSON object carrying a count and a Jinja comment opener, and
+// `#` is UBJSON's count marker, so every `{# ... #}` chat template in the wild
+// used to be claimed here, scanned as a broken UBJSON document, and never
+// analysed as a template.
+//
+// The invariant this restores: a sniffer MUST NOT accept a document that its own
+// parser reports as structurally invalid.
+func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	size := s.Size()
 	if size < 3 {
 		return artifact.FormatUnknown, false
 	}
-	head, err := s.Bytes(0, minInt64(size, 16))
+	head, err := s.Bytes(0, minInt64(size, ubjSniffHead))
 	if err != nil && len(head) < 3 {
 		return artifact.FormatUnknown, false
 	}
@@ -617,14 +709,34 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 	if len(head) < 2 {
 		return artifact.FormatUnknown, false
 	}
+	var shaped bool
 	switch head[0] {
 	case mObject:
-		return artifact.FormatXGBoostUBJ, isObjectStart(head[1])
+		shaped = isObjectStart(head[1])
 	case mArray:
-		return artifact.FormatXGBoostUBJ, isArrayStart(head[1])
-	default:
+		shaped = isArrayStart(head[1])
+	}
+	if !shaped {
 		return artifact.FormatUnknown, false
 	}
+	if !ubjHeadIsConsistent(head, l) {
+		return artifact.FormatUnknown, false
+	}
+	return artifact.FormatXGBoostUBJ, true
+}
+
+// ubjHeadIsConsistent walks head as UBJSON with every finding suppressed and
+// reports whether the bytes are consistent with the format.
+func ubjHeadIsConsistent(head []byte, l limits.Limits) bool {
+	w := &uwalker{
+		sink:  report.NewCollector(0).For("sniff"),
+		l:     l,
+		size:  int64(len(head)),
+		r:     bufio.NewReaderSize(bytes.NewReader(head), ubjWindowSize),
+		quiet: true,
+	}
+	w.run()
+	return w.looksLikeUBJ()
 }
 
 func isObjectStart(b byte) bool {
