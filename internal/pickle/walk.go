@@ -99,7 +99,6 @@ func Walk(ctx *artifact.Ctx, s source.Source, opt Options) (*Stream, error) {
 		globals:   map[string]*Global{},
 		structs:   map[string]*structStat{},
 		once:      map[string]bool{},
-		protoNone: true,
 	}
 	w.run()
 	w.flush()
@@ -129,9 +128,6 @@ type walker struct {
 	stream Stream
 	limit  int
 
-	// declaredProto is the protocol from the first PROTO opcode.
-	declaredProto byte
-	protoNone     bool
 
 	// globals is keyed by qualified name so that a state_dict's hundreds of
 	// references to one rebuild function produce one finding.
@@ -293,7 +289,6 @@ func (w *walker) probePickle(off int) bool {
 		globals:   map[string]*Global{},
 		structs:   map[string]*structStat{},
 		once:      map[string]bool{},
-		protoNone: true,
 	}
 	probe.segment(off)
 	hasProto := w.data[off] == opPROTO
@@ -353,13 +348,12 @@ func (w *walker) segment(start int) (int, bool) {
 			continue
 		}
 
-		// Protocol gating: an opcode must not appear before the protocol that
-		// introduced it.
-		if code != opPROTO && info.proto > w.declaredProto {
-			w.structFinding("proto-violation",
-				fmt.Sprintf("opcode %s requires protocol %d but the stream declares %d", info.name, info.proto, w.declaredProto),
-				int64(pos))
-		}
+		// An opcode is deliberately not checked against the declared protocol.
+		// Neither the reference unpickler nor pickletools enforces opcode/protocol
+		// agreement (CPython consults self.proto only in find_class, and pickletools
+		// gates nothing), so a protocol-1 stream — which carries no PROTO opcode at
+		// all, since CPython writes one only from protocol 2 — would otherwise be
+		// rejected as structurally invalid and never dispatched to this walker.
 
 		w.resyncRun = 0
 		w.stream.Ops++
@@ -404,9 +398,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 	case opPROTO:
 		if p, ok := argInt(arg); ok {
 			if pos := w.stream.Ops; pos == 1 {
-				w.declaredProto = byte(p)
 				w.stream.Proto = byte(p)
-				w.protoNone = false
 			}
 			if p > int64(highestProtocol) {
 				w.structFinding("proto-too-high",

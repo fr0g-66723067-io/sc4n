@@ -113,16 +113,20 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	return artifact.FormatUnknown, false
 }
 
-// sniffTemplate claims a chat template. The name decides first: .jinja, .j2,
+// sniffTemplate claims a chat template by name. The name decides: .jinja, .j2,
 // .tmpl and .jinja2 are templates even when their first lines look like Python,
 // which is how 24 of the 71 templates in llama.cpp's models/templates were
 // dispatched to the UBJSON and Python analysers and never scanned as templates.
 //
-// The content rule is deliberately narrower than the fallback's. A name that
-// selects another text format keeps it: a tokenizer_config.json carrying a
-// chat_template is a JSON artifact, and the tokenizer analyser is what reads the
-// template out of it. Claiming it here would trade the tokenizer rules for a
-// second, worse template scan.
+// Content is deliberately not consulted here. This sniffer sits above every
+// binary sniffer (onnx-proto, archive-zip, xgb-ubj, tf-savedmodel, msgpack, …),
+// so a content rule that accepts any NUL-free UTF-8 head containing "{{" lets a
+// model file whose first bytes happen to hold "{{" be analysed as a template and
+// never reach its own parser — an ONNX model with "{{" in an early string loses
+// every ONNX rule, including the external-data traversal check. Content-based
+// jinja detection belongs to the content sniffer at the bottom of the ladder,
+// which runs after every binary sniffer has had its chance; a text file bearing
+// "{{" is still a template, and a .onnx/.ubj/.mlmodel file is still itself.
 func sniffTemplate(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	n := s.Size()
 	if n <= 0 {
@@ -137,16 +141,7 @@ func sniffTemplate(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		// A binary file named .jinja is still not a template.
 		return artifact.FormatUnknown, false
 	}
-	base := baseName(s.Name())
-	if isJinjaName(base) {
-		return artifact.FormatJinja, true
-	}
-	switch extOf(base) {
-	case "json", "jsonl", "yaml", "yml", "md", "markdown", "ipynb",
-		"py", "pyi", "pyw", "toml", "ini", "cfg":
-		return artifact.FormatUnknown, false
-	}
-	if looksLikeJinja(head) {
+	if isJinjaName(baseName(s.Name())) {
 		return artifact.FormatJinja, true
 	}
 	return artifact.FormatUnknown, false

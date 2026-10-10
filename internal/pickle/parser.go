@@ -73,7 +73,6 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		globals:   map[string]*Global{},
 		structs:   map[string]*structStat{},
 		once:      map[string]bool{},
-		protoNone: true,
 	}
 	if probe.probePickle(0) {
 		return artifact.FormatPickle, true

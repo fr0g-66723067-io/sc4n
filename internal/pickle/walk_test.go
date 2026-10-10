@@ -297,24 +297,32 @@ func TestFRAMEIsNotEnforced(t *testing.T) {
 	}
 }
 
-func TestProtoGating(t *testing.T) {
-	// MEMOIZE is a protocol-4 opcode inside a stream that declares protocol 2.
+func TestProtocolIsNotEnforced(t *testing.T) {
+	// Opcode/protocol agreement is deliberately not checked: the reference
+	// unpickler consults the declared protocol only in find_class, so a stream
+	// whose opcodes are newer than its PROTO argument loads fine and is not
+	// evidence of anything. MEMOIZE is a protocol-4 opcode inside a stream that
+	// declares protocol 2.
 	data := []byte{opPROTO, 2, opEMPTY_DICT, opMEMOIZE, opSTOP}
 	_, fs := walk(t, data)
-	found := false
 	for _, f := range fs {
-		if f.RuleID == "SC4N-PICKLE-STRUCT" && strings.Contains(f.Evidence, "proto-violation") {
-			found = true
+		if strings.Contains(f.Evidence, "proto-violation") {
+			t.Fatalf("protocol violation reported although the reference does not enforce it: %s", f.Evidence)
 		}
 	}
-	if !found {
-		t.Fatalf("protocol violation not reported: %v", ruleIDs(fs))
-	}
 
-	// A protocol 0/1 stream must not contain protocol-4 opcodes either.
-	_, fs = walk(t, []byte{opEMPTY_DICT, opMEMOIZE, opSTOP})
-	if !hasRule(fs, "SC4N-PICKLE-STRUCT") {
-		t.Fatalf("protocol-4 opcode in a protocol-0 stream not reported: %v", ruleIDs(fs))
+	// A protocol-1 stream carries no PROTO opcode at all (CPython writes one only
+	// from protocol 2), so it must walk without a structural violation and reach
+	// its STOP with every opcode decoded.
+	data = append([]byte{opEMPTY_DICT}, opBINPUT, 0, opEMPTY_DICT)
+	data = append(data, opBINGET, 0, opSTOP)
+	stream, fs := walk(t, data)
+	if stream.StructErrors != 0 {
+		t.Fatalf("protocol-1 stream reported structural errors: %v", ruleIDs(fs))
+	}
+	if !stream.SawStop || stream.Ops != 5 {
+		t.Fatalf("protocol-1 stream did not walk to STOP: sawStop=%v ops=%d findings=%v",
+			stream.SawStop, stream.Ops, ruleIDs(fs))
 	}
 }
 
