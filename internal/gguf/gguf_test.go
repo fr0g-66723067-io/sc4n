@@ -622,3 +622,41 @@ func FuzzGGUF(f *testing.F) {
 		_, _ = gguf.Parse(source.Mem("f", data), limits.Default(), c.For("f"))
 	})
 }
+
+// TestEveryArrayElementIsScanned pins the property the sampling budget used to
+// claim to trade away: the indicator engine runs over every element of a metadata
+// array, not just the first few. The budget was unreachable (readString always
+// passed inArray=false), so the behaviour is unchanged — but a reintroduced budget
+// would make a value past it invisible, and a tokenizer vocab is exactly where a
+// payload hides.
+func TestEveryArrayElementIsScanned(t *testing.T) {
+	var b bytes.Buffer
+	b.WriteString("GGUF")
+	b.Write(u32b(3, binary.LittleEndian))
+	b.Write(u64b(0, binary.LittleEndian)) // tensor_count
+	b.Write(u64b(1, binary.LittleEndian)) // kv_count
+	const elems = 6000
+	const late = 5500
+	b.Write(strb("tokenizer.ggml.tokens", binary.LittleEndian))
+	b.Write(u32b(9, binary.LittleEndian)) // ARRAY
+	b.Write(u32b(8, binary.LittleEndian)) // of STRING
+	b.Write(u64b(elems, binary.LittleEndian))
+	for i := range elems {
+		if i == late {
+			b.Write(strb("http://discord.com/api/webhooks/1/x", binary.LittleEndian))
+			continue
+		}
+		b.Write(strb("tok"+strconv.Itoa(i), binary.LittleEndian))
+	}
+
+	fs := parseWithLimits(t, b.Bytes(), limits.Default())
+	found := false
+	for _, f := range fs {
+		if f.RuleID == "SC4N-STRING-C2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the element at index %d was not scanned: %v", late, ids(fs))
+	}
+}

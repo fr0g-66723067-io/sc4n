@@ -49,12 +49,12 @@ const (
 	// here because a metadata string can otherwise be the whole file).
 	hardStringCap = 64 << 20
 
-	// String-array sampling. A tokenizer vocab is a legitimate multi-megabyte
-	// ARRAY of strings, so the indicator engine is applied to a bounded sample
-	// rather than the whole thing; chat templates are always collected in full.
-	sampleArrayBytes = 64 << 10
-	sampleArrayElems = 4096
-	maxTemplates     = 256
+	// Chat templates are always collected in full. The indicator engine runs over
+	// every element of a metadata array too: the array walk is already bounded by
+	// Limits.MaxArrayElements (which reports itself when it is hit), so a second
+	// fixed sample budget only meant that a value past it was invisible — a
+	// webhook at element 5001 behind benign filler reported clean.
+	maxTemplates = 256
 
 	// Polyglot windows: the APE/llamafile preamble and appended payload live at
 	// one end or the other; the residual sample is what the trailing-data
@@ -459,8 +459,6 @@ type state struct {
 	lim  limits.Limits
 	meta *Meta
 
-	sampledElems int
-	sampledBytes int64
 }
 
 func (st *state) emit(r *report.Rule, off int64, ev string) {
@@ -551,7 +549,7 @@ func (st *state) value(r *reader, vt uint32, key string, depth int) (any, bool) 
 		}
 		return b == 1, true
 	case 8: // STRING
-		return st.readString(r, key, false)
+		return st.readString(r, key)
 	case 9: // ARRAY
 		return nil, st.readArray(r, key, depth)
 	case 10: // UINT64
@@ -626,7 +624,7 @@ func (st *state) readArray(r *reader, key string, depth int) bool {
 // readString reads a gguf_string (u64 length + bytes), scans it and collects it
 // when it is a chat template. It advances r past the whole declared string even
 // when the materialised prefix is capped.
-func (st *state) readString(r *reader, key string, inArray bool) (any, bool) {
+func (st *state) readString(r *reader, key string) (any, bool) {
 	off := r.off
 	n, ok := r.u64()
 	if !ok {
@@ -655,26 +653,25 @@ func (st *state) readString(r *reader, key string, inArray bool) (any, bool) {
 		return nil, false
 	}
 	r.off = dataOff + int64(n) // past the whole declared string, truncated or not
-	st.considerString(key, dataOff, b, inArray)
+	st.considerString(key, dataOff, b)
 	return string(b), true
 }
 
 // considerString applies the shared indicator engine and the chat-template
 // checks to one metadata string.
-func (st *state) considerString(key string, off int64, b []byte, inArray bool) {
-	// Indicator engine: general.* and tokenizer.* values only, with ARRAY
-	// element strings sampled under a cap so a vocab cannot cost a full pass.
+//
+// Every string is scanned, including every element of a metadata array: the walk
+// over an array is already bounded by Limits.MaxArrayElements (which reports the
+// cap when it fires), and the per-string indicator engine is the only thing that
+// scans a GGUF's metadata at all, so a second budget here would have been a way
+// for a value to go unexamined. The cost is linear in the metadata's own bytes.
+func (st *state) considerString(key string, off int64, b []byte) {
+	// Indicator engine: general.* and tokenizer.* values. Every element of an
+	// array is scanned: the walk over the array is bounded by MaxArrayElements
+	// (and reports the cap when it fires), so the engine's cost stays linear in
+	// the array's own bytes and no element is skipped in silence.
 	if strings.HasPrefix(key, "general.") || strings.HasPrefix(key, "tokenizer.") {
-		scan := true
-		if inArray {
-			if st.sampledElems >= sampleArrayElems || st.sampledBytes >= sampleArrayBytes {
-				scan = false
-			} else {
-				st.sampledElems++
-				st.sampledBytes += int64(len(b))
-			}
-		}
-		if scan && st.sink != nil {
+		if st.sink != nil {
 			// A tokenizer.ggml.* value is a vocabulary entry or a regex, not
 			// prose: `<|im_start|>` is a token the model is *supposed* to emit,
 			// and `os.system` is a substring of a BPE merge rule as easily as it
