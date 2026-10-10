@@ -515,7 +515,14 @@ whose hook is spelled unusually is reported at lower confidence.
   signed, not that the artifact is malicious.
 - **Emit machine-readable inventory.** `-format cyclonedx` produces a CycloneDX
   1.6 ML-BOM with `machine-learning-model` components carrying the sha256 of each
-  artifact, so a downstream policy engine can pin exactly what was scanned.
+  artifact, so a downstream policy engine can pin exactly what was scanned. The
+  BOM's `vulnerabilities[].id` is the sc4n rule ID, and one vulnerability is
+  emitted per *finding*, so N findings of one rule produce N entries with the same
+  `id` — the 1.6 schema does not require uniqueness, and rewriting the id (say
+  `SC4N-X:2`) would break every consumer that maps `id` to a rule. Disambiguate by
+  `affects` (the component `bom-ref`) and by `sc4n:fingerprint` in the entry's
+  properties. `metadata.properties` always states `sc4n:suppressed` and
+  `sc4n:dropped`, so a baselined or capped run is never read as a clean one.
   `-format sarif` produces SARIF 2.1.0 with severity bands mapped to GitHub's
   (`critical` 9.5 → `error`, `high` 8.0, `medium` 5.5 → `warning`, `low` 3.0,
   `info` 0.0 → `note`), for code-scanning-style gating.
