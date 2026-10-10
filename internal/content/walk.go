@@ -208,6 +208,16 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		}
 		chatTemplateRule(ctx, name, data)
 		stringscan.Emit(ctx.Sink, 0, data)
+	case base == "chat_template.json" || base == "added_tokens.json":
+		// chat_template.json is the processor-side document that carries the same
+		// templates tokenizer_config.json does (MiniMax-H3's FL2VA/processor/
+		// chat_template.json), and added_tokens.json declares the tokens the
+		// tokenizer expects to see. Both used to fall to the default branch, which
+		// scans the bytes but never hands a template to the Jinja2 analyser.
+		if base == "chat_template.json" {
+			chatTemplateRule(ctx, name, data)
+		}
+		stringscan.Emit(ctx.Sink, 0, data)
 	case isHFMetaName(base):
 		hfMeta(ctx, name, base, data, truncated)
 	case base == ".gitattributes":

@@ -60,7 +60,7 @@ the model:
 | 3 | Deserialization code execution (pickle family) | CVE-2026-23001, CVE-2026-31239, arXiv 2508.19774, arXiv 2607.17503, arXiv 2508.15987 | `SC4N-PICKLE-*` (24 rules) | Load only with `weights_only=True` (torch ≥ 2.6 default) or a safetensors artifact; never `pickle.load` untrusted data | Weights-only is not a sandbox: it constrains the *opcode* surface, not the model's behaviour once loaded |
 | 4 | Loader- and config-driven execution | VU#456290, CVE-2026-4372, VU#253266 / CVE-2024-3660, CVE-2025-1550, CVE-2026-12481/12484 | `SC4N-CONFIG-*`, `SC4N-LOADER-*`, `SC4N-KERAS-*` | `trust_remote_code=False`, `safe_mode=True` with a current Keras, pin `revision=` | The allowlist is a moving target; a new layer class is unknown until the list is updated |
 | 5 | Container and format-confusion smuggling | Feb-2025 nullifAI campaign, modelscan issue #354, CVE-2022-25882, CVE-2024-27318 | `SC4N-ARCHIVE-*`, `SC4N-POLYGLOT-*`, `SC4N-FORMAT-*`, `SC4N-TORCH-*`, `SC4N-ONNX-EXTERNAL-*`, `SC4N-HDF5-EXTERNAL-LINK` | Verify provenance out of band; never trust the extension | A container the scanner cannot decompress (xz/zstd/lz4/7z) is reported, not read: the payload inside it is not analysed |
-| 6 | Template, op and layer code paths | CVE-2026-5760 / VU#915947, arXiv 2602.04653 | `SC4N-JINJA-*`, `SC4N-TEMPLATE-INJECTION`, `SC4N-GGUF-TEMPLATE-*`, `SC4N-TF-PYFUNC`, `SC4N-TF-FILE-IO`, `SC4N-COREML-CUSTOM-LAYER`, `SC4N-TFLITE-CUSTOM-OP`, `SC4N-PTE-*` | Run templates in a sandboxed renderer with no globals; do not load a model that names a host-supplied class or plugin | Template engines differ; a layer/op name is reported as a *surface*, not as proof that a plugin is present |
+| 6 | Template, op and layer code paths | CVE-2026-5760 / VU#915947, arXiv 2602.04653 | `SC4N-JINJA-*`, `SC4N-TEMPLATE-INJECTION`, `SC4N-TF-PYFUNC`, `SC4N-TF-FILE-IO`, `SC4N-COREML-CUSTOM-LAYER`, `SC4N-TFLITE-CUSTOM-OP`, `SC4N-PTE-*` | Run templates in a sandboxed renderer with no globals; do not load a model that names a host-supplied class or plugin | Template engines differ; a layer/op name is reported as a *surface*, not as proof that a plugin is present |
 | 7 | Prompt injection and exfiltration via metadata | OWASP LLM01 | `SC4N-CARD-*`, `SC4N-METADATA-*`, `SC4N-UNICODE-ANOMALY` | Treat all card text as untrusted input; datamarking/spotlighting | A detector for instruction-shaped text cannot be complete; novel phrasing is missed by design |
 | 8 | Resource exhaustion | CVE-2025-5197, CVE-2025-3263, CVE-2025-2099, CVE-2024-12720 | `SC4N-LIMIT-*`, `SC4N-TOKENIZER-REDOS` | Serve untrusted models behind a resource-capped process | Caps bound the *scanner*; they do not bound the consumer's loader |
 | 9 | Weight-level backdoors | Neural Cleanse, ABS, STRIP, spectral signatures, MIST, Z-PEFT | `SC4N-WEIGHTS-*` (info only, behind `-deep-stats`) | Out-of-band dynamic analysis; provenance | **Static scanning cannot prove or disprove a backdoor.** See §6 |
@@ -258,11 +258,13 @@ template-injection work; `arXiv 2602.04653`.
 `SC4N-JINJA-DANGEROUS-GLOBAL` (`lipsum`, `cycler`, `namespace`, … combined with
 attribute access), `SC4N-JINJA-DYNAMIC-NAME` (a name assembled by concatenation
 or subscript — the `'__g'+'lobals__'` evasion), `SC4N-JINJA-INCLUDE`,
-`SC4N-JINJA-RAW`, `SC4N-TEMPLATE-INJECTION`, plus
-`SC4N-GGUF-TEMPLATE-SSTI` / `SC4N-GGUF-TEMPLATE-BACKDOOR` for templates carried
-inside GGUF metadata. Templates are found in `*.jinja`/`*.j2`/`*.tmpl`,
+`SC4N-JINJA-RAW`, `SC4N-TEMPLATE-INJECTION`. There is one analyser and one rule
+set: a template carried inside GGUF metadata (`tokenizer.chat_template`) is
+handed to the same `internal/jinja` code path as a `*.jinja` file, so a GGUF
+template cannot be analysed less thoroughly than the same text on disk.
+Templates are found in `*.jinja`/`*.j2`/`*.tmpl`,
 `tokenizer_config.json:chat_template` (string **and** list-of-objects shapes),
-`config.json`, GGUF metadata and embedded code strings.
+`chat_template.json`, `config.json`, GGUF metadata and embedded code strings.
 
 **Mitigation.** Render templates in a sandboxed environment with no globals and no
 loader, and review a template change like a code change.

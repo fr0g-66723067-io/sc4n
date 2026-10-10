@@ -689,34 +689,19 @@ func (st *state) considerString(key string, off int64, b []byte) {
 		}
 	}
 
-	// Chat templates: collected in full (up to a bound) and checked here, since
-	// internal/jinja is not wired into this parser.
+	// Chat templates: collected in full (up to a bound) and handed to the shared
+	// analyser, which is the same code path a .jinja file, a tokenizer_config.json
+	// chat_template and an HF-meta chat_template take. A second, hand-written scan
+	// here meant a GGUF template never reached SC4N-JINJA-PY-OBJECT,
+	// SC4N-JINJA-DANGEROUS-GLOBAL, -DYNAMIC-NAME, -INCLUDE or -RAW, nor the
+	// corroboration logic that decides whether an instruction phrase deserves the
+	// high-severity rule.
 	if isTemplateKey(key) && len(st.meta.Templates) < maxTemplates {
 		tmpl := string(b)
 		st.meta.Templates = append(st.meta.Templates, tmpl)
-		st.templateChecks(off, tmpl)
-	}
-}
-
-// templateChecks reports Python-object introspection and instruction-override
-// text inside a chat template.
-func (st *state) templateChecks(off int64, tmpl string) {
-	if construct, ok := findSSTI(tmpl); ok {
-		st.emitExtra(RuleTemplateSSTI, off,
-			"chat template contains the Python-object introspection construct "+construct+" at offset "+strconv.FormatInt(off, 10),
-			map[string]string{"construct": construct})
-	}
-	if directive, ok := findBackdoorDirective(tmpl); ok {
-		// The same split the Jinja analyser makes: an override directive is the
-		// attack's own words, while a concealment phrase or a chat pseudo-tag is
-		// also how a legitimate tool-use instruction reads.
-		rule := RuleTemplateBackdoorWeak
-		if jinja.OverrideDirective(directive) {
-			rule = RuleTemplateBackdoor
+		if st.sink != nil {
+			jinja.Analyze(st.sink, off, key, tmpl)
 		}
-		st.emitExtra(rule, off,
-			"chat template contains the instruction-override directive "+strconv.Quote(directive),
-			map[string]string{"directive": directive})
 	}
 }
 
@@ -784,54 +769,6 @@ func (st *state) scanRegion(region string, base, n int64) {
 			fmt.Sprintf("validated %s executable in the %s region", kind, region),
 			map[string]string{"kind": "native", "native": kind.String(), "region": region})
 	}
-}
-
-// findSSTI returns the introspection construct a Jinja template reaches, if any.
-func findSSTI(tmpl string) (string, bool) {
-	for _, d := range sstiDunders {
-		if strings.Contains(tmpl, d) {
-			return d, true
-		}
-	}
-	if i := strings.Index(tmpl, "|attr"); i >= 0 {
-		rest := tmpl[i:]
-		if len(rest) > 24 {
-			rest = rest[:24]
-		}
-		if strings.ContainsRune(rest, '_') {
-			return "|attr with an underscore-prefixed name", true
-		}
-	}
-	return "", false
-}
-
-// sstiDunders are the Python object internals that turn a rendered template into
-// arbitrary code execution.
-var sstiDunders = []string{
-	"__class__", "__mro__", "__subclasses__", "__globals__", "__builtins__",
-	"__import__", "__reduce__", "__getattribute__", "__code__", "__loader__",
-	"__bases__", "__base__", "__dict__", "__init__", "__name__", "__module__",
-}
-
-// backdoorDirectives are instruction-override/hidden-directive phrases in a chat
-// template. The list is a subset of the shared injection indicators, expressed
-// here because the finding is about the template context specifically.
-var backdoorDirectives = []string{
-	"ignore previous instructions", "ignore all previous", "disregard previous",
-	"do not tell the user", "don't tell the user", "do not inform the user",
-	"do not mention this", "never mention this", "do not reveal this",
-	"override your instructions", "ignore your instructions",
-	"new instructions:", "system prompt:", "<|system|>", "<system>", "act as if",
-}
-
-func findBackdoorDirective(tmpl string) (string, bool) {
-	lower := strings.ToLower(tmpl)
-	for _, d := range backdoorDirectives {
-		if strings.Contains(lower, strings.ToLower(d)) {
-			return d, true
-		}
-	}
-	return "", false
 }
 
 // isTemplateKey reports whether a metadata key holds a chat template.
