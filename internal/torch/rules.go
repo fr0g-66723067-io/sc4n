@@ -140,7 +140,7 @@ var (
 			"a patched loader still deserialised the payload while every extension-driven scanner saw \"not a " +
 			"zip\". sc4n cannot decode 7z (no stdlib decoder) and says so with " +
 			"SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION; the pickle inside is NOT scanned.",
-		Refs: []string{"https://huggingface.co/blog/", "https://cwe.mitre.org/data/definitions/436.html"},
+		Refs: []string{"https://huggingface.co/blog/notable-models-scanned", "https://cwe.mitre.org/data/definitions/436.html"},
 		Tags: []string{"format-confusion"},
 	})
 

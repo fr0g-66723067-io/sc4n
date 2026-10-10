@@ -117,7 +117,7 @@ func parseNPY(ctx *artifact.Ctx, s source.Source) error {
 		cap = limits.Default().MaxHeaderBytes
 	}
 	if headerLen > cap {
-		limits.Emit(ctx.Sink, limits.RuleString, "MaxHeaderBytes", headerLen, cap, ".npy header length")
+		limits.Emit(ctx.Sink, limits.RuleHeader, "MaxHeaderBytes", headerLen, cap, ".npy header length")
 		return structErr(ctx, headerStart, "header length "+strconv.FormatInt(headerLen, 10)+
 			" exceeds MaxHeaderBytes")
 	}

@@ -438,3 +438,55 @@ func BenchmarkHeader(b *testing.B) {
 		_, _ = decodeHeader(raw)
 	}
 }
+
+// TestOverCapHeaderIsReportedNotSilentlySkipped pins the F20 fix. The sniffer
+// used to reject any declared header over MaxHeaderBytes, so an over-cap file was
+// dispatched as text with no safetensors finding at all. It now claims the file
+// when the header is actually present, and the parser names the cap that was hit.
+func TestOverCapHeaderIsReportedNotSilentlySkipped(t *testing.T) {
+	lim := limits.Default()
+	lim.MaxHeaderBytes = 64
+	header := `{"a":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}}`
+	// Right-padded with spaces, which is what the reference implementation writes
+	// and which json.Valid accepts, so the header is over the 64-byte cap.
+	header += strings.Repeat(" ", 200-len(header))
+	blob := st(header, make([]byte, 8))
+
+	// First: the file carries the header it declares, so it is claimed.
+	c := report.NewCollector(0)
+	sess := artifact.NewSession(c, "", lim)
+	src := source.Mem("model.safetensors", blob)
+	defer src.Close()
+	ctx := &artifact.Ctx{Session: sess, Sink: c.For("model.safetensors"), Limits: lim}
+	f, err := artifact.Scan(ctx, src)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if f != artifact.FormatSafetensors {
+		t.Fatalf("an over-cap header that is present was sniffed as %v", f)
+	}
+	found := false
+	for _, fi := range c.Findings() {
+		if fi.RuleID == "SC4N-LIMIT-HEADER" {
+			found = true
+		}
+		if fi.RuleID == "SC4N-LIMIT-STRING" {
+			t.Errorf("the header cap was reported as MaxStringBlob: %s", fi.Evidence)
+		}
+	}
+	if !found {
+		t.Fatalf("no SC4N-LIMIT-HEADER finding; got %v", c.Findings())
+	}
+
+	// Second: a small file that merely *declares* a huge header must not be
+	// claimed, or every devicetree source that begins with eight arbitrary bytes
+	// and a '{' would be reported as a safetensors file.
+	small := make([]byte, 9)
+	binary.LittleEndian.PutUint64(small, 1<<40)
+	small[8] = '{'
+	src2 := source.Mem("x.overlay", small)
+	defer src2.Close()
+	if f, _ := artifact.Sniff(src2, lim); f == artifact.FormatSafetensors {
+		t.Fatal("a 9-byte file declaring a 1 TiB header was claimed as safetensors")
+	}
+}

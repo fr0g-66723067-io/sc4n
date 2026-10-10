@@ -39,8 +39,9 @@ var RuleAmbiguous = report.DefineRule(report.Rule{
 	Confidence: report.ConfidenceLow,
 	Class:      "format",
 	Description: "More than one sniffer accepted this artifact's content, so the parser named in the " +
-		"evidence ran and the others did not. The known ambiguous pairs are .pt (TorchScript zip versus " +
-		"PyTorch Mobile/ExecuTorch flatbuffer) and protobuf-shaped artifacts (ONNX, TF SavedModel, " +
-		"CoreML). If the artifact is the other member of the pair, its format-specific rules did not run.",
+		"evidence ran and the others did not. The probe that emits this today is the protobuf-shaped " +
+		"pair (ONNX, TF SavedModel, CoreML), where the wire format alone does not say which model " +
+		"description it is. If the artifact is the other member of the pair, its format-specific rules " +
+		"did not run.",
 	Tags: []string{"format"},
 })

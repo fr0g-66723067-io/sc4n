@@ -142,6 +142,7 @@ silently missing catalogue entry.
 | `MaxHeaderBytes` | 100 MiB | mirrors the safetensors reference implementation's own cap |
 | `MaxDepth` | 4 | deepest legitimate nest observed: joblib→object pickle, zip→pickle, tar→pickle |
 | `MaxEntries` | 100 000 | far above any real archive, far below a member-count DoS |
+| `MaxArrayElements` | 1<<22 | one metadata array (tokenizer vocab, UBJSON/MessagePack array); above every published vocabulary (Llama-3 is 128 256, Qwen 151 936) and still bounds the walk |
 | `MaxDecompressedBytes` | 8 GiB | per archive; a real model's members sum below this |
 | `MaxRatio` | 200 | above real model compression (tokenizer JSON reaches ~20:1), below a zip bomb |
 | `MaxStringBlob` | 16 MiB | one metadata value, tokenizer entry or embedded JSON |

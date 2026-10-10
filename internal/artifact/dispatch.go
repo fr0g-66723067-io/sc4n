@@ -109,9 +109,6 @@ type Ctx struct {
 	// Format is what this level was sniffed as, for diagnostics and for the
 	// SC4N-LIMIT-* / SC4N-FORMAT-AMBIGUOUS evidence.
 	Format Format
-	// Ambiguous records that more than one sniffer would have matched, so a
-	// reader can see which parser actually ran.
-	Ambiguous bool
 }
 
 // Member returns the child context for a nested member: the sink is re-bound to
@@ -151,10 +148,6 @@ var (
 
 // Dispatch sniffs s and returns the format plus the name of the sniffer that
 // matched.
-func Dispatch(s source.Source, l limits.Limits) (Format, string) {
-	return Sniff(s, l)
-}
-
 // Scan dispatches s and runs the matching parser, recursively for containers.
 // It returns the format that ran and an error only when the parser itself failed.
 // A format with no registered parser (recognised but shallow) is not an error:
@@ -166,9 +159,8 @@ func Dispatch(s source.Source, l limits.Limits) (Format, string) {
 // them before the parser matters because a parser that fails early must not be
 // able to suppress the format-independent findings.
 func Scan(ctx *Ctx, s source.Source) (Format, error) {
-	f, sniffer := Dispatch(s, ctx.Limits)
+	f, _ := Sniff(s, ctx.Limits)
 	ctx.Format = f
-	ctx.Ambiguous = sniffer == ""
 	RunUniversal(ctx, s, f)
 	if f == FormatUnknown {
 		return f, nil

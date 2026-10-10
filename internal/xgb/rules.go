@@ -27,8 +27,9 @@ var RuleStruct = report.DefineRule(report.Rule{
 	Class:      "format",
 	Description: "The XGBoost UBJSON value stream could not be walked: an unknown marker, a length or " +
 		"count that is negative or exceeds the bytes actually remaining, a typed container without the " +
-		"mandatory count, an unsupported typed element, nesting beyond the walk cap, or more elements than " +
-		"MaxEntries. The parse stops at the first unrecoverable point and the walk is bounded throughout, " +
+		"mandatory count, or an unsupported typed element. A container over the element budget is " +
+		"reported separately, as SC4N-LIMIT-ENTRIES naming MaxArrayElements. The parse stops at the " +
+		"first unrecoverable point and the walk is bounded throughout, " +
 		"so an attacker-controlled length is never allocated. A malformed model means an XGBoost reader " +
 		"and sc4n disagree about where the document ends, which is how appended data hides.",
 	Refs: []string{

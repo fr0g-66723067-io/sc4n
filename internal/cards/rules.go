@@ -37,7 +37,9 @@ var (
 			"Cards and metadata are pasted into prompts by agents and by RAG pipelines, so text in them " +
 			"is an input channel with no executable artifact required (OWASP LLM01). Medium because a " +
 			"document that discusses prompt injection, and a legitimate README that says \"you must " +
-			"install the dependencies\", contain similar words; read the evidence.",
+			"install the dependencies\", contain similar words; read the evidence. This rule is medium " +
+			"where SC4N-TEMPLATE-INJECTION is high for the same phrasing: a card is read once, by whoever " +
+			"opens it, while a chat template is rendered around every conversation the model serves.",
 		Refs: []string{
 			"https://owasp.org/www-project-top-10-for-large-language-model-applications/",
 			"https://cwe.mitre.org/data/definitions/1426.html",

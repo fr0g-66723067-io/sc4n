@@ -563,7 +563,7 @@ func parseTFJS(ctx *artifact.Ctx, s source.Source) {
 		cap = limits.Default().MaxHeaderBytes
 	}
 	if s.Size() > cap {
-		limits.Emit(ctx.Sink, limits.RuleString, "MaxHeaderBytes", s.Size(), cap, "TF-JS model.json truncated before analysis")
+		limits.Emit(ctx.Sink, limits.RuleHeader, "MaxHeaderBytes", s.Size(), cap, "TF-JS model.json truncated before analysis")
 	}
 	n := s.Size()
 	if n > cap {

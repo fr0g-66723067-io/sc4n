@@ -28,7 +28,7 @@ import "github.com/fr0g-66723067-io/sc4n/internal/report"
 var ruleExternalTraversal = report.DefineRule(report.Rule{
 	ID:         "SC4N-ONNX-EXTERNAL-TRAVERSAL",
 	Title:      "ONNX external tensor data escapes the model directory",
-	Severity:   report.SeverityCritical,
+	Severity:   report.SeverityHigh,
 	Confidence: report.ConfidenceHigh,
 	CWE:        []string{"CWE-22", "CWE-73"},
 	Class:      "path",
@@ -198,11 +198,11 @@ var ruleStruct = report.DefineRule(report.Rule{
 // rulePathEscape reports a whitelisted path that cannot be opened without
 // escaping the scan root.
 //
-// It is a rule every path-resolving layer shares (ONNX external data, hf-cache
-// blob links, SavedModel assets, .mlpackage members), so it is defined here only
-// when no other package has registered it: report.DefineRule panics on a
-// duplicate ID, and the packages are developed independently. Whoever registers
-// it first owns the metadata; the others adopt it by ID.
+// It is defined here only when no other package has registered it, because
+// report.DefineRule panics on a duplicate ID and the packages are developed
+// independently: whoever registers it first owns the metadata. Today ONNX is the
+// only emitter; hf-cache, SavedModel and .mlpackage have their own rules for the
+// same condition, and would adopt this ID only if that changed.
 var rulePathEscape = definePathEscape()
 
 func definePathEscape() *report.Rule {

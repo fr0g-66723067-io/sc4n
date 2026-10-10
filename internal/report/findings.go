@@ -104,6 +104,10 @@ type Collector struct {
 	findings []Finding
 	limit    int
 	dropped  int
+	// firstDropped is the artifact of the first finding the cap discarded. It is
+	// what a SC4N-LIMIT-FINDINGS notice is attributed to, so the reader can see
+	// which artifact's findings are incomplete rather than only that some are.
+	firstDropped string
 }
 
 // NewCollector returns a Collector that keeps at most limit findings. A limit of
@@ -115,10 +119,34 @@ func (c *Collector) Add(f Finding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.limit > 0 && len(c.findings) >= c.limit {
+		if c.dropped == 0 {
+			c.firstDropped = f.Artifact
+		}
 		c.dropped++
 		return
 	}
 	c.findings = append(c.findings, f)
+}
+
+// NoteRule records a finding that the cap does not apply to, copying the rule's
+// metadata the way Sink.EmitExtra does. It exists for the one notice a capped
+// report owes its reader — SC4N-LIMIT-FINDINGS — which would otherwise be
+// dropped by the very cap it is describing.
+func (c *Collector) NoteRule(r *Rule, artifact string, off int64, evidence string, extra map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.findings = append(c.findings, Finding{
+		RuleID:     r.ID,
+		Title:      r.Title,
+		Severity:   r.Severity,
+		Confidence: r.Confidence,
+		CWE:        r.CWE,
+		Class:      r.Class,
+		Artifact:   artifact,
+		Offset:     off,
+		Evidence:   evidence,
+		Extra:      extra,
+	})
 }
 
 // Dropped is the number of findings discarded because the cap was reached.
@@ -126,6 +154,14 @@ func (c *Collector) Dropped() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.dropped
+}
+
+// FirstDroppedArtifact is the artifact whose findings the cap started discarding,
+// or "" when nothing was dropped.
+func (c *Collector) FirstDroppedArtifact() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.firstDropped
 }
 
 // Len is the current finding count.

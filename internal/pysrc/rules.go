@@ -149,7 +149,7 @@ var (
 		Title:      "Code is assembled from obfuscated string or character fragments",
 		Severity:   report.SeverityMedium,
 		Confidence: report.ConfidenceMedium,
-		CWE:        []string{"CWE-1336"},
+		CWE:        []string{"CWE-506"},
 		Class:      "code",
 		Description: "The statement builds a string from obfuscated pieces: a chain of chr() calls, a " +
 			"\"\".join([...]) of many literals, a long run of \\x escapes, a long bytes([...]) literal, or " +
@@ -164,7 +164,7 @@ var (
 		Title:      "A long encoded literal is decoded in the same statement",
 		Severity:   report.SeverityHigh,
 		Confidence: report.ConfidenceMedium,
-		CWE:        []string{"CWE-1336"},
+		CWE:        []string{"CWE-506"},
 		Class:      "code",
 		Description: "A base64- or hex-shaped literal of at least 32 characters appears in a statement that " +
 			"also calls a decoder (base64.b64decode, codecs.decode, bytes.fromhex, binascii.*, zlib). The " +

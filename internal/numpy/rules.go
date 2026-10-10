@@ -69,14 +69,17 @@ var (
 	RuleTrailing = report.DefineRule(report.Rule{
 		ID:         "SC4N-NUMPY-TRAILING",
 		Title:      "Bytes after the declared .npy array",
-		Severity:   report.SeverityLow,
+		Severity:   report.SeverityHigh,
 		Confidence: report.ConfidenceMedium,
 		CWE:        []string{"CWE-506"},
 		Class:      "numpy",
 		Description: "The declared shape and dtype describe fewer bytes than the file contains, so there " +
 			"is an undeclared tail. A .npy file is exactly its header plus its array, so a tail is " +
-			"either an append (a polyglot or a second container) or a truncated-but-wrong rewrite. It " +
-			"is low because a memmap'd or concatenated producer can leave padding.",
+			"either an append (a polyglot or a second container) or a truncated-but-wrong rewrite. High, " +
+			"the same severity as every other trailing-data rule (SC4N-PICKLE-TRAILING, " +
+			"SC4N-SAFETENSORS-TRAILING-DATA, SC4N-XGB-UBJ-TRAILING, SC4N-GGUF-TRAILING-DATA): an " +
+			"undeclared tail is where a second container hides, and a memmap'd producer that leaves " +
+			"padding is rare enough to be worth the reader's attention.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/506.html"},
 	})
 

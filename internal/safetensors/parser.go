@@ -74,8 +74,17 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	n := int64(uint64(nb[0]) | uint64(nb[1])<<8 | uint64(nb[2])<<16 | uint64(nb[3])<<24 |
 		uint64(nb[4])<<32 | uint64(nb[5])<<40 | uint64(nb[6])<<48 | uint64(nb[7])<<56)
 	cap := headerCap(ctx.Limits)
-	if n == 0 || n > cap {
-		ctx.Sink.Emit(RuleStruct, 0, fmt.Sprintf("declared header length %d is outside 1..%d", n, cap))
+	if n <= 0 {
+		// The sniffer rejects a non-positive length; the guard stays because this
+		// is the field every following read is sized from.
+		ctx.Sink.Emit(RuleStruct, 0, "declared header length is zero")
+		return nil
+	}
+	if n > cap {
+		// The header cap has its own rule: reporting a MaxHeaderBytes breach under
+		// the structural rule (or under MaxStringBlob) named a cap that did not
+		// apply.
+		limits.Emit(ctx.Sink, limits.RuleHeader, "MaxHeaderBytes", n, cap, "safetensors header length")
 		return nil
 	}
 
@@ -284,10 +293,28 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	}
 	n := int64(uint64(nb[0]) | uint64(nb[1])<<8 | uint64(nb[2])<<16 | uint64(nb[3])<<24 |
 		uint64(nb[4])<<32 | uint64(nb[5])<<40 | uint64(nb[6])<<48 | uint64(nb[7])<<56)
-	if n <= 0 || n > headerCap(l) {
+	avail := size - 8
+	cap := headerCap(l)
+	if n <= 0 {
 		return artifact.FormatUnknown, false
 	}
-	avail := size - 8
+	if n > cap {
+		// Over the cap the shape alone is not evidence: 38 of 73 000 real files
+		// under the reference corpus roots begin with 8 arbitrary bytes followed
+		// by '{' (devicetree .overlay sources, a shell completion script). Claim
+		// the file only when it actually carries the declared header, so the
+		// parser can report SC4N-LIMIT-HEADER rather than the file falling
+		// silently through to a text sniffer. The header itself is never read
+		// here: the parser rejects it before its own read.
+		if n > avail {
+			return artifact.FormatUnknown, false
+		}
+		first, err := s.Bytes(8, 1)
+		if err != nil || len(first) == 0 || first[0] != '{' {
+			return artifact.FormatUnknown, false
+		}
+		return artifact.FormatSafetensors, true
+	}
 	got := n
 	if avail < got {
 		got = avail

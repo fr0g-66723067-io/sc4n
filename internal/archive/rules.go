@@ -159,13 +159,16 @@ var (
 	ruleArchiveNativeMember = report.DefineRule(report.Rule{
 		ID:         "SC4N-ARCHIVE-NATIVE-MEMBER",
 		Title:      "Archive contains a native executable member",
-		Severity:   report.SeverityCritical,
+		Severity:   report.SeverityHigh,
 		Confidence: report.ConfidenceHigh,
 		CWE:        []string{"CWE-506"},
 		Class:      "executable",
 		Description: "A member's bytes validate as an ELF, PE, Mach-O or ar executable. A model archive has " +
-			"no legitimate reason to carry native code; that it does is the strongest possible statement of " +
-			"intent, because the code runs as soon as the loader (or anything else) executes the member.",
+			"no legitimate reason to carry native code, and the code runs as soon as anything executes the " +
+			"member. High rather than critical: loading the model does not run it, so unlike a pickle " +
+			"REDUCE there is no code execution on the normal load path — the same calibration the other " +
+			"native-in-container rules use (SC4N-POLYGLOT-NATIVE, SC4N-TFLITE-NATIVE-MAGIC, " +
+			"SC4N-NATIVE-EMBEDDED-PAYLOAD).",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/506.html"},
 		Tags: []string{"malicious-code"},
 	})

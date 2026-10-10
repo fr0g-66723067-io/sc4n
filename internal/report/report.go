@@ -45,9 +45,13 @@ type Limits struct {
 	MaxHeaderBytes       int64 `json:"maxHeaderBytes"`
 	MaxDepth             int   `json:"maxDepth"`
 	MaxEntries           int   `json:"maxEntries"`
+	MaxArrayElements     int   `json:"maxArrayElements"`
 	MaxDecompressedBytes int64 `json:"maxDecompressedBytes"`
 	MaxRatio             int64 `json:"maxRatio"`
 	MaxStringBlob        int64 `json:"maxStringBlob"`
+	MaxRetainedText      int64 `json:"maxRetainedText"`
+	MaxHashBytes         int64 `json:"maxHashBytes"`
+	MaxSpillBytes        int64 `json:"maxSpillBytes"`
 	MaxFindings          int   `json:"maxFindings"`
 	MaxStackDepth        int   `json:"maxStackDepth"`
 }

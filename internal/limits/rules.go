@@ -108,6 +108,25 @@ var RuleString = report.DefineRule(report.Rule{
 	Refs: []string{"https://cwe.mitre.org/data/definitions/770.html"},
 })
 
+// RuleHeader fires when a format's declared header or metadata region exceeds
+// MaxHeaderBytes. It is a rule of its own rather than SC4N-LIMIT-STRING because
+// the two caps are different numbers with different reasons: MaxHeaderBytes
+// bounds a *declared length field* before the payload, MaxStringBlob bounds a
+// value the parser materialises.
+var RuleHeader = report.DefineRule(report.Rule{
+	ID:         "SC4N-LIMIT-HEADER",
+	Title:      "Declared header exceeds MaxHeaderBytes",
+	Severity:   report.SeverityLow,
+	Confidence: report.ConfidenceHigh,
+	CWE:        []string{"CWE-770"},
+	Class:      "limits",
+	Description: "A format's declared header or metadata region (the .npy header length, a TF-JS " +
+		"model.json, a safetensors header) is larger than MaxHeaderBytes, so it was truncated or " +
+		"rejected before analysis. The cap exists because the length field precedes the payload: a " +
+		"crafted value would otherwise make the parser read the whole file as a header.",
+	Refs: []string{"https://cwe.mitre.org/data/definitions/770.html"},
+})
+
 // RuleFindings fires when the finding cap is reached.
 var RuleFindings = report.DefineRule(report.Rule{
 	ID:         "SC4N-LIMIT-FINDINGS",

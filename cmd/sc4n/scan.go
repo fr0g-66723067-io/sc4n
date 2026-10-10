@@ -241,9 +241,13 @@ func reportLimits(l limits.Limits) report.Limits {
 		MaxHeaderBytes:       l.MaxHeaderBytes,
 		MaxDepth:             l.MaxDepth,
 		MaxEntries:           l.MaxEntries,
+		MaxArrayElements:     l.MaxArrayElements,
 		MaxDecompressedBytes: l.MaxDecompressedBytes,
 		MaxRatio:             l.MaxRatio,
 		MaxStringBlob:        l.MaxStringBlob,
+		MaxRetainedText:      l.MaxRetainedText,
+		MaxHashBytes:         l.MaxHashBytes,
+		MaxSpillBytes:        l.MaxSpillBytes,
 		MaxFindings:          l.MaxFindings,
 		MaxStackDepth:        l.MaxStackDepth,
 	}

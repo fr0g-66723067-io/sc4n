@@ -192,8 +192,29 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		res.Cancelled = cancelled.Load()
 	}
+	noteFindingsCap(collector, l)
 	res.Timings["total_ms"] = report.Millis(time.Since(start))
 	return res, walkErr
+}
+
+// noteFindingsCap records that the finding list is incomplete. The drop is
+// counted in Report.Dropped either way, but a consumer that watches *findings*
+// (a SARIF upload, a CI gate) sees only the list: without a finding of its own,
+// a truncated list is indistinguishable from a complete one. The notice is
+// appended through Note, because the cap it describes would otherwise drop it.
+func noteFindingsCap(c *report.Collector, l limits.Limits) {
+	dropped := c.Dropped()
+	if dropped == 0 {
+		return
+	}
+	c.NoteRule(limits.RuleFindings, c.FirstDroppedArtifact(), 0,
+		strconv.Itoa(dropped)+" finding(s) were dropped at the MaxFindings cap of "+
+			strconv.Itoa(l.MaxFindings)+"; raise -max-findings to see them all",
+		map[string]string{
+			"limit":   "MaxFindings",
+			"dropped": strconv.Itoa(dropped),
+			"cap":     strconv.Itoa(l.MaxFindings),
+		})
 }
 
 // scanStdin reads one artifact from the configured reader.
@@ -208,7 +229,10 @@ func scanStdin(sess *artifact.Session, cfg Config, l limits.Limits) report.Artif
 	src := source.Mem(name, data)
 	defer src.Close()
 	sum.Size = int64(len(data))
-	sum.SHA256 = digestBytes(data)
+	// The same digestSource the file path uses, so a -stdin run past MaxHashBytes
+	// reports sha256Scope="prefix" instead of claiming a full digest it did not
+	// compute.
+	sum.SHA256, sum.SHA256Scope = digestSource(src, l.MaxHashBytes)
 	f, perr := scanGuarded(sess, src, name, l)
 	sum.Format = f.String()
 	if perr != nil {

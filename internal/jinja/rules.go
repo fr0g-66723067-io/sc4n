@@ -169,7 +169,8 @@ var (
 			"tool-use sentence; the phrase-only case is SC4N-TEMPLATE-INJECTION-WEAK. The table " +
 			"deliberately excludes chat pseudo-tags like [INST] and <|im_start|>, which legitimate " +
 			"templates are built from, and the arguments of raise_exception(), which Transformers " +
-			"itself provides.",
+			"itself provides. High where SC4N-CARD-INJECTION is medium for the same phrasing: a card is " +
+			"read once, while a template is rendered around every conversation the model serves.",
 		Refs: []string{
 			"https://owasp.org/www-project-top-10-for-large-language-model-applications/",
 			"https://kb.cert.org/vuls/id/915947",

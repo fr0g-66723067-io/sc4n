@@ -152,6 +152,39 @@ func TestRunStdin(t *testing.T) {
 	}
 }
 
+// TestRunStdinReportsDigestScope pins the F25 fix: the stdin path hashed the
+// whole buffer and reported scope "full" even past MaxHashBytes, so a consumer
+// de-duplicating on (scope, digest) saw a full digest where a prefix was meant.
+func TestRunStdinReportsDigestScope(t *testing.T) {
+	l := limits.Default()
+	l.MaxHashBytes = 16
+	body := bytes.Repeat([]byte{0x41}, 64)
+	res, err := Run(context.Background(), Config{
+		StdinName: "stdin.bin",
+		Stdin:     bytes.NewReader(body),
+		Limits:    l,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := res.Artifacts[0]
+	if a.SHA256Scope != "prefix:16" {
+		t.Fatalf("sha256Scope = %q, want prefix:16 for a %d-byte stream past MaxHashBytes=%d",
+			a.SHA256Scope, len(body), l.MaxHashBytes)
+	}
+	// The scope must match what the file path would report for the same bytes.
+	dir := t.TempDir()
+	write(t, dir, "same.bin", body)
+	res2, err := Run(context.Background(), Config{Paths: []string{filepath.Join(dir, "same.bin")}, Limits: l})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Artifacts[0].SHA256 != a.SHA256 || res2.Artifacts[0].SHA256Scope != a.SHA256Scope {
+		t.Fatalf("stdin digest (%s, %s) differs from the file digest (%s, %s)",
+			a.SHA256, a.SHA256Scope, res2.Artifacts[0].SHA256, res2.Artifacts[0].SHA256Scope)
+	}
+}
+
 func TestRunStdinRespectsMaxArtifactBytes(t *testing.T) {
 	l := limits.Default()
 	l.MaxArtifactBytes = 4
@@ -237,5 +270,41 @@ func TestMemBudgetLargeSlotIsCancellable(t *testing.T) {
 	defer cancel()
 	if b.acquireLarge(ctx) {
 		t.Fatal("third large slot granted beyond maxConcurrentLarge")
+	}
+}
+
+// TestFindingsCapIsReportedAsAFinding pins the F19 fix: the drop was counted in
+// the summary but invisible to a consumer that watches findings, so a truncated
+// list looked complete.
+func TestFindingsCapIsReportedAsAFinding(t *testing.T) {
+	dir := t.TempDir()
+	// Two artifacts that each produce findings, with a cap of one.
+	write(t, dir, "a.pkl", []byte("\x80\x04\x8c\x02os\x8c\x06system\x93\x8c\x02id\x85\x52."))
+	write(t, dir, "b.pkl", []byte("\x80\x04\x8c\x02os\x8c\x06system\x93\x8c\x02id\x85\x52."))
+
+	l := limits.Default()
+	l.MaxFindings = 1
+	res, err := Run(context.Background(), Config{Paths: []string{dir}, Limits: l, Jobs: 2})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	fs := res.Collector.Findings()
+	if res.Collector.Dropped() == 0 {
+		t.Skip("this fixture produced no findings to drop")
+	}
+	var notice *report.Finding
+	for i := range fs {
+		if fs[i].RuleID == "SC4N-LIMIT-FINDINGS" {
+			notice = &fs[i]
+		}
+	}
+	if notice == nil {
+		t.Fatalf("no SC4N-LIMIT-FINDINGS notice; findings were %v", fs)
+	}
+	if notice.Artifact == "" {
+		t.Fatal("the notice does not name the artifact whose findings were dropped")
+	}
+	if len(fs) != 2 {
+		t.Fatalf("kept %d finding(s), want the capped one plus the notice", len(fs))
 	}
 }

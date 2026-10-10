@@ -11,10 +11,11 @@ import "github.com/fr0g-66723067-io/sc4n/internal/report"
 // which is handled by dispatching the blob rather than by a rule here.
 var (
 	// RuleStruct covers malformed and truncated MessagePack: an unknown type
-	// byte, a length that runs past the end of the file, a trailing byte after
-	// the top-level value, and the nesting/element caps. Flax/JAX/MLX write a
-	// single top-level map, so any of these is a file no reference decoder
-	// accepts.
+	// byte, a length that runs past the end of the file, and a trailing byte
+	// after the top-level value. Flax/JAX/MLX write a single top-level map, so
+	// any of these is a file no reference decoder accepts. The nesting and
+	// element budgets are not part of this rule: the walker reports those through
+	// limits.Emit as SC4N-LIMIT-DEPTH and SC4N-LIMIT-ENTRIES.
 	RuleStruct = report.DefineRule(report.Rule{
 		ID:         "SC4N-MSGPACK-STRUCT",
 		Title:      "MessagePack value violates the format",
@@ -23,8 +24,8 @@ var (
 		CWE:        []string{"CWE-20", "CWE-502"},
 		Class:      "structure",
 		Description: "A MessagePack type byte the parser does not know, a declared string/binary/ext/array/" +
-			"map length that runs past the end of the file, bytes after the single top-level value, or a " +
-			"document that exceeds the nesting or element budget. The walker is bounded and never " +
+			"map length that runs past the end of the file, or bytes after the single top-level value. " +
+			"The walker is bounded and never " +
 			"allocates from a declared length before checking it against the bytes remaining, so a " +
 			"crafted length cannot make the scan itself read out of bounds.",
 		Refs: []string{
