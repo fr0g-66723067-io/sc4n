@@ -104,6 +104,9 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	case isJinjaName(base):
 		return artifact.FormatJinja, true
 	}
+	if looksLikeJinjaHead(head) {
+		return artifact.FormatJinja, true
+	}
 	if looksLikeJSON(head) {
 		return artifact.FormatJSON, true
 	}
@@ -276,7 +279,9 @@ func firstInvalidUTF8(b []byte) int {
 }
 
 // looksLikeJSON reads one JSON token, which is enough to tell a JSON document
-// from a Jinja template that also begins with '{'.
+// from prose that happens to start with a brace. It cannot tell a JSON document
+// from a Jinja template that begins with "{{" — the token reader accepts the
+// opening brace — which is why looksLikeJinjaHead is tested first.
 func looksLikeJSON(b []byte) bool {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	tok, err := dec.Token()
@@ -287,6 +292,31 @@ func looksLikeJSON(b []byte) bool {
 	case json.Delim:
 		return d == '{' || d == '['
 	case string, float64, bool, nil:
+		return true
+	}
+	return false
+}
+
+// looksLikeJinjaHead reports whether the first non-space byte begins a Jinja
+// delimiter ({{, {% or {#). It is the narrow test that must run before the JSON
+// guess: looksLikeJSON accepts a leading '{', so a template that begins with "{{"
+// was claimed as JSON, never reached internal/jinja, and — in a file whose name
+// does not say .json — gained an SC4N-FORMAT-EXTENSION-MISMATCH that was an
+// artefact of the misclassification.
+//
+// It looks only at the head, so a JSON document that merely *contains* "{{" inside
+// a string keeps its JSON classification; that is what the substring test below is
+// for, and it is why this one is checked first rather than instead.
+func looksLikeJinjaHead(b []byte) bool {
+	i := 0
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n') {
+		i++
+	}
+	if i+1 >= len(b) || b[i] != '{' {
+		return false
+	}
+	switch b[i+1] {
+	case '{', '%', '#':
 		return true
 	}
 	return false

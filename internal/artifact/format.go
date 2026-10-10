@@ -284,6 +284,11 @@ func Sniff(s source.Source, l limits.Limits) (Format, string) {
 // is listed once under its dominant meaning, and the mismatch rule only fires
 // when the *sniffed* format has no plausible relationship with any meaning of the
 // extension.
+//
+// ".txt" lists Jinja because it is the untyped text extension: a chat template
+// saved as chat_template.txt is a template, and the content sniffer classifies it
+// as one, so without this entry every such file reported
+// SC4N-FORMAT-EXTENSION-MISMATCH for being what it is.
 var extensions = map[string][]Format{
 	"pkl":         {FormatPickle, FormatJoblib, FormatZlibJoblibLegacy},
 	"pickle":      {FormatPickle, FormatJoblib, FormatZlibJoblibLegacy},
@@ -329,7 +334,7 @@ var extensions = map[string][]Format{
 	"md":          {FormatMarkdown, FormatText},
 	"yaml":        {FormatYAML, FormatText},
 	"yml":         {FormatYAML, FormatText},
-	"txt":         {FormatText},
+	"txt":         {FormatText, FormatJinja},
 	"jsonl":       {FormatJSONLines},
 	"whl":         {FormatZip, FormatNPZ},
 	"so":          {FormatNative},

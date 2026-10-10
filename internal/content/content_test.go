@@ -351,3 +351,30 @@ func TestNonUTF8IsReportedAndStillScanned(t *testing.T) {
 		t.Fatalf("valid UTF-8 reported as invalid: %v", ids(fs))
 	}
 }
+
+// TestLeadingJinjaDelimiterBeatsTheJSONGuess is the regression for the routing
+// order: looksLikeJSON accepts a leading '{', so a template beginning with "{{"
+// was claimed as JSON, never reached internal/jinja, and — when the name did not
+// say .json — gained an SC4N-FORMAT-EXTENSION-MISMATCH that was an artefact of the
+// misclassification. The head test must run first, and it must look only at the
+// head so a JSON document that merely contains "{{" keeps its JSON routing.
+func TestLeadingJinjaDelimiterBeatsTheJSONGuess(t *testing.T) {
+	l := limits.Default()
+	for _, tc := range []struct{ name, body string }{
+		{"t.txt", "{{ config.SECRET }}"},
+		{"t.txt", "{% for x in y %}{{x}}{% endfor %}"},
+		{"t.txt", "{# comment #}hello"},
+		{"t.txt", "  \n\t{{ x }}"},
+	} {
+		fs := scanBytes(t, tc.name, []byte(tc.body), l)
+		if ids(fs)["SC4N-FORMAT-EXTENSION-MISMATCH"] {
+			t.Errorf("%q was not routed as a template; findings=%v", tc.body, ids(fs))
+		}
+	}
+	// A JSON document that contains "{{" inside a string keeps its JSON routing:
+	// the head test looks only at the leading bytes.
+	fs := scanBytes(t, "cfg.json", []byte(`{"a": "{{ x }}"}`), l)
+	if ids(fs)["SC4N-FORMAT-EXTENSION-MISMATCH"] {
+		t.Errorf("a JSON document containing {{ was misrouted; findings=%v", ids(fs))
+	}
+}
