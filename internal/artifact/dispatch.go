@@ -339,9 +339,9 @@ func init() {
 		Notes: "header validity is checked with debug/elf, debug/macho and debug/pe; a bare magic match without a valid header is reported at info only. A valid executable inside a model artifact is SC4N-POLYGLOT-NATIVE."})
 
 	RegisterFormat(Info{Format: FormatJSON, Magic: "leading { or [", Depth: DepthStructural,
-		Notes: "decoded with encoding/json into a bounded structure; the metadata, prompt-injection, tokenizer and repo-metadata rule families all apply to the decoded document."})
-	RegisterFormat(Info{Format: FormatJSONLines, Magic: "one JSON value per line", Depth: DepthStructural,
-		Notes: "every line is decoded independently; a malformed line is reported and the walk continues, so one bad line cannot hide the rest."})
+		Notes: "routing is name-dependent. The Hugging Face metadata names (config.json, adapter_config.json, modules.json, model_index.json, dataset_info.json) and the tokenizer files (tokenizer.json, tokenizer_config.json, special_tokens_map.json) are decoded with encoding/json and the metadata, tokenizer, chat-template and card-injection rule families run over the decoded document — every JSON value in the stream, not just the first. Any other JSON is scanned as raw text by the shared indicator engine."})
+	RegisterFormat(Info{Format: FormatJSONLines, Magic: "one JSON value per line", Depth: DepthShallow,
+		Notes: "no per-line decoder: the file is scanned as text by the shared indicator engine, so an indicator anywhere in it is found, while a malformed line is not reported and no per-line structure is decoded."})
 	RegisterFormat(Info{Format: FormatPython, Magic: "text; extension .py", Depth: DepthStructural,
 		Notes: "hand-written Python 3.14 lexer plus a statement-level taint engine over the source/sink pairs listed in docs/architecture.md; there is no type inference, so taint is intra-statement and intra-function."})
 	RegisterFormat(Info{Format: FormatNotebook, Magic: "JSON with a \"cells\" array", Depth: DepthStructural,
