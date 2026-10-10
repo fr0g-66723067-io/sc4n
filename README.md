@@ -11,9 +11,11 @@ headers, Python source, chat templates, cards — and never by running anything.
   extracted to disk, not passed to an external parser or decompressor. The only
   path sc4n writes is `-out`.
 - **Content-based dispatch.** The format comes from the bytes, not the file name.
-  A `.pt` that is a 7z archive, a `.bin` that is a pickle and a `.safetensors`
-  that is a zip are all scanned as what they are, and the disagreement is itself a
-  finding (`SC4N-FORMAT-EXTENSION-MISMATCH`).
+  A `.safetensors` that is a zip is scanned as a zip, and the disagreement is
+  itself a finding (`SC4N-FORMAT-EXTENSION-MISMATCH`). An extension is exempt where
+  the pair is a real convention rather than a contradiction: `.pt` may be a 7z
+  archive and `.bin` may be a pickle — the torch and Hugging Face save conventions —
+  so neither is reported as a mismatch.
 - **Report-only.** sc4n never rewrites, repairs or quarantines an artifact. It
   emits findings, plus an exit code a CI job can gate on.
 - **Bounded and deterministic.** One worker per artifact, a size-weighted memory
