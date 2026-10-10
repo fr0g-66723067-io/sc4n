@@ -28,8 +28,14 @@ const hdf5MaxPrefix = 16 << 20
 // land after the data section.
 const hdf5MaxSuffix = 1 << 20
 
-// hdf5MaxObjects caps the candidate JSON documents analysed per region.
-const hdf5MaxObjects = 64
+// hdf5MaxObjects caps the candidate JSON documents analysed per region. It is a
+// work bound, not a detection bound: the decode budget charges bytes read, which
+// for a region packed with tiny objects such as '{}' is two bytes each, so the
+// budget alone would let millions of decodes through and a crafted 16 MiB region
+// would cost tens of seconds. Reaching this cap is reported as SC4N-LIMIT-ENTRIES,
+// and it sits four orders of magnitude above the one or two documents a real
+// Keras .h5 carries, so a file that trips it is crafted or is not a Keras model.
+const hdf5MaxObjects = 65536
 
 // hdf5Parser is the registered parser for HDF5.
 type hdf5Parser struct{}
@@ -66,13 +72,20 @@ func (hdf5Parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 // region and applies the Keras class analysis to every document it finds.
 func scanHDF5Region(ctx *artifact.Ctx, base int64, region []byte) {
 	cap := ctx.Limits.MaxStringBlob
-	blobs, spent, limit := extractJSONObjects(region, cap, hdf5MaxObjects)
-	for _, blob := range blobs {
+	st := extractJSONObjects(region, cap, hdf5MaxObjects, func(blob jsonBlob) {
 		analyzeKerasValue(ctx, base+blob.off, "hdf5 model_config", blob.doc, 0)
-	}
-	if limit > 0 {
-		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxRecoveryBytes", spent, limit,
+	})
+	if st.overBudget {
+		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxRecoveryBytes", st.spent, st.budget,
 			"HDF5 JSON recovery decode budget exhausted, so later objects in the region were not recovered")
+	}
+	if st.atObjectCap {
+		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxJSONObjects", int64(st.objects), hdf5MaxObjects,
+			"HDF5 embedded JSON objects analysed in the region; later objects were not analysed")
+	}
+	if st.oversize > 0 {
+		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", st.oversize, cap,
+			"HDF5 embedded JSON object not analysed because it exceeds MaxStringBlob")
 	}
 	scanExternalPaths(ctx, base, region)
 }

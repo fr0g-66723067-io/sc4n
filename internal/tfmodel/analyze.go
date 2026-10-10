@@ -375,10 +375,21 @@ func (c *countReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// extractJSONObjects recovers up to max JSON objects from data. It is how the
-// shallow HDF5 reader finds model_config without an object-header reader:
-// attributes are stored as opaque bytes in the object header, and the JSON value
-// is one of them.
+// recoveryStats records what the JSON recovery did, so the caller can report
+// every bound that stopped it rather than read a truncated set as complete.
+type recoveryStats struct {
+	objects     int   // objects handed to fn
+	spent       int64 // decode budget charged, in bytes the decoder read
+	budget      int64 // the decode budget
+	overBudget  bool  // the decode budget stopped the walk
+	oversize    int64 // largest object skipped for exceeding MaxStringBlob, or 0
+	atObjectCap bool  // the object cap stopped the walk
+}
+
+// extractJSONObjects recovers JSON objects from data, handing each one to fn as
+// it is decoded. It is how the shallow HDF5 reader finds model_config without an
+// object-header reader: attributes are stored as opaque bytes in the object
+// header, and the JSON value is one of them.
 //
 // The walk attempts a decode at every '{', as it always did, but first finds the
 // last '}' in the region: once no '}' remains after the current '{', no value
@@ -389,18 +400,34 @@ func (c *countReader) Read(p []byte) (int, error) {
 // is exact, not a heuristic: it skips only decodes that cannot produce a recorded
 // object, so the recovered set is unchanged.
 //
-// A decode budget bounds the total bytes the decoder reads, so a region whose
-// braces are matched but repeatedly undecodable (the nest above closed by as many
-// '}') cannot run away; spent and limit carry the budget figures, and limit is
-// zero when the budget did not stop the walk, so the caller can report a
-// truncation rather than leave it silent.
-func extractJSONObjects(data []byte, cap int64, max int) (out []jsonBlob, spent, limit int64) {
+// Two bounds stop the walk, and both are reported rather than silent:
+//
+//   - max is a cap on the objects analysed. It is a *work* bound: the decode
+//     budget below charges bytes read, which for a region full of tiny objects
+//     such as `{}` is two bytes each, so the budget alone lets eight million
+//     decodes through and the region's size, not its contents, becomes the cost.
+//     max is set far above the one or two documents a real Keras .h5 carries, so
+//     reaching it is itself a signal about the file.
+//   - the decode budget bounds the bytes the decoder reads, so a region whose
+//     braces are matched but repeatedly undecodable (a deep nest closed by as many
+//     '}') cannot run away: each failed attempt charges everything it read.
+//
+// fn is called as each object is decoded and nothing is retained, so the memory
+// the walk uses is independent of how many objects a region holds.
+func extractJSONObjects(data []byte, cap int64, max int, fn func(jsonBlob)) recoveryStats {
 	if cap <= 0 {
 		cap = limits.Default().MaxStringBlob
 	}
-	limit = 8*int64(len(data)) + hdf5RecoveryBudgetFloor
+	if max <= 0 {
+		max = hdf5MaxObjects
+	}
+	st := recoveryStats{budget: 8*int64(len(data)) + hdf5RecoveryBudgetFloor}
 	lastClose := bytes.LastIndexByte(data, '}')
-	for i := 0; i < len(data) && len(out) < max; {
+	for i := 0; i < len(data); {
+		if st.objects >= max {
+			st.atObjectCap = true
+			return st
+		}
 		j := bytes.IndexByte(data[i:], '{')
 		if j < 0 {
 			break
@@ -414,28 +441,34 @@ func extractJSONObjects(data []byte, cap int64, max int) (out []jsonBlob, spent,
 		dec.UseNumber()
 		var v any
 		if err := dec.Decode(&v); err != nil {
-			spent += cr.n
-			if spent > limit {
-				return out, spent, limit
+			st.spent += cr.n
+			if st.spent > st.budget {
+				st.overBudget = true
+				return st
 			}
 			i = start + 1
 			continue
 		}
 		end := start + int(dec.InputOffset())
-		spent += int64(end - start)
-		if spent > limit {
-			return out, spent, limit
+		st.spent += int64(end - start)
+		if st.spent > st.budget {
+			st.overBudget = true
+			return st
 		}
 		if int64(end-start) > cap {
+			if int64(end-start) > st.oversize {
+				st.oversize = int64(end - start)
+			}
 			i = end
 			continue
 		}
 		if _, ok := v.(map[string]any); ok {
-			out = append(out, jsonBlob{off: int64(start), doc: v})
+			st.objects++
+			fn(jsonBlob{off: int64(start), doc: v})
 		}
 		i = end
 	}
-	return out, 0, 0
+	return st
 }
 
 // scanExternalPaths reports URL-shaped, absolute and traversal-bearing strings in
