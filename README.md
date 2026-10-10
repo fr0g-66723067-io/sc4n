@@ -26,8 +26,8 @@ headers, Python source, chat templates, cards — and never by running anything.
 |---|---|
 | pickle | bare pickle, joblib (all compression methods), torch zip, torch legacy, TorchScript, `.pt2` export archives |
 | numeric | safetensors, `.npy`/`.npz` (including object dtype), msgpack (Flax/JAX/MLX), XGBoost UBJSON |
-| model | GGUF, ONNX, TF SavedModel and checkpoints, Keras `.keras`/`.h5`, TFLite, CoreML `.mlmodel`/`.mlpackage`, ExecuTorch `.pte` |
-| containers | zip, tar, gzip, zlib, bzip2 (xz/lz4/zstd/7z/rar are recognised and reported, never decompressed — see `sc4n formats`) |
+| model | GGUF, ONNX, TF SavedModel/GraphDef and checkpoints, Keras `.keras`/`.h5`, TFLite, CoreML `.mlmodel`/`.mlpackage`, ExecuTorch `.pte` |
+| containers | zip (including zip64, prefixed archives and large stored members), tar, gzip, zlib, bzip2 (xz/lz4/zstd/7z/rar are recognised and reported, never decompressed — see `sc4n formats`) |
 | code and metadata | Python source, notebooks, Jinja chat templates, model/dataset cards, `config.json`/`tokenizer_config.json`/`adapter_config.json`, `setup.py`, `pyproject.toml`, `.pth`, `*.start`, GitHub workflows, wheels inside a repo |
 
 `sc4n formats` prints the same table with the **analysis depth** of every format,
@@ -48,6 +48,54 @@ go build -o sc4n ./cmd/sc4n
 # a repository, gated, with SARIF for GitHub code scanning
 ./sc4n scan -format sarif -out sc4n.sarif -fail-on high .
 ```
+
+## Flags
+
+`sc4n scan` (all flags are also in `sc4n scan -h`):
+
+| flag | meaning |
+|---|---|
+| `-format text\|json\|sarif\|cyclonedx` | output format; `text` is the default and is the only one that colourises (only when stdout is a TTY) |
+| `-out FILE` | write the report to a file instead of stdout |
+| `-fail-on info\|low\|medium\|high\|critical` | severity threshold for exit code 1 (default `high`) |
+| `-baseline FILE` | suppress findings already present in a previous JSON report, and say how many were suppressed |
+| `-j N` | worker count (default: one per CPU) |
+| `-mem-budget BYTES` | total size of artifacts mapped concurrently (default 1 GiB) |
+| `-max-artifact`, `-max-depth`, `-max-decompress`, `-max-ratio` | override the resource caps in `docs/architecture.md` |
+| `-timeout DURATION` | bound the whole scan; a cancelled scan says so rather than presenting a partial result as complete |
+| `-root DIR` | containment root for path-shaped values (ONNX external data, SavedModel assets, symlinks) |
+| `-hf-cache [DIR]` | scan a Hugging Face download cache, resolving `snapshots/` symlinks into `blobs/` and scanning each blob once |
+| `-deep-stats` | enable the informational weight-statistics rules (NaN/Inf, duplicates, outliers, entropy) |
+| `-timings` | include per-phase timings in the report |
+| `-quiet`, `-color` | output control |
+| `-stdin -name NAME` | scan a single artifact from standard input |
+
+## Baselines
+
+A finding you have reviewed and accepted should not have to be triaged again on
+every run. `-baseline` takes a previous JSON report and suppresses the findings it
+already contains:
+
+```sh
+./sc4n scan -format json -out baseline.json ./models
+# after reviewing baseline.json:
+./sc4n scan -baseline baseline.json -fail-on high ./models
+```
+
+Suppression is by `(rule, artifact, hash of the evidence window)` — the byte
+offset is deliberately *not* part of the key, because inserting an unrelated byte
+shifts every later offset and a baseline that un-suppresses on such an edit is
+worse than none. The summary line always states how many findings were
+suppressed, so a baseline can never silently turn a new finding into a clean run.
+
+## Digests
+
+The scan computes a sha256 per artifact as an identity (for the report and for
+`-hf-cache` de-duplication). Because sha256 is CPU-bound (measured 0.35 GB/s on
+the reference host, which has AVX2 but no SHA-NI), the digest is capped at
+`MaxHashBytes` (256 MiB) by default and the report states the scope:
+`sha256Scope` is `full` or `prefix:<bytes>`. `sc4n hash <path>` computes a full
+sha256 (and sha1) when a real provenance digest is what you need.
 
 ## Exit codes
 

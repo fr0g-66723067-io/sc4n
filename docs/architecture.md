@@ -131,6 +131,9 @@ silently missing catalogue entry.
 | `MaxDecompressedBytes` | 8 GiB | per archive; a real model's members sum below this |
 | `MaxRatio` | 200 | above real model compression (tokenizer JSON reaches ~20:1), below a zip bomb |
 | `MaxStringBlob` | 16 MiB | one metadata value, tokenizer entry or embedded JSON |
+| `MaxSpillBytes` | 4 GiB | one archive member materialised on disk for parsing; above every published single-member shape, below a decompression bomb that fills the temporary filesystem |
+| `MaxRetainedText` | 64 MiB | total text one artifact's parse keeps alive; per-value caps alone still let a million small values add up |
+| `MaxHashBytes` | 256 MiB | how much of an artifact the scan digests — see the performance section for why a full digest of a 13 GiB checkpoint cannot fit the budget |
 | `MaxFindings` | 100 000 | a crafted artifact must not exhaust memory; a drop is reported |
 | `MaxStackDepth` | 1<<20 | a real state_dict builds a stack a few hundred deep |
 | `MmapThreshold` | 1 MiB | below this, mapping costs more than reading |
@@ -139,16 +142,80 @@ Every one of these, when hit, is an `SC4N-LIMIT-*` finding naming the limit and
 the observed value. Silent truncation is never acceptable: a scanner that stops
 early and says nothing is indistinguishable from one that found nothing.
 
+Two of them are worth reading as design notes rather than as caps:
+
+- **`MaxSpillBytes`** exists because a member can be larger than memory. A
+  *stored* zip member above `MaxStringBlob` is handed to the parser as a
+  zero-copy section of the parent mapping; a *compressed* one is decompressed into
+  a private temporary file that is unlinked before it is mapped, so a 4 GiB
+  member inside a `.pt` is parsed by the same random-access parsers that read a
+  top-level file, and its CRC-32 is still validated (at close, by streaming the
+  member once — the parser may have read only a header).
+- **`MaxHashBytes`** exists because sha256 is CPU-bound on this class of host.
+  Measured: 0.35 GB/s (the reference CPU has AVX2 but no SHA-NI), so a full digest
+  of a 13 GiB artifact costs ~37 s — more than the entire scan budget — while the
+  digest is only an identity, not a verdict. Above the cap the report carries
+  `sha256Scope: "prefix:<bytes>"`; `sc4n hash <path>` is the command that
+  computes a full sha256 when one is actually needed.
+
 ## Performance
 
-Measured on the reference host (8 cores, 14 GiB RAM), `make bench`:
+Measured on the reference host (8 cores, 14 GiB RAM, `go1.27.0 linux/amd64`),
+`make bench` for the kernels and `make bench-big` for the end-to-end gate. The
+budget column is what the plan set; the measured column is what the tree does
+today, with the honest gaps marked.
 
-| path | budget |
-|---|---|
-| pickle walk | ≥ 300 MB/s/core |
-| safetensors header + metadata | ≥ 1 GB/s |
-| string/entropy scan | ≥ 1 GB/s/core |
-| end-to-end 13 GB F16 safetensors | ≤ 20 s wall, ≤ 512 MiB RSS |
+| path | budget | measured | note |
+|---|---|---|---|
+| pickle walk, opcode-dense state_dict (4000 entries × 256 B) | ≥ 300 MB/s/core | **359 MB/s**, 14719 allocs/1.2 MB | per-opcode cost, not per-byte |
+| pickle walk, blob-dense (16 × 64 KiB constants) | — | **3.7 GB/s** | this is the shape a real torch storage pickle has |
+| byte histogram / entropy (full file) | ≥ 1 GB/s/core | **1.13 GB/s**, 0 allocs | the full-file pass |
+| indicator engine over prose + indicators | ≥ 1 GB/s/core | **118 MB/s** | **not met** — see below |
+| — of which: Aho–Corasick literals | — | 220 MB/s | one dependent load chain per byte |
+| — of which: Unicode anomaly walk | — | 550 MB/s | ASCII fast path, `utf8.DecodeRune` only for non-ASCII |
+| — of which: raw-IP URL hunt | — | 2.2 GB/s | two single-anchor `bytes.IndexByte` passes |
+| validated-native search over random bytes | — | 186 MB/s | header validation, not a byte scan |
+| safetensors header + metadata | ≥ 1 GB/s | 8 µs per header | the file's *body* is not read |
+| end-to-end 13.00 GiB F16 safetensors | ≤ 20 s wall, ≤ 512 MiB RSS | **1.25 s wall (10.4 GiB/s), 7.8 MiB anonymous RSS** | `make bench-big` |
+
+### The one budget that is not met, and why
+
+The plan asked for a full-file string/entropy scan at ≥ 1 GB/s per core. The
+histogram meets it (1.13 GB/s). The indicator engine does not: a byte-at-a-time
+Aho–Corasick walk is a *dependent* chain — the transition for byte *i+1* cannot
+start until byte *i*'s table load has completed — and that chain costs about 4.5 ns
+per byte on this CPU regardless of how the table is laid out. The obvious encoding
+(`[256]int32` per node) was measured at 74 MB/s; class-compressing the goto table
+so that only the ~70 bytes that actually occur in an indicator get a column, and
+materialising fail transitions so the walk has no fail loop, brought it to
+220 MB/s; the ASCII fast paths in the Unicode and URL scanners removed the two
+scanners that were *slower* than the automaton.
+
+What is not on that path, and why the end-to-end number is what it is: the
+indicator engine runs over *text* — metadata values, config JSON, source, cards,
+templates — which is tens of megabytes in a real repository, while the tensor
+bodies that make up 99% of a checkpoint are handled by the histogram and by
+bounded header parses. That is why 13 GiB scans in 1.25 s even though the string
+engine is 8x off its per-core target. Closing the gap needs SIMD literal matching
+(a Teddy/FDR-style nibble-shuffle engine), which is a project in itself and is
+recorded here rather than pretended away.
+
+### Two measurement notes
+
+**Resident memory is measured as anonymous RSS, not VmHWM.** A memory-mapped
+artifact's pages are charged to the process's RSS while the kernel holds them in
+the page cache, so VmHWM grows to the artifact size (272 MiB on the 13 GiB run)
+even though the process never owns those bytes and the kernel may reclaim them
+under pressure. `RssAnon` — 7.8 MiB on the same run — is the number that answers
+"did the scanner materialise the artifact". Both are reported by
+`make bench-big`; the budget is asserted against the anonymous figure, and the
+threat model states the same distinction.
+
+**The digest is capped, and says so.** `sha256Scope` is `full` below
+`MaxHashBytes` and `prefix:<bytes>` above it. A prefix digest presented as a file
+digest would be exactly the kind of silent truncation the rest of this tool
+refuses to do, so the scope travels with the value in JSON, in the text summary
+and in the SARIF/CycloneDX output.
 
 The budgets are properties of the design rather than hopes: an artifact is mapped
 once, its digest is computed concurrently with the parse, the indicator engine is
