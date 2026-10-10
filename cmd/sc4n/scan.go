@@ -161,7 +161,17 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 			return exitUnreadable
 		}
 		if len(entries) == 0 {
+			// The expander's structural findings — a malformed ref, a dangling blob
+			// — are already in the collector, which is exactly why it is created
+			// before Expand runs. Returning here without a report made a cache whose
+			// refs are broken indistinguishable from a cache that is simply empty,
+			// and -out was never created.
 			fmt.Fprintf(stderr, "sc4n: -hf-cache: %s holds no blobs\n", dir)
+			rep := report.Build(report.Tool{Name: "sc4n", Version: version}, f.root, nil, collector,
+				reportLimits(l), nil, 0)
+			if werr := writeReport(rep, f, stdout); werr != nil {
+				fmt.Fprintf(stderr, "sc4n: %v\n", werr)
+			}
 			return exitUnreadable
 		}
 		cfg.Paths = nil
@@ -190,28 +200,9 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	rep.Unreadable = res.Unreadable
 	rep.Cancelled = res.Cancelled
 
-	w := stdout
-	var file *os.File
-	if f.out != "" {
-		file, err = os.Create(f.out)
-		if err != nil {
-			fmt.Fprintf(stderr, "sc4n: %v\n", err)
-			return exitUsage
-		}
-		w = file
-	}
-	werr := render(rep, f, w)
-	if file != nil {
-		if cerr := file.Close(); cerr != nil && werr == nil {
-			werr = cerr
-		}
-	}
-	if werr != nil {
+	if werr := writeReport(rep, f, stdout); werr != nil {
 		fmt.Fprintf(stderr, "sc4n: %v\n", werr)
 		return exitUsage
-	}
-	if file != nil && f.format != "text" {
-		fmt.Fprintln(stdout, rep.SummaryLine())
 	}
 
 	if res.Cancelled {
@@ -236,6 +227,36 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sc4n: %s\n", v.Reason)
 	}
 	return v.Code
+}
+
+// writeReport renders rep to -out (or stdout) and, for a non-text format written
+// to a file, echoes the summary line to stdout. Both the normal path and the
+// empty-hf-cache path use it, so no path can return without the report the run
+// was asked for.
+func writeReport(rep *report.Report, f scanFlags, stdout io.Writer) error {
+	w := stdout
+	var file *os.File
+	if f.out != "" {
+		var err error
+		file, err = os.Create(f.out)
+		if err != nil {
+			return err
+		}
+		w = file
+	}
+	werr := render(rep, f, w)
+	if file != nil {
+		if cerr := file.Close(); cerr != nil && werr == nil {
+			werr = cerr
+		}
+	}
+	if werr != nil {
+		return werr
+	}
+	if file != nil && f.format != "text" {
+		fmt.Fprintln(stdout, rep.SummaryLine())
+	}
+	return nil
 }
 
 func buildLimits(f scanFlags) (limits.Limits, error) {

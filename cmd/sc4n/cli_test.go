@@ -346,10 +346,33 @@ func TestHFCacheScansEachBlobOnce(t *testing.T) {
 	if code := run([]string{"scan", "-hf-cache", "-hf-cache-dir", dir, "."}, &out, &errOut); code != exitUsage {
 		t.Fatalf("-hf-cache with a path argument exited %d, want %d", code, exitUsage)
 	}
-	// A directory with no blobs is not a silent clean run.
+	// A directory with no blobs is not a silent clean run, and it must still
+	// produce the report the run was asked for.
 	out.Reset()
 	errOut.Reset()
 	if code := run([]string{"scan", "-hf-cache", "-hf-cache-dir", t.TempDir()}, &out, &errOut); code != exitUnreadable {
 		t.Fatalf("empty cache exited %d, want %d", code, exitUnreadable)
+	}
+	if !strings.Contains(out.String(), "0 artifact(s)") {
+		t.Fatalf("an empty cache produced no report: %q", out.String())
+	}
+
+	// A ref that is not a commit is a finding the expander recorded before the
+	// walk, and rendering it is the whole reason the collector is passed in:
+	// returning early made a cache whose refs are broken look empty.
+	bad := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bad, "models--x", "refs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad, "models--x", "refs", "main"), []byte("not-a-commit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"scan", "-hf-cache", "-hf-cache-dir", bad, "-format", "json"}, &out, &errOut); code != exitUnreadable {
+		t.Fatalf("malformed ref exited %d, want %d", code, exitUnreadable)
+	}
+	if !strings.Contains(out.String(), "SC4N-HFCACHE-REF-MALFORMED") {
+		t.Fatalf("the malformed ref was not rendered: %q", out.String())
 	}
 }
