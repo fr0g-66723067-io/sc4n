@@ -40,8 +40,10 @@ var RuleExtensionMismatch = report.DefineRule(report.Rule{
 	Description: "The bytes identify a different container than the file name implies. sc4n dispatched on " +
 		"the content, so the real format was still scanned; the finding matters because every " +
 		"extension-driven tool in the chain (and the human deciding whether to load the file) sees the " +
-		"name first and the format second. A .pt that is a 7z archive, a .bin that is a pickle and a " +
-		".safetensors that is a zip are all documented evasion shapes.",
+		"name first and the format second. A .safetensors that is a zip, a .npz that is a tar and a " +
+		".gguf that is a zip are documented evasion shapes. Where the pair is a real convention the " +
+		"extension is exempt and this rule stays silent: a .pt that is a 7z archive is the February 2025 " +
+		"campaign, reported as SC4N-TORCH-7Z, and a .bin that is a pickle is an ordinary torch save.",
 	Refs: []string{"https://huggingface.co/blog/notable-models-scanned"},
 	Tags: []string{"evasion"},
 })
