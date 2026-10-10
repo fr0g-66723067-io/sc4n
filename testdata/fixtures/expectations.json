@@ -18,9 +18,39 @@
       ],
       "notes": "The boundary of the same row: a gzip stream named .bin is not something torch.load or any other .bin loader reads, so listing a zip for .bin must not excuse it."
     },
+    "card_bidi/README.md": {
+      "expect": [
+        "SC4N-CARD-HIDDEN"
+      ],
+      "forbid": [
+        "SC4N-CARD-INVISIBLE"
+      ],
+      "notes": "A right-to-left override around reversed text: the character rewrites the reading order, which is never accidental (Trojan Source)."
+    },
+    "card_comment_instruct/README.md": {
+      "expect": [
+        "SC4N-CARD-HIDDEN",
+        "SC4N-CARD-INJECTION"
+      ],
+      "forbid": [
+        "SC4N-CARD-COMMENT"
+      ],
+      "notes": "The hidden-directive shape the high severity exists for: instruction text inside a comment, which the model reads and the reviewer never sees."
+    },
+    "card_comment_plain/README.md": {
+      "expect": [
+        "SC4N-CARD-COMMENT"
+      ],
+      "forbid": [
+        "SC4N-CARD-HIDDEN",
+        "SC4N-CARD-INJECTION"
+      ],
+      "notes": "A commented-out Markdown heading: invisible to every renderer, so reported, but with no instruction in it. This is 419 of the 450 comments and invisible runs the 273-model HF campaign produced, and calling each one high was the defect."
+    },
     "card_hidden/README.md": {
       "expect": [
         "SC4N-CARD-HIDDEN",
+        "SC4N-CARD-INVISIBLE",
         "SC4N-UNICODE-ANOMALY"
       ],
       "notes": "A card whose only unusual content is hidden: an HTML comment carrying a directive and a run of zero-width spaces. No injection phrase, so the shared phrase rule must stay silent and only the hidden-channel rule fires."
@@ -29,6 +59,7 @@
       "expect": [
         "SC4N-CARD-INJECTION",
         "SC4N-CARD-HIDDEN",
+        "SC4N-CARD-INVISIBLE",
         "SC4N-METADATA-INJECTION",
         "SC4N-UNICODE-ANOMALY"
       ],
@@ -37,6 +68,15 @@
         "SC4N-PICKLE-GLOBAL-CRITICAL"
       ],
       "notes": "A model card with a valid apache-2.0 frontmatter block, an explicit \"ignore previous instructions\" line, a hidden HTML-comment directive and a zero-width run. Reproduces the OWASP LLM01 card-injection channel plus the Trojan-Source invisible-character channel (CWE-1007)."
+    },
+    "card_zwsp/README.md": {
+      "expect": [
+        "SC4N-CARD-INVISIBLE"
+      ],
+      "forbid": [
+        "SC4N-CARD-HIDDEN"
+      ],
+      "notes": "A zero-width space in a field list: hides a character without reordering anything, which is what pasting from a rendered page leaves behind."
     },
     "content_adapter/adapter_config.json": {
       "expect": [

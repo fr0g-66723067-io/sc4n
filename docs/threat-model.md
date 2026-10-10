@@ -449,11 +449,15 @@ homoglyphs and mixed scripts evade a human reviewer while remaining renderable.
 **Evidence.** OWASP LLM01 (prompt injection); the spotlighting/datamarking line of
 mitigation work.
 
-**Detectors.** `SC4N-CARD-INJECTION`, `SC4N-CARD-HIDDEN` (hidden comments,
-zero-width and bidi runs), `SC4N-CARD-PARSE` (frontmatter that does not parse —
-reported, then the raw text is still scanned), `SC4N-METADATA-INJECTION`,
-`SC4N-METADATA-CODE` (a metadata value that looks like code),
-`SC4N-UNICODE-ANOMALY`, and the shared indicator engine's `SC4N-STRING-C2`,
+**Detectors.** `SC4N-CARD-INJECTION`, `SC4N-CARD-HIDDEN` (instruction text in an
+HTML comment, or a bidi run that reorders text), `SC4N-CARD-COMMENT` (an HTML
+comment with no instruction in it — informational, because a commented-out
+heading, a lint directive and an uploader's section markers are editorial
+practice), `SC4N-CARD-INVISIBLE` (a zero-width run that reorders nothing — what a
+copy-paste from a rendered page leaves behind), `SC4N-CARD-PARSE` (frontmatter
+that does not parse — reported, then the raw text is still scanned),
+`SC4N-METADATA-INJECTION`, `SC4N-METADATA-CODE` (a metadata value that looks like
+code), `SC4N-UNICODE-ANOMALY`, and the shared indicator engine's `SC4N-STRING-C2`,
 `-RAW-IP-URL`, `-CREDENTIAL`, `-SECRET-VALUE` over every metadata string.
 
 **Mitigation.** Treat card text as untrusted input, never as documentation to be

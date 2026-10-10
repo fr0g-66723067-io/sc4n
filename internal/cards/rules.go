@@ -49,28 +49,78 @@ var (
 
 	// ruleCardHidden is the hidden-channel rule. It is high because a card is a
 	// document whose whole purpose is to be read, and both HTML comments and the
-	// zero-width/bidi set are unreadable to the human the card is for.
+	// order-affecting control characters are unreadable to the human the card is
+	// for.
 	ruleCardHidden = report.DefineRule(report.Rule{
 		ID:         "SC4N-CARD-HIDDEN",
-		Title:      "Card hides text in an HTML comment or with invisible characters",
+		Title:      "Card hides instruction text in an HTML comment or reorders text with control characters",
 		Severity:   report.SeverityHigh,
 		Confidence: report.ConfidenceHigh,
 		CWE:        []string{"CWE-1007", "CWE-1426"},
 		Class:      "card",
-		Description: "A model card, dataset card or metadata value contains an HTML comment or a run of " +
-			"zero-width/bidi control characters. Every Markdown renderer drops HTML comments, so " +
-			"instruction text in one is present for the model and absent for the person reviewing the " +
-			"card; the zero-width/bidi set is the same idea at the character level, and the bidirectional " +
-			"overrides additionally reorder what a reader sees (Trojan Source). High because the only " +
-			"reason to put instruction text in a comment is to hide it from review. Note the honest " +
-			"false-positive direction: a build or lint directive (`<!-- markdownlint-disable -->`) also " +
-			"trips this, so read the evidence before acting.",
+		Description: "A model card, dataset card or metadata value carries instruction-shaped text inside " +
+			"an HTML comment, or a run of order-affecting control characters (the bidirectional " +
+			"overrides and directional marks — Trojan Source). Every Markdown renderer drops HTML " +
+			"comments, so an instruction in one is present for the model and absent for the person " +
+			"reviewing the card, and a bidirectional override reorders what that person reads. High " +
+			"because text shaped like an instruction, or a character that rewrites the reading order, " +
+			"has no editorial purpose in a card. A comment *without* instruction-shaped text is " +
+			"SC4N-CARD-COMMENT (info) and a zero-width run that reorders nothing is " +
+			"SC4N-CARD-INVISIBLE (medium): the split is what keeps this rule's severity meaningful " +
+			"on the 450 comments and invisible runs of the 273-model HF campaign, every one of which " +
+			"carried no instruction at all.",
 		Refs: []string{
 			"https://trojansource.codes/",
 			"https://cwe.mitre.org/data/definitions/1007.html",
 			"https://owasp.org/www-project-top-10-for-large-language-model-applications/",
 		},
 		Tags: []string{"card", "hidden", "prompt-injection"},
+	})
+
+	// ruleCardComment is the editorial case of the hidden channel: a comment is
+	// invisible to every renderer, so it is reported, but a comment with no
+	// instruction in it is how a card carries a commented-out heading, a lint
+	// directive or an uploader's section markers.
+	ruleCardComment = report.DefineRule(report.Rule{
+		ID:         "SC4N-CARD-COMMENT",
+		Title:      "Card carries an HTML comment with no instruction in it",
+		Severity:   report.SeverityInfo,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-1007"},
+		Class:      "card",
+		Description: "A model card, dataset card or metadata value contains an HTML comment whose body " +
+			"carries no instruction-shaped text. A Markdown renderer drops the comment, so the reader " +
+			"never sees it, which is why it is reported at all; it is informational because a " +
+			"commented-out heading, a `<!-- markdownlint-disable -->` directive and an uploader's " +
+			"`<!-- RVN_FILE_SELECTION_GUIDE_START -->` markers are ordinary editorial practice — 419 " +
+			"of the 450 comments in the 273-model HF campaign. A comment that does carry " +
+			"instruction-shaped text is SC4N-CARD-HIDDEN (high).",
+		Refs: []string{
+			"https://cwe.mitre.org/data/definitions/1007.html",
+			"https://huggingface.co/docs/hub/model-cards",
+		},
+		Tags: []string{"card"},
+	})
+
+	// ruleCardInvisible is the copy-paste case of the invisible-character channel:
+	// a zero-width or soft-hyphen run hides text from a reader without reordering
+	// it, which happens by accident whenever text is pasted from a rendered page.
+	ruleCardInvisible = report.DefineRule(report.Rule{
+		ID:         "SC4N-CARD-INVISIBLE",
+		Title:      "Card carries an invisible character that reorders nothing",
+		Severity:   report.SeverityMedium,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-1007"},
+		Class:      "card",
+		Description: "A model card, dataset card or metadata value contains a run of zero-width or " +
+			"soft-hyphen characters: characters a reader does not see, but that do not reorder the " +
+			"text either. Medium because copy-paste from a rendered page carries them by accident — " +
+			"they are also legitimate data in a tokenizer vocabulary — where an order-affecting " +
+			"control character is never accidental and is reported as SC4N-CARD-HIDDEN (high).",
+		Refs: []string{
+			"https://cwe.mitre.org/data/definitions/1007.html",
+		},
+		Tags: []string{"card", "hidden"},
 	})
 
 	// ruleCardParse is low: an unparseable frontmatter block is a reason to fall

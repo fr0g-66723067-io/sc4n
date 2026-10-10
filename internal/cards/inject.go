@@ -187,8 +187,15 @@ func (idx offsetIndex) locate(data []byte, s string) int64 {
 }
 
 // hidden reports HTML comments and runs of invisible/order-control characters.
-// An HTML comment whose body carries instruction indicators is additionally
-// reported as an injection, because that is the hidden-directive shape.
+//
+// The two channels are split by what the text actually is, not by the channel:
+// an HTML comment is reported high only when its body carries instruction-shaped
+// text (the hidden-directive shape), and informational when it does not, because
+// a commented-out heading, a lint directive and an uploader's section markers are
+// editorial practice — 419 of the 450 comments and invisible runs in the 273-model
+// HF campaign. A run of invisible characters is reported high when it reorders
+// what a reader sees (Trojan Source) and medium when it only hides text, which is
+// what a copy-paste from a rendered page leaves behind.
 func hidden(sink *report.Sink, base int64, what, text string) {
 	for i := 0; ; {
 		j := strings.Index(text[i:], "<!--")
@@ -202,11 +209,17 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 		if k >= 0 {
 			body = rest[:k]
 		}
-		sink.Emit(ruleCardHidden, base+int64(start),
-			"HTML comment in "+what+", hidden from every Markdown renderer: "+strconv.Quote(report.TruncateEvidence(body, 120)))
-		if hits := stringscan.ScanString(body); len(hits) > 0 {
-			sink.Emit(ruleCardInjection, base+int64(start),
-				"instruction-like content hidden in an HTML comment in "+what+": "+strconv.Quote(report.TruncateEvidence(body, 120)))
+		quoted := strconv.Quote(report.TruncateEvidence(body, 120))
+		if hasInstruction(body) {
+			sink.Emit(ruleCardHidden, base+int64(start),
+				"HTML comment in "+what+", hidden from every Markdown renderer, carries instruction-shaped text: "+quoted)
+			if len(stringscan.ScanString(body)) > 0 {
+				sink.Emit(ruleCardInjection, base+int64(start),
+					"instruction-like content hidden in an HTML comment in "+what+": "+quoted)
+			}
+		} else {
+			sink.Emit(ruleCardComment, base+int64(start),
+				"HTML comment in "+what+", hidden from every Markdown renderer, carries no instruction: "+quoted)
 		}
 		if k < 0 {
 			break
@@ -222,17 +235,52 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 		}
 		start := i
 		n := 0
+		reorders := false
 		for i < len(text) {
 			r2, s2 := utf8.DecodeRuneInString(text[i:])
 			if !invisible(r2) {
 				break
 			}
+			if orderAffecting(r2) {
+				reorders = true
+			}
 			i += s2
 			n++
 		}
-		sink.Emit(ruleCardHidden, base+int64(start),
-			fmt.Sprintf("%d invisible or text-order control character(s) in %s", n, what))
+		if reorders {
+			sink.Emit(ruleCardHidden, base+int64(start),
+				fmt.Sprintf("%d invisible or text-order control character(s) in %s; the run reorders text (Trojan Source)", n, what))
+			continue
+		}
+		sink.Emit(ruleCardInvisible, base+int64(start),
+			fmt.Sprintf("%d invisible character(s) in %s, which hide text without reordering it", n, what))
 	}
+}
+
+// hasInstruction reports whether a comment body is shaped like an instruction: a
+// shared indicator (the phrase and pseudo-tag table) or one of the card-specific
+// directives. Both tables already exist; this is the one place that asks either.
+func hasInstruction(body string) bool {
+	if len(stringscan.ScanString(body)) > 0 {
+		return true
+	}
+	low := strings.ToLower(body)
+	for _, d := range cardDirectives {
+		if strings.Contains(low, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// orderAffecting reports the invisible characters that reorder what a reader sees
+// (Trojan Source): the bidirectional overrides and the three directional marks.
+func orderAffecting(r rune) bool {
+	switch r {
+	case 0x061C, 0x200E, 0x200F:
+		return true
+	}
+	return r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069
 }
 
 // directives reports imperative and tool-call directives that the shared

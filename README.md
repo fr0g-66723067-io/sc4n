@@ -38,8 +38,8 @@ headers, Python source, chat templates, cards — and never by running anything.
 
 `sc4n formats` prints the same table with the **analysis depth** of every format,
 including the ones that are deliberately recognised but not parsed. Every rule
-states its severity, confidence and class, and a CWE where one applies — 175 of the
-190 rules name a weakness; the 15 that do not are the ones where there is nothing
+states its severity, confidence and class, and a CWE where one applies — 174 of the
+189 rules name a weakness; the 15 that do not are the ones where there is nothing
 to name, such as "the weights are all zero" or "the extent could not be verified":
 `sc4n rules`.
 
