@@ -334,8 +334,9 @@ var ruleTFLiteStruct = report.DefineRule(report.Rule{
 	CWE:        []string{"CWE-20"},
 	Class:      "structure",
 	Description: "A .tflite file's root table offset or a vtable/vector/string reference points outside the " +
-		"file, or the identifier is not 'TFL3' at offset 4. The walk stops at the broken reference and " +
-		"reports it, so a malformed flatbuffer is visible rather than silently unread.",
+		"file, or the identifier is not 'TFL3' at offset 4. The walk reports the broken reference — once per " +
+		"file, so a malformed file cannot spend the whole finding budget on its own damage — and continues " +
+		"wherever the remaining structure is resolvable, so the parts that are readable are still walked.",
 	Refs: []string{"https://cwe.mitre.org/data/definitions/20.html"},
 	Tags: []string{"tflite"},
 })

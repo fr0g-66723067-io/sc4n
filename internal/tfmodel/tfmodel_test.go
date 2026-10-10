@@ -378,9 +378,10 @@ func TestBaseNameOf(t *testing.T) {
 }
 
 // TestTFLiteBrokenReferenceIsReported: the rule's text promises that the walk
-// stops at a broken reference and reports it. A file whose root table resolves but
-// whose operator-code vector points outside the file used to report clean, because
-// every walk site returned ok=false and the caller continued.
+// reports the broken reference and continues wherever the rest of the structure
+// resolves. A file whose root table resolves but whose operator-code vector points
+// outside the file used to report clean, because every walk site returned ok=false
+// and the caller continued silently.
 func TestTFLiteBrokenReferenceIsReported(t *testing.T) {
 	// [root u32 = 24][TFL3][vtable @12: vtsize 8, tablesize 8, field0 0, field1 4]
 	// [table @24: soffset 12][field1 @28: uoffset 100000 -> outside the file]
@@ -414,6 +415,49 @@ func TestTFLiteBrokenReferenceIsReported(t *testing.T) {
 	binary.LittleEndian.PutUint32(ok[24:], 12)
 	if ids(parseBytes(t, tfliteParser{}, "ok.tflite", ok))["SC4N-TFLITE-STRUCT"] {
 		t.Fatalf("an absent field was reported as broken: %v", ids(parseBytes(t, tfliteParser{}, "ok.tflite", ok)))
+	}
+}
+
+// TestTFLiteWalkContinuesPastABrokenReference pins the other half of the rule's
+// text: a broken reference does not end the walk. The layout below has a two-element
+// operator-code vector whose first element points outside the file and whose second
+// resolves to a table with a custom_code string, so a walk that stopped at the
+// damage would report SC4N-TFLITE-STRUCT and nothing else.
+func TestTFLiteWalkContinuesPastABrokenReference(t *testing.T) {
+	buf := make([]byte, 320)
+	// [root u32 = 64][TFL3]
+	binary.LittleEndian.PutUint32(buf, 64)
+	copy(buf[4:8], "TFL3")
+	// [vtable @16: vtsize 16, tablesize 28, field0..5 = 4,8,12,16,20,24]
+	for i, v := range []uint16{16, 28, 4, 8, 12, 16, 20, 24} {
+		binary.LittleEndian.PutUint16(buf[16+2*i:], v)
+	}
+	// [root table @64: soffset 48 -> vtable @16][field0 @68 = version 3]
+	// [field1 @72 = uoffset 128 -> operator_codes @200]
+	binary.LittleEndian.PutUint32(buf[64:], 48)
+	binary.LittleEndian.PutUint32(buf[68:], 3)
+	binary.LittleEndian.PutUint32(buf[72:], 128)
+	// [operator_codes @200: count 2][slot0 @204 -> 100000 (outside the file)]
+	// [slot1 @208 = uoffset 32 -> OperatorCode table @240]
+	binary.LittleEndian.PutUint32(buf[200:], 2)
+	binary.LittleEndian.PutUint32(buf[204:], 100000)
+	binary.LittleEndian.PutUint32(buf[208:], 32)
+	// [OperatorCode @240: soffset 20 -> vtable @220: vtsize 8, tablesize 12, field0 0, field1 8]
+	binary.LittleEndian.PutUint32(buf[240:], 20)
+	for i, v := range []uint16{8, 12, 0, 8} {
+		binary.LittleEndian.PutUint16(buf[220+2*i:], v)
+	}
+	// [field1 @248 = uoffset 32 -> string @280: length 3, "abc"]
+	binary.LittleEndian.PutUint32(buf[248:], 32)
+	binary.LittleEndian.PutUint32(buf[280:], 3)
+	copy(buf[284:287], "abc")
+
+	got := ids(parseBytes(t, tfliteParser{}, "continue.tflite", buf))
+	if !got["SC4N-TFLITE-STRUCT"] {
+		t.Fatalf("the broken element was not reported: %v", got)
+	}
+	if !got["SC4N-TFLITE-CUSTOM-OP"] {
+		t.Fatalf("the walk stopped at the broken reference: %v", got)
 	}
 }
 
