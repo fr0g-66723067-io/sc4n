@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,14 @@ var (
 	testRuleInfo = DefineRule(Rule{
 		ID: "SC4N-TEST-INFO", Title: "test info", Severity: SeverityInfo,
 		Confidence: ConfidenceLow, Class: "test", Description: "test rule",
+	})
+	testRuleMedium = DefineRule(Rule{
+		ID: "SC4N-TEST-MEDIUM", Title: "test medium", Severity: SeverityMedium,
+		Confidence: ConfidenceMedium, Class: "test", Description: "test rule",
+	})
+	testRuleHigh = DefineRule(Rule{
+		ID: "SC4N-TEST-HIGH", Title: "test high", Severity: SeverityHigh,
+		Confidence: ConfidenceHigh, Class: "test", Description: "test rule",
 	})
 )
 
@@ -66,6 +75,113 @@ func TestCollectorCapCountsDropped(t *testing.T) {
 	}
 	if c.Dropped() != 3 {
 		t.Fatalf("Dropped = %d, want 3", c.Dropped())
+	}
+}
+
+// capFixture is the mixed-severity set the cap tests share: two medium findings
+// in one artifact, and a critical, two highs and an info in another.
+func capFixture() []Finding {
+	return []Finding{
+		{RuleID: testRuleMedium.ID, Artifact: "a.txt", Offset: 4, Severity: SeverityMedium, Evidence: "m1"},
+		{RuleID: testRuleMedium.ID, Artifact: "a.txt", Offset: 31, Severity: SeverityMedium, Evidence: "m2"},
+		{RuleID: testRuleCritical.ID, Artifact: "b.pkl", Offset: 2, Severity: SeverityCritical, Evidence: "c"},
+		{RuleID: testRuleHigh.ID, Artifact: "b.pkl", Offset: 2, Severity: SeverityHigh, Evidence: "h1"},
+		{RuleID: testRuleInfo.ID, Artifact: "b.pkl", Offset: 2, Severity: SeverityInfo, Evidence: "i"},
+		{RuleID: testRuleHigh.ID, Artifact: "b.pkl", Offset: 30, Severity: SeverityHigh, Evidence: "h2"},
+	}
+}
+
+// capWanted is the three findings a cap of three must keep from capFixture.
+func capWanted() map[string]bool {
+	return map[string]bool{
+		testRuleCritical.ID + "|b.pkl|2": true,
+		testRuleHigh.ID + "|b.pkl|2":     true,
+		testRuleHigh.ID + "|b.pkl|30":    true,
+	}
+}
+
+func findingKey(f Finding) string {
+	return f.RuleID + "|" + f.Artifact + "|" + strconv.FormatInt(f.Offset, 10)
+}
+
+// TestFindingCapKeepsTheMostSevere pins the property that makes "exit 0" mean
+// "nothing at or above -fail-on was hidden": the cap may only drop a finding in
+// favour of one that is at least as severe, and the surviving set must not depend
+// on the order the workers finished in.
+func TestFindingCapKeepsTheMostSevere(t *testing.T) {
+	in := capFixture()
+	want := capWanted()
+	// Three arrival orders: forward, low-severity-first (which is what let a
+	// flood of medium findings evict the critical one), and reversed.
+	for _, order := range [][]int{{0, 1, 2, 3, 4, 5}, {4, 0, 1, 3, 5, 2}, {5, 4, 3, 2, 1, 0}} {
+		c := NewCollector(3)
+		for _, i := range order {
+			c.Add(in[i])
+		}
+		got := c.Findings()
+		if len(got) != 3 {
+			t.Fatalf("order %v: kept %d, want 3", order, len(got))
+		}
+		for _, g := range got {
+			if !want[findingKey(g)] {
+				t.Errorf("order %v: kept %s, want only the critical and the two highs", order, findingKey(g))
+			}
+		}
+		if c.Dropped() != 3 {
+			t.Errorf("order %v: dropped %d, want 3", order, c.Dropped())
+		}
+	}
+}
+
+// TestPostSuppressionCapKeepsTheMostSevere pins the same property for the Cap
+// path, which a baseline run uses: the scan runs uncapped and the cap is applied
+// after suppression, so it must select by value rather than by emission order.
+func TestPostSuppressionCapKeepsTheMostSevere(t *testing.T) {
+	in := capFixture()
+	want := capWanted()
+	for _, order := range [][]int{{0, 1, 2, 3, 4, 5}, {4, 0, 1, 3, 5, 2}, {5, 4, 3, 2, 1, 0}} {
+		c := NewCollector(0)
+		for _, i := range order {
+			c.Add(in[i])
+		}
+		if n := c.Cap(3); n != 3 {
+			t.Fatalf("order %v: Cap discarded %d, want 3", order, n)
+		}
+		got := c.Findings()
+		if len(got) != 3 {
+			t.Fatalf("order %v: kept %d, want 3", order, len(got))
+		}
+		for _, g := range got {
+			if !want[findingKey(g)] {
+				t.Errorf("order %v: kept %s, want only the critical and the two highs", order, findingKey(g))
+			}
+		}
+	}
+}
+
+// TestFindingCapIsOrderIndependent checks the stronger form: a shuffled arrival
+// order and a sorted one produce byte-identical output, which is what the
+// determinism gate asks of a capped parallel run.
+func TestFindingCapIsOrderIndependent(t *testing.T) {
+	in := capFixture()
+	forward := NewCollector(4)
+	for _, f := range in {
+		forward.Add(f)
+	}
+	backward := NewCollector(4)
+	for i := len(in) - 1; i >= 0; i-- {
+		backward.Add(in[i])
+	}
+	a, err := json.Marshal(forward.Findings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(backward.Findings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Fatalf("capped output depends on arrival order:\n%s\n%s", a, b)
 	}
 }
 

@@ -54,7 +54,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&f.maxDepth, "max-depth", 4, "container nesting cap")
 	fs.StringVar(&f.maxDecomp, "max-decompress", "8GiB", "cumulative decompression cap per archive")
 	fs.Int64Var(&f.maxRatio, "max-ratio", 200, "decompression ratio cap")
-	fs.IntVar(&f.maxFindings, "max-findings", 100000, "finding cap, applied after -baseline suppression")
+	fs.IntVar(&f.maxFindings, "max-findings", 100000, "finding cap, applied after -baseline suppression; the most severe findings are kept, so a dropped finding is never more severe than a kept one")
 	fs.DurationVar(&f.timeout, "timeout", 0, "bound the whole scan (e.g. 10m; 0 = unbounded)")
 	fs.StringVar(&f.root, "root", "", "containment root for path-shaped values")
 	fs.StringVar(&f.baseline, "baseline", "", "suppress findings already present in a previous JSON report")

@@ -92,7 +92,11 @@ has, so it is part of the key. Without that, two secrets baselined in one file
 suppressed a third secret added later. The summary line always states how many
 findings were suppressed, so a baseline can never silently turn a new finding into
 a clean run. `-max-findings` is applied *after* suppression for the same reason:
-baselined findings do not consume cap slots and cannot evict a new one.
+baselined findings do not consume cap slots and cannot evict a new one. The cap
+itself keeps the *most severe* findings, breaking ties by the report's own order,
+so a flood of low-severity findings cannot push a critical one out of the list —
+`exit 0` means nothing at or above `-fail-on` was dropped, not merely that nothing
+at or above it happened to arrive before the cap filled.
 
 ## Digests
 

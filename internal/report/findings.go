@@ -7,6 +7,7 @@
 package report
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -100,36 +101,92 @@ type Finding struct {
 func (f Finding) SeverityName() string   { return f.Severity.String() }
 func (f Finding) ConfidenceName() string { return f.Confidence.String() }
 
-// Collector accumulates findings in emission order and is the only mutable
-// report state. Emission order is *not* the output order: the encoders sort, so
-// that a worker-pool run and a serial run produce identical bytes.
+// Collector accumulates findings and is the only mutable report state.
+// Emission order is *not* the output order: the encoders sort, so that a
+// worker-pool run and a serial run produce identical bytes.
+//
+// When a limit is set, findings is a min-heap by value rather than a list in
+// emission order (see Add), so the memory the collector holds is bounded by the
+// limit rather than by how many findings a crafted artifact can produce.
 type Collector struct {
 	mu       sync.Mutex
 	findings []Finding
 	limit    int
 	dropped  int
-	// firstDropped is the artifact of the first finding the cap discarded. It is
-	// what a SC4N-LIMIT-FINDINGS notice is attributed to, so the reader can see
-	// which artifact's findings are incomplete rather than only that some are.
+	// firstDropped is the artifact of the most valuable finding the cap
+	// discarded. Findings are ranked by value and the cap keeps the top limit, so
+	// the most valuable discarded finding is where the retained list starts to be
+	// incomplete — and, unlike arrival order, it is the same on every run, which
+	// is what keeps a SC4N-LIMIT-FINDINGS notice byte-identical between runs.
 	firstDropped string
+	bestDropped  *Finding
 }
 
 // NewCollector returns a Collector that keeps at most limit findings. A limit of
 // zero means unlimited, which only tests should use.
 func NewCollector(limit int) *Collector { return &Collector{limit: limit} }
 
-// Add records one already-populated finding.
+// findingHeap is a min-heap of retained findings ordered by value: the root is
+// the *least* valuable finding, so an incoming finding that beats it evicts it.
+// It is how the cap keeps the limit most valuable findings without sorting the
+// whole stream, and — because severity leads the order — without letting a flood
+// of low-severity findings evict a critical one.
+type findingHeap []Finding
+
+func (h findingHeap) Len() int           { return len(h) }
+func (h findingHeap) Less(i, j int) bool { return moreValuable(h[j], h[i]) }
+func (h findingHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *findingHeap) Push(x any)        { *h = append(*h, x.(Finding)) }
+
+func (h *findingHeap) Pop() any {
+	old := *h
+	n := len(old)
+	it := old[n-1]
+	*h = old[:n-1]
+	return it
+}
+
+// Add records one already-populated finding, evicting the least valuable retained
+// finding when the cap is full. The eviction is decided by value, not by arrival
+// order, so the surviving set is the same however the workers interleave: a
+// finding at or above -fail-on can never be dropped in favour of a less severe
+// one, which is what makes "exit 0" mean "nothing at the threshold was hidden".
 func (c *Collector) Add(f Finding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.limit > 0 && len(c.findings) >= c.limit {
-		if c.dropped == 0 {
-			c.firstDropped = f.Artifact
-		}
-		c.dropped++
+	if c.limit <= 0 {
+		c.findings = append(c.findings, f)
 		return
 	}
-	c.findings = append(c.findings, f)
+	h := findingHeap(c.findings)
+	if len(h) < c.limit {
+		heap.Push(&h, f)
+		c.findings = h
+		return
+	}
+	if !moreValuable(f, h[0]) {
+		// f is not more valuable than the least valuable finding retained, which
+		// the heap root is, so f is what the cap discards.
+		c.discard(f)
+		return
+	}
+	c.discard(h[0])
+	h[0] = f
+	heap.Fix(&h, 0)
+	c.findings = h
+}
+
+// discard records that the cap dropped one finding, keeping the most valuable
+// discarded finding so a SC4N-LIMIT-FINDINGS notice can name the artifact whose
+// list is most worth re-reading and does not vary with arrival order.
+func (c *Collector) discard(f Finding) {
+	c.dropped++
+	if c.bestDropped != nil && !moreValuable(f, *c.bestDropped) {
+		return
+	}
+	b := f
+	c.bestDropped = &b
+	c.firstDropped = f.Artifact
 }
 
 // NoteRule records a finding that the cap does not apply to, copying the rule's
@@ -234,10 +291,15 @@ func (c *Collector) Suppress(fp map[string]bool) int {
 	return n
 }
 
-// Cap truncates the finding list to limit and returns the number discarded. It
-// exists so the cap can be applied *after* baseline suppression: when a baseline
-// is in play the scan runs uncapped, because a baselined finding must not consume
-// a cap slot and evict a genuinely new finding.
+// Cap truncates the finding list to the limit most valuable findings and returns
+// the number discarded. It exists so the cap can be applied *after* baseline
+// suppression: when a baseline is in play the scan runs uncapped, because a
+// baselined finding must not consume a cap slot and evict a genuinely new
+// finding. The selection is by value, exactly as Add's is, so a capped run and a
+// suppressed-then-capped run agree on what they keep.
+//
+// It leaves findings ordered by value; a later Add would need the heap rebuilt,
+// which no caller does — the cap is applied once the scan is complete.
 func (c *Collector) Cap(limit int) int {
 	if limit <= 0 {
 		return 0
@@ -247,11 +309,12 @@ func (c *Collector) Cap(limit int) int {
 	if len(c.findings) <= limit {
 		return 0
 	}
+	sort.Slice(c.findings, func(i, j int) bool { return moreValuable(c.findings[i], c.findings[j]) })
 	n := len(c.findings) - limit
-	if c.dropped == 0 {
-		c.firstDropped = c.findings[limit].Artifact
-	}
-	c.dropped += n
+	// The slice is now ordered by value, so the most valuable discarded finding —
+	// the first one in value order — is exactly the one at the boundary.
+	c.discard(c.findings[limit])
+	c.dropped += n - 1
 	c.findings = c.findings[:limit]
 	return n
 }
@@ -344,28 +407,121 @@ func (s *Sink) EmitAtExtra(r *Rule, line, col int, evidence string, extra map[st
 	})
 }
 
-// sortFindings orders by (Artifact, Offset, RuleID) then by line/col so that the
-// result is a total order even when two findings share artifact and offset.
+// moreValuable reports whether a should be kept in preference to b when the
+// finding cap has to choose between them. Severity leads, so a flood of
+// low-severity findings can never evict a critical one; the report's own order
+// breaks ties, so the surviving set is a deterministic function of the findings
+// and not of the order the workers finished in. compareFindings is a total order,
+// which makes this one too — that is what lets the cap be a bounded heap.
+func moreValuable(a, b Finding) bool {
+	if a.Severity != b.Severity {
+		return a.Severity > b.Severity
+	}
+	return compareFindings(a, b) < 0
+}
+
+// compareFindings is the report's total order: artifact, offset, line, column,
+// rule ID, evidence, then the remaining reported fields, so that two findings
+// which agree on the first six still have a fixed relative order. sortFindings
+// uses it for output and moreValuable uses it to break severity ties.
+func compareFindings(a, b Finding) int {
+	if c := strings.Compare(a.Artifact, b.Artifact); c != 0 {
+		return c
+	}
+	if c := compareInt64(a.Offset, b.Offset); c != 0 {
+		return c
+	}
+	if c := compareInt(lineOf(a), lineOf(b)); c != 0 {
+		return c
+	}
+	if c := compareInt(colOf(a), colOf(b)); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.RuleID, b.RuleID); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.Evidence, b.Evidence); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.Title, b.Title); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.Class, b.Class); c != 0 {
+		return c
+	}
+	if c := compareInt(int(a.Severity), int(b.Severity)); c != 0 {
+		return c
+	}
+	if c := compareInt(int(a.Confidence), int(b.Confidence)); c != 0 {
+		return c
+	}
+	if a.EvidenceRedacted != b.EvidenceRedacted {
+		if a.EvidenceRedacted {
+			return 1
+		}
+		return -1
+	}
+	if c := compareStrings(a.CWE, b.CWE); c != 0 {
+		return c
+	}
+	return strings.Compare(extraString(a.Extra), extraString(b.Extra))
+}
+
+func compareInt(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+func compareInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+func compareStrings(a, b []string) int {
+	n := min(len(a), len(b))
+	for i := range n {
+		if c := strings.Compare(a[i], b[i]); c != 0 {
+			return c
+		}
+	}
+	return compareInt(len(a), len(b))
+}
+
+// extraString renders an Extra map in a fixed key order, so a comparison never
+// depends on Go's map iteration order.
+func extraString(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(m[k])
+		b.WriteByte('\x00')
+	}
+	return b.String()
+}
+
+// sortFindings orders by the report's total order, so the output is a function of
+// the findings rather than of the order they were emitted in.
 func sortFindings(fs []Finding) {
-	sort.SliceStable(fs, func(i, j int) bool {
-		a, b := fs[i], fs[j]
-		if a.Artifact != b.Artifact {
-			return a.Artifact < b.Artifact
-		}
-		if a.Offset != b.Offset {
-			return a.Offset < b.Offset
-		}
-		if la, lb := lineOf(a), lineOf(b); la != lb {
-			return la < lb
-		}
-		if ca, cb := colOf(a), colOf(b); ca != cb {
-			return ca < cb
-		}
-		if a.RuleID != b.RuleID {
-			return a.RuleID < b.RuleID
-		}
-		return a.Evidence < b.Evidence
-	})
+	sort.SliceStable(fs, func(i, j int) bool { return compareFindings(fs[i], fs[j]) < 0 })
 }
 
 func lineOf(f Finding) int {
