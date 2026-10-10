@@ -9,7 +9,9 @@ headers, Python source, chat templates, cards — and never by running anything.
 
 - **No execution, ever.** The artifact is not imported, not unpickled, not
   extracted to disk, not passed to an external parser or decompressor. The only
-  path sc4n writes is `-out`.
+  path it writes permanently is `-out`: an archive member too large to hold in
+  memory is materialised in an unlinked temporary file under `TMPDIR` and mapped,
+  never extracted to a visible path.
 - **Content-based dispatch.** The format comes from the bytes, not the file name.
   A `.safetensors` that is a zip is scanned as a zip, and the disagreement is
   itself a finding (`SC4N-FORMAT-EXTENSION-MISMATCH`). An extension is exempt where

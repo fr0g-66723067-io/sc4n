@@ -14,9 +14,12 @@ sc4n is a **static, read-only** scanner for ML artifacts and the code and
 metadata around them. It parses container and format bytes, decodes structure,
 reconstructs the data a loader would act on (pickle opcodes, config JSON, chat
 templates, tokenizer patterns), and grades findings with evidence. It never
-executes the artifact, never extracts an archive member to disk, never runs a
-system decompressor, and never rewrites what it scans. The only file it writes is
-the report named by `-out`.
+executes the artifact, never extracts an archive member to a visible path, never
+runs a system decompressor, and never rewrites what it scans. The only path it
+writes permanently is the report named by `-out`; a member too large to hold in
+memory is materialised in an unlinked temporary file under `TMPDIR` and mapped
+(`source.Spill`), so it is never visible to another process and never left behind
+by a crash.
 
 Two consequences follow, and both are load-bearing:
 

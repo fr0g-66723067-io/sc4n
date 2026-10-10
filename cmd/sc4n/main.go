@@ -105,7 +105,8 @@ scan flags:
 exit codes: 0 clean, 1 findings at or above -fail-on, 2 usage error,
             3 a named path could not be opened.
 
-sc4n never executes, extracts or rewrites anything it scans; -out is the only
-path it writes.
+sc4n never executes, extracts or rewrites anything it scans; -out is the only path
+it writes permanently. A member too large to hold in memory is materialised in an
+unlinked temporary file under TMPDIR and mapped, never extracted to a visible path.
 `, "\n"))
 }
