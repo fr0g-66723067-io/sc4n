@@ -101,8 +101,9 @@ var (
 			"the byte order, so a reader has to infer it. sc4n tested the declared counts (and the first " +
 			"metadata key length) under both orders; when both are plausible, or only big-endian is, it " +
 			"reports this finding and states which order it used rather than guessing silently. A file whose " +
-			"counts are plausible in both orders cannot be interpreted unambiguously by sc4n, so the tensor " +
-			"geometry below this finding is the little-endian reading.",
+			"counts are plausible in both orders cannot be interpreted unambiguously by sc4n; the evidence " +
+			"names the order this parse used, so the tensor geometry reported alongside it belongs to that " +
+			"reading and not necessarily to the one a loader would choose.",
 		Refs: []string{"https://github.com/ggml-org/ggml/blob/master/docs/gguf.md"},
 		Tags: []string{"format-validation"},
 	})

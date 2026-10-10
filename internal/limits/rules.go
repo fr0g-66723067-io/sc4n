@@ -35,18 +35,23 @@ var RuleDepth = report.DefineRule(report.Rule{
 	Refs: []string{"https://cwe.mitre.org/data/definitions/674.html"},
 })
 
-// RuleEntries fires when an archive declares or contains more members than
-// MaxEntries.
+// RuleEntries fires when a count exceeds its cap: an archive's member count against
+// MaxEntries, a metadata array's element count against MaxArrayElements (a GGUF
+// vocabulary, a MessagePack or UBJSON container), or a walk's own hard bound.
 var RuleEntries = report.DefineRule(report.Rule{
 	ID:         "SC4N-LIMIT-ENTRIES",
-	Title:      "Archive member count exceeds MaxEntries",
+	Title:      "Element or member count exceeds its cap",
 	Severity:   report.SeverityMedium,
 	Confidence: report.ConfidenceHigh,
 	CWE:        []string{"CWE-770"},
 	Class:      "limits",
-	Description: "The archive has more members than MaxEntries permits. Scanning stopped after the cap, so " +
-		"members beyond it were not analysed. A very large member count is the cheap way to exhaust a " +
-		"scanner's time or memory budget before it reaches the payload.",
+	Description: "A count exceeded the cap that applies to it: an archive has more members than MaxEntries " +
+		"permits, or a metadata array (a GGUF vocabulary, a MessagePack or UBJSON container) has more " +
+		"elements than MaxArrayElements. The finding names the cap in its extra data. Whether the walk then " +
+		"stopped is stated in the evidence rather than implied here: some walks clamp the loop at the cap " +
+		"and say how many records they did not read, while others continue and report only the count. A " +
+		"very large count is the cheap way to exhaust a scanner's time or memory budget before it reaches " +
+		"the payload.",
 	Refs: []string{"https://cwe.mitre.org/data/definitions/770.html"},
 })
 

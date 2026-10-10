@@ -114,16 +114,18 @@ var (
 	// ruleArchiveMemberError fires when a member could not be read.
 	ruleArchiveMemberError = report.DefineRule(report.Rule{
 		ID:         "SC4N-ARCHIVE-MEMBER-ERROR",
-		Title:      "Archive member could not be read; walk continued",
+		Title:      "Archive member could not be read",
 		Severity:   report.SeverityMedium,
 		Confidence: report.ConfidenceHigh,
 		CWE:        []string{"CWE-755"},
 		Class:      "archive",
 		Description: "A member's structure is malformed or its data is corrupt, so its content was not " +
-			"analysed. The walk continued past it (fail-closed iteration), so the rest of the archive was " +
-			"still scanned; the member itself is reported as not analysed rather than silently skipped. " +
-			"modelscan issue #354 is exactly this: an unreadable entry before archive/data.pkl made the whole " +
-			"scan report CLEAN.",
+			"analysed. A zip walk continues past the member (fail-closed iteration), so the rest of that " +
+			"archive was still scanned; a tar walk cannot, because a tar is a forward stream and a header " +
+			"that cannot be read ends the archive — so for a tar this finding means the members after it " +
+			"were not visited either. The member itself is reported as not analysed rather than silently " +
+			"skipped. modelscan issue #354 is exactly this: an unreadable entry before archive/data.pkl made " +
+			"the whole scan report CLEAN.",
 		Refs: []string{"https://github.com/protectai/modelscan/issues/354"},
 	})
 
