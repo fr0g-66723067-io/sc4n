@@ -80,7 +80,7 @@ func main() {
 	flag.Parse()
 
 	f := newFixtureSet(*out)
-	pickleFixtures(f)
+	malicious, benign := runContributors(f)
 
 	n, err := f.write()
 	if err != nil {
@@ -88,7 +88,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	exp := buildExpectations()
+	exp := expectationFile{Version: 1, Fixtures: malicious, Benign: benign}
 	blob, err := json.MarshalIndent(exp, "", "  ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sc4nfixtures:", err)

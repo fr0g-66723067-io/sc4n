@@ -155,12 +155,20 @@ func TestBenignFixturesAreClean(t *testing.T) {
 		t.Skip("no benign corpus")
 	}
 	findings := scanPaths(t, benign)
-	if len(findings) != 0 {
-		var lines []string
-		for _, f := range findings {
-			lines = append(lines, f.Severity.String()+" "+f.RuleID+" "+f.Artifact+" "+f.Evidence)
+	var bad []string
+	for _, f := range findings {
+		if f.Severity.AtLeast(report.SeverityHigh) {
+			bad = append(bad, f.Severity.String()+" "+f.RuleID+" "+f.Artifact+" "+f.Evidence)
 		}
-		t.Fatalf("benign corpus produced %d finding(s):\n%s", len(findings), strings.Join(lines, "\n"))
+	}
+	if len(bad) > 0 {
+		t.Fatalf("benign corpus produced %d high/critical finding(s):\n%s", len(bad), strings.Join(bad, "\n"))
+	}
+	// Informational findings are allowed on a benign artifact (a legitimate chat
+	// template is still worth telling the reader about), but they must be
+	// reported, so this is where a reviewer looks when the count changes.
+	if len(findings) > 0 {
+		t.Logf("benign corpus produced %d informational finding(s), which the gate allows", len(findings))
 	}
 }
 

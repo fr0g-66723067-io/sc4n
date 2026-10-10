@@ -9,6 +9,16 @@ import "encoding/base64"
 // point of most of them is a property of the *byte stream* (an opcode at offset 0,
 // a malformed opcode after a valid payload, a name assembled by STACK_GLOBAL) that
 // a well-behaved serialiser would never emit.
+func init() {
+	register(contributor{
+		name:     "pickle",
+		fixtures: pickleFixtures,
+		expectations: func() (map[string]expectation, map[string]expectation) {
+			return pickleExpectations(), pickleBenignExpectations()
+		},
+	})
+}
+
 func pickleFixtures(f *fixtureSet) {
 	// --- direct gadget: os.system -------------------------------------------------
 	// The canonical 2021-2025 pickle payload: STACK_GLOBAL so the name never
