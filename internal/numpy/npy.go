@@ -326,7 +326,20 @@ func parseNPYHeader(b []byte) (npyHeader, error) {
 type litParser struct {
 	b []byte
 	i int
+	// depth is the current literal nesting depth. The reader recurses through a
+	// descr written as dtype.descr (a list can hold tuples, which can hold nested
+	// field lists), and Go's 1 GB goroutine stack limit turns an unbounded
+	// recursion into an uncatchable `fatal error: stack overflow` rather than a
+	// panic — a crafted header could therefore kill the process instead of being
+	// reported as malformed. maxLitDepth bounds it; a descriptor nested deeper
+	// than that is not a dtype, so refusing there is exact, not a heuristic.
+	depth int
 }
+
+// maxLitDepth bounds litParser's recursion. Real dtype descriptors nest a
+// handful of levels ([('a', [('x', '<i4')])] is three), so 64 is far above
+// anything numpy writes and far below the depth that overflows the stack.
+const maxLitDepth = 64
 
 func (p *litParser) ws() {
 	for p.i < len(p.b) {
@@ -440,6 +453,11 @@ func (p *litParser) group() bool {
 	if p.i >= len(p.b) || (p.b[p.i] != '[' && p.b[p.i] != '(') {
 		return false
 	}
+	if p.depth >= maxLitDepth {
+		return false
+	}
+	p.depth++
+	defer func() { p.depth-- }()
 	close := byte(']')
 	if p.b[p.i] == '(' {
 		close = ')'
@@ -551,6 +569,11 @@ func (p *litParser) descrFieldsAt() ([]string, bool) {
 	if p.i >= len(p.b) || p.b[p.i] != '[' {
 		return nil, false
 	}
+	if p.depth >= maxLitDepth {
+		return nil, false
+	}
+	p.depth++
+	defer func() { p.depth-- }()
 	p.i++
 	var out []string
 	for {

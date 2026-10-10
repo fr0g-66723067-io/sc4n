@@ -2,6 +2,7 @@ package numpy
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -256,6 +257,53 @@ func TestParseNPYObjectArrayDispatchesPickle(t *testing.T) {
 	data := npyV1("{'descr': '|O', 'fortran_order': False, 'shape': (1,)}", gadget)
 	fs := parse(t, data)
 	want(t, fs, []string{"SC4N-NUMPY-OBJECT-ARRAY", "SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"}, nil)
+}
+
+// TestParseNPYObjectFieldDispatchesPickle is the regression for a descr written
+// as dtype.descr with an object field. numpy's own loader unpickles the data
+// section whenever dtype.hasobject, and hasobject is true when any field names
+// the object kind, so [('a', '|O')] is the same allow_pickle=True RCE path as a
+// bare '|O' string — it used to leave h.dtype empty and take the structured
+// branch, which only checked the shape.
+func TestParseNPYObjectFieldDispatchesPickle(t *testing.T) {
+	gadget := []byte{
+		0x80, 0x04,
+		0x8c, 0x02, 'o', 's',
+		0x8c, 0x06, 's', 'y', 's', 't', 'e', 'm',
+		0x93,
+		0x8c, 0x02, 'i', 'd',
+		0x85,
+		0x52,
+		0x2e,
+	}
+	for _, descr := range []string{"[('a', '|O')]", "[('a', [('x', '|O')])]"} {
+		data := npyV1("{'descr': "+descr+", 'fortran_order': False, 'shape': (1,)}", gadget)
+		fs := parse(t, data)
+		want(t, fs, []string{"SC4N-NUMPY-OBJECT-ARRAY", "SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"}, nil)
+	}
+	// A structured dtype with no object field is still not an object array.
+	fs := parse(t, npyV1("{'descr': [('a', '<f8')], 'shape': (1,)}", make([]byte, 8)))
+	want(t, fs, nil, []string{"SC4N-NUMPY-OBJECT-ARRAY"})
+}
+
+// TestParseNPYHeaderDepthIsBounded is the regression for the literal reader's
+// recursion. A descr of N nested '[' recursed once per level, and past ~12M
+// levels Go's goroutine stack limit took the process down with an uncatchable
+// `fatal error: stack overflow` — not a panic, so no recovery could report it.
+func TestParseNPYHeaderDepthIsBounded(t *testing.T) {
+	deep := "{'descr': " + strings.Repeat("[", maxLitDepth+1) + ", 'shape': (1,)}"
+	if _, err := parseNPYHeader([]byte(deep)); err == nil {
+		t.Fatal("a descr nested past maxLitDepth was accepted")
+	}
+	// A descr nested within the bound still parses.
+	within := "{'descr': " + strings.Repeat("[", maxLitDepth-1) + strings.Repeat("]", maxLitDepth-1) + ", 'shape': (1,)}"
+	h, err := parseNPYHeader([]byte(within))
+	if err != nil {
+		t.Fatalf("a descr nested within maxLitDepth was rejected: %v", err)
+	}
+	if !h.structured {
+		t.Error("a list descr nested within maxLitDepth was not recorded as structured")
+	}
 }
 
 func TestParseNPYMalformedNoPanic(t *testing.T) {
