@@ -473,3 +473,49 @@ func TestRawIPURLRejectsImpossibleOctets(t *testing.T) {
 		}
 	}
 }
+
+// TestRawIPURLBracketedIPv6 is the regression for the host scan, which stopped at
+// the first colon inside a bracketed literal: `http://[2001:db8::1]/x` — the same
+// indicator class as a dotted-quad URL — was not reported at all, even inside a
+// decoder chain.
+func TestRawIPURLBracketedIPv6(t *testing.T) {
+	rawIP := func(in string) (host, reserved string, ok bool) {
+		for _, h := range ScanString(in) {
+			if h.Rule.ID == "SC4N-STRING-RAW-IP-URL" {
+				return h.Extra["host"], h.Extra["reserved"], true
+			}
+		}
+		return "", "", false
+	}
+
+	for _, tc := range []struct {
+		in       string
+		reserved string
+	}{
+		{"http://[2001:db8::1]/x", "documentation"}, // RFC 3849
+		{"http://[2001:db8::]/x", "documentation"},
+		{"http://[::1]:8080/x", "documentation"},
+		{"http://[2606:4700::1111]/x", ""}, // a real address
+		{"http://[::ffff:93.184.216.34]/x", ""},
+	} {
+		host, reserved, ok := rawIP(tc.in)
+		if !ok {
+			t.Errorf("%s was not reported", tc.in)
+			continue
+		}
+		if reserved != tc.reserved {
+			t.Errorf("%s: reserved = %q, want %q", tc.in, reserved, tc.reserved)
+		}
+		if host == "" {
+			t.Errorf("%s: the host was not recorded", tc.in)
+		}
+	}
+
+	// A bracket that does not hold an address, and one that is never closed, are
+	// not literals.
+	for _, in := range []string{"http://[not-an-ip]/x", "http://[2001:db8::1/x"} {
+		if _, _, ok := rawIP(in); ok {
+			t.Errorf("%s was reported as a raw-IP URL", in)
+		}
+	}
+}

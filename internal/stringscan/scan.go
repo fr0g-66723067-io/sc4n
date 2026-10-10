@@ -132,20 +132,45 @@ func scanURLsAnchored(b []byte, anchor byte, hits []Hit) []Hit {
 			continue
 		}
 		host := rest[after:]
-		hostEnd := indexAny(host, "/:?# \t\r\n\"'`,;)")
-		if hostEnd < 0 {
-			hostEnd = len(host)
+		var hostEnd int
+		bracket := len(host) > 0 && host[0] == '['
+		if bracket {
+			// A bracketed IPv6 literal: the host ends at ']', and the colons
+			// inside it are not the delimiters the unbracketed scan looks for.
+			close := bytes.IndexByte(host, ']')
+			if close < 0 {
+				i++
+				continue
+			}
+			hostEnd = close + 1
+		} else {
+			hostEnd = indexAny(host, "/:?# \t\r\n\"'`,;)")
+			if hostEnd < 0 {
+				hostEnd = len(host)
+			}
 		}
-		host = host[:hostEnd]
-		if !isIPv4Literal(host) {
+		hostLit := host[:hostEnd]
+		inner := hostLit
+		if bracket {
+			inner = hostLit[1 : len(hostLit)-1]
+		}
+		literal := isIPv4Literal(inner)
+		if bracket {
+			literal = isIPv6Literal(inner)
+		}
+		if !literal {
 			i++
 			continue
 		}
 		// The URL may be a legitimate documentation example (RFC 5737 reserves the
-		// documentation ranges), and saying so in the evidence saves a reviewer the
-		// lookup.
-		extra := map[string]string{"kind": "raw-ip-url", "host": string(host)}
-		if isDocumentationIP(host) {
+		// documentation ranges for IPv4, RFC 3849 the 2001:db8::/32 block for
+		// IPv6), and saying so in the evidence saves a reviewer the lookup.
+		extra := map[string]string{"kind": "raw-ip-url", "host": string(hostLit)}
+		documentation := isDocumentationIP(inner)
+		if bracket {
+			documentation = isDocumentationIPv6(inner)
+		}
+		if documentation {
 			extra["reserved"] = "documentation"
 		}
 		hits = append(hits, Hit{
@@ -156,6 +181,37 @@ func scanURLsAnchored(b []byte, anchor byte, hits []Hit) []Hit {
 		})
 		i += after + hostEnd
 	}
+}
+
+// isIPv6Literal reports whether b is the inside of a bracketed IPv6 literal: at
+// least one colon and nothing but hex digits, colons, dots (an IPv4-mapped
+// address) or a zone separator. It is deliberately a shape test rather than a full
+// address parser: the rule's signal is "a URL whose host is a literal address",
+// and refusing a technically invalid literal would only lose that signal.
+func isIPv6Literal(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	colons := 0
+	for i := range b {
+		switch c := b[i]; {
+		case c == ':':
+			colons++
+		case c == '.' || c == '%': // IPv4-mapped, zone id
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return colons > 0
+}
+
+// isDocumentationIPv6 reports whether a bracketed IPv6 literal is in the range
+// reserved for documentation (2001:db8::/32, RFC 3849) or is the unspecified or
+// loopback address, which is the IPv6 counterpart of isDocumentationIP's labels.
+func isDocumentationIPv6(b []byte) bool {
+	s := strings.ToLower(string(b))
+	return strings.HasPrefix(s, "2001:db8:") || s == "2001:db8::" || s == "::1" || s == "::"
 }
 
 func hasPrefixFold(b []byte, prefix string) bool {
