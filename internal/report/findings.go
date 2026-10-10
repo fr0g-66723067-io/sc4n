@@ -237,6 +237,26 @@ func (s *Sink) EmitExtra(r *Rule, off int64, evidence string, extra map[string]s
 	})
 }
 
+// EmitRedacted is EmitExtra for a finding whose evidence must not be reproduced
+// verbatim, because it contains a secret value. The evidence text is still
+// recorded (so a baseline fingerprint stays stable) but the flag tells every
+// consumer to treat it as sensitive, and the text itself is masked.
+func (s *Sink) EmitRedacted(r *Rule, off int64, evidence string, extra map[string]string) {
+	s.c.Add(Finding{
+		RuleID:           r.ID,
+		Title:            r.Title,
+		Severity:         r.Severity,
+		Confidence:       r.Confidence,
+		CWE:              r.CWE,
+		Class:            r.Class,
+		Artifact:         s.artifact,
+		Offset:           off,
+		Evidence:         evidence,
+		EvidenceRedacted: true,
+		Extra:            extra,
+	})
+}
+
 // EmitAt is Emit with a source line/column instead of a byte offset, for the
 // source-analysis rules.
 func (s *Sink) EmitAt(r *Rule, line, col int, evidence string) {

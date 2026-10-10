@@ -19,11 +19,18 @@ import (
 
 // StringScan is installed by internal/stringscan so that the pickle engine runs
 // the shared indicator set over reconstructed str/bytes constants. It is a hook
-// rather than an import because the indicator tables are deliberately
-// format-agnostic and must not depend on the pickle engine; the default no-op
-// keeps the walker usable on its own (and in the fuzz targets) without the tables
-// linked.
+// rather than an import because the indicator tables must not depend on the pickle
+// engine (they are format-agnostic); the default no-op keeps the walker usable on
+// its own, and in the fuzz targets, without the tables linked.
 var StringScan = func(sink *report.Sink, off int64, text string) {}
+
+// StringUse is installed by internal/stringscan and called for a string that is an
+// argument to a named callable. It exists because one of the strongest shapes in
+// the whole engine is only visible with both halves at once: a long opaque literal
+// passed to a decoder. Neither half means anything alone — a 60-character base64
+// string is a hash, and base64.b64decode is ordinary library usage — and the pickle
+// walker is the only place that sees the pair.
+var StringUse = func(sink *report.Sink, off int64, text, callable string) {}
 
 // Options configures one walk.
 type Options struct {
@@ -608,7 +615,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			w.emitOnce("build:"+describe(inst), ruleBuildState, int64(off),
 				"BUILD applies stream-controlled state to "+describe(inst)+"; the reference loader permits only torch.Tensor, torch.nn.Parameter, collections.OrderedDict and user-allowlisted classes")
 		}
-		w.checkCodeStrings(state, off, "the BUILD state")
+		w.checkCodeStrings(state, off, "the BUILD state", callableName(inst))
 
 	case opGLOBAL:
 		mod, name, ok := argPair(arg)
@@ -672,7 +679,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			w.emitOnce("newobj:"+cls.text, ruleNewObj, int64(off),
 				"NEWOBJ calls __new__ on "+cls.text+"; the reference loader permits only torch.nn.Parameter and allowlisted classes")
 		}
-		w.checkCodeStrings(args, off, "the NEWOBJ argument")
+		w.checkCodeStrings(args, off, "the NEWOBJ argument", callableName(cls))
 		w.st.push(Val{kind: kInstance, text: cls.text, global: cls.global})
 
 	case opNEWOBJ_EX:
@@ -685,8 +692,8 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 		}
 		w.emitOnce("newobj_ex:"+cls.text, ruleNewObjEx, int64(off),
 			"NEWOBJ_EX constructs "+describe(cls)+" with keyword state; the weights-only unpickler does not implement it")
-		w.checkCodeStrings(args, off, "NEWOBJ_EX arguments")
-		w.checkCodeStrings(kwargs, off, "the NEWOBJ_EX keyword state")
+		w.checkCodeStrings(args, off, "the NEWOBJ_EX argument", callableName(cls))
+		w.checkCodeStrings(kwargs, off, "the NEWOBJ_EX keyword state", callableName(cls))
 		w.st.push(Val{kind: kInstance, text: cls.text, global: cls.global})
 
 	case opREDUCE:
@@ -853,24 +860,29 @@ func (w *walker) reportReduce(callableV, args Val, off int) {
 	if g == nil {
 		w.emitOnce("reduce-unknown:"+describe(callableV), ruleReduce, int64(off),
 			"REDUCE calls "+describe(callableV)+", which the walker could not resolve to a name")
-		w.checkCodeStrings(args, off, "the REDUCE argument")
+		w.checkCodeStrings(args, off, "the REDUCE argument", callableName(callableV))
 		return
 	}
 	if g.Allows != AllowDefault {
 		w.emitOnce("reduce:"+g.QualName(), ruleReduce, int64(off),
 			"REDUCE calls "+g.QualName()+", which is not in the weights-only allowlist (the reference loader raises \"Trying to call reduce for unrecognized function\"); sink: "+g.Gadget.Sink)
 	}
-	w.checkCodeStrings(args, off, "the REDUCE argument")
+	w.checkCodeStrings(args, off, "the REDUCE argument", callableName(callableV))
 }
 
-// checkCodeStrings applies the code-string rule to a value's retained contents.
+// checkCodeStrings applies the code-string rule to a value's retained contents,
+// and hands every string to the indicator engine together with the callable it was
+// passed to.
 //
-// This is the one detector that fires on an otherwise allowlisted stream, and it
-// exists because of the ShadowPickle motivating example: `GLOBAL collections
-// OrderedDict` + `BINUNICODE <source>` + REDUCE + BUILD, where the callable is
-// allowlisted and the *argument* is the payload.
-func (w *walker) checkCodeStrings(v Val, off int, where string) {
+// The code-string rule is the one detector that fires on an otherwise allowlisted
+// stream, and it exists because of the ShadowPickle motivating example: `GLOBAL
+// collections OrderedDict` + `BINUNICODE <source>` + REDUCE + BUILD, where the
+// callable is allowlisted and the *argument* is the payload.
+func (w *walker) checkCodeStrings(v Val, off int, where string, callable string) {
 	visit := func(text string) {
+		if callable != "" && !w.silent {
+			StringUse(w.sink, int64(off), text, callable)
+		}
 		if len(text) < codeStringMinBytes {
 			return
 		}
@@ -881,6 +893,15 @@ func (w *walker) checkCodeStrings(v Val, off int, where string) {
 		}
 	}
 	walkStrings(v, 0, visit)
+}
+
+// callableName is the qualified name of a callable value, or "" when the walker
+// could not resolve one.
+func callableName(v Val) string {
+	if v.global != nil {
+		return v.global.QualName()
+	}
+	return ""
 }
 
 // walkStrings visits the string/bytes values inside v, to a nesting depth of 4.
