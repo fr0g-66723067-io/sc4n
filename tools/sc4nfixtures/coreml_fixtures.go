@@ -40,6 +40,20 @@ func coremlFixtures(f *fixtureSet) {
 		))),
 	))
 
+	// A model whose weights live in a sibling file (the whisperkit .mlmodelc
+	// layout): specificationVersion, a ModelDescription in field 2, and no
+	// Model.type field at all. The ONNX sniffer accepts the field-1 varint alone
+	// — CoreML's specificationVersion is a plausible ir_version — so a CoreML
+	// sniffer that insists on a type field never sees this file and it is parsed
+	// as ONNX.
+	f.add("coreml_no_type_field.mlmodel", pbCat(
+		pbVar(1, 7),
+		pbBytes(2, pbCat(
+			pbStr(1, "distil-whisper_distil-large-v3 AudioEncoder"),
+			pbStr(2, "1.0"),
+		)),
+	))
+
 	// Benign: a well-formed model with a description and a plain layer that names
 	// no host class.
 	f.add("benign/tiny.mlmodel", pbCat(
@@ -65,6 +79,18 @@ func coremlExpectations() map[string]expectation {
 			Forbid: []string{"SC4N-COREML-STRUCT", "SC4N-COREML-PROGRAM-UNVERIFIED", "SC4N-FORMAT-EXTENSION-MISMATCH"},
 			Notes: "NeuralNetwork.layers[].custom (NeuralNetworkLayer.custom = 500) naming a " +
 				"host-supplied custom layer class.",
+		},
+		"coreml_no_type_field.mlmodel": {
+			Forbid: []string{
+				"SC4N-ONNX-STRUCT",
+				"SC4N-FORMAT-EXTENSION-MISMATCH",
+				"SC4N-COREML-CUSTOM-LAYER",
+			},
+			Notes: "specificationVersion + a nested ModelDescription and no Model.type field: " +
+				"the whisperkit .mlmodelc shape, where the weights are a sibling file. The " +
+				"CoreML sniffer has to claim it on the description, because the ONNX sniffer " +
+				"accepts the field-1 varint alone and would report ONNX structural errors for a " +
+				"CoreML file.",
 		},
 	}
 }

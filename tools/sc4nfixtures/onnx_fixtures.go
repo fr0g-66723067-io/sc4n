@@ -109,6 +109,15 @@ func onnxFixtures(f *fixtureSet) {
 		)),
 	))
 
+	// The negative control for the CoreML description discriminator: a ModelProto
+	// whose producer_name is the string "pytorch". It parses as a plausible tag
+	// sequence for two bytes and then fails, so the CoreML sniffer must not claim
+	// it, and the file keeps its ONNX dispatch.
+	f.add("onnx_producer_name_string.onnx", pbCat(
+		pbVar(1, 7),
+		pbStr(2, "pytorch"),
+	))
+
 	// The benign control: a well-formed model with a standard domain, one node
 	// and one initializer whose raw_data length matches its dims exactly. It must
 	// produce no high or critical finding, otherwise the ONNX rules are not usable
@@ -132,6 +141,13 @@ func onnxFixtures(f *fixtureSet) {
 
 func onnxExpectations() map[string]expectation {
 	return map[string]expectation{
+		"onnx_producer_name_string.onnx": {
+			Forbid: []string{"SC4N-FORMAT-EXTENSION-MISMATCH"},
+			Notes: "The negative control for the CoreML description discriminator: field 2 " +
+				"carries the string \"pytorch\", which is a well-formed-looking tag sequence " +
+				"only until the third byte, so the file stays ONNX. It pins that a real " +
+				"ModelProto's producer_name is not stolen by the CoreML sniffer.",
+		},
 		"onnx_external_traversal.onnx": {
 			Expect: []string{"SC4N-ONNX-EXTERNAL-TRAVERSAL"},
 			Forbid: []string{

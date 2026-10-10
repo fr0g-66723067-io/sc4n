@@ -472,9 +472,31 @@ func consumeFixed64(b []byte) int {
 	return n
 }
 
+// isProtoMessage reports whether b is a sequence of well-formed protobuf field
+// records that consumes exactly b. It separates CoreML's nested ModelDescription
+// (field 2) from ONNX's producer_name (also field 2), which is a UTF-8 string:
+// "pytorch" parses as tag 14 wire type 0 and then fails on the next byte.
+//
+// protowire.ConsumeField returns (number, wire type, length) and a negative
+// length on error; it validates the outer field structure, not a nested payload.
+func isProtoMessage(b []byte) bool {
+	fields := 0
+	for len(b) > 0 {
+		num, _, n := protowire.ConsumeField(b)
+		if n <= 0 || num < 1 {
+			return false
+		}
+		b = b[n:]
+		fields++
+	}
+	return fields > 0
+}
+
 // sniff recognises a CoreML ModelProto by its shape: field 1 must be a plausible
-// specificationVersion varint, and a Model.type field (number >= 200, bytes wire
-// type) must appear within the probe window.
+// specificationVersion varint, and either a Model.type field (number >= 200,
+// bytes wire type) or a field-2 description that is itself a well-formed
+// protobuf message must appear within the probe window. The second shape is what
+// a CoreML model whose weights live in a sibling file looks like.
 func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 	size := s.Size()
 	if size < 4 {
@@ -513,6 +535,16 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 			}
 			b = b[z:]
 			if fnum >= 200 && len(v) > 0 {
+				return artifact.FormatCoreML, true
+			}
+			// A CoreML Model carries its description in field 2 as a nested
+			// ModelDescription; ONNX's ModelProto carries producer_name in the
+			// same field as a string. Accepting the description is what keeps a
+			// CoreML model whose weights live outside the file (whisperkit's
+			// .mlmodelc bundles) from being claimed by the ONNX sniffer, which
+			// only requires a plausible ir_version in field 1 — CoreML's
+			// specificationVersion satisfies it.
+			if fnum == fieldDescription && len(v) > 0 && isProtoMessage(v) {
 				return artifact.FormatCoreML, true
 			}
 		case protowire.Fixed32Type:

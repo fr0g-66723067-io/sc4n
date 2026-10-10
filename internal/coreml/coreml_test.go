@@ -116,6 +116,22 @@ func TestSniffDiscriminates(t *testing.T) {
 	if _, ok := sniff(source.Mem("m.mlmodel", coreml), limits.Default()); !ok {
 		t.Fatal("CoreML model not recognised")
 	}
+	// A model whose weights live in a sibling file carries no Model.type field at
+	// all, only the specificationVersion and the ModelDescription. The ONNX
+	// sniffer accepts the field-1 varint alone, so this shape is what decides
+	// whether a CoreML file is parsed as CoreML or reported as a broken ONNX.
+	described := cat(
+		pvar(fieldSpecVersion, 7),
+		pbytes(fieldDescription, cat(pstr(1, "AudioEncoder"), pstr(2, "1.0"))),
+	)
+	if _, ok := sniff(source.Mem("m.mlmodel", described), limits.Default()); !ok {
+		t.Fatal("CoreML model with no type field not recognised")
+	}
+	// The other side of the same field: ONNX's producer_name is a string, and a
+	// string is not a nested message.
+	if _, ok := sniff(source.Mem("m.onnx", cat(pvar(1, 7), pstr(2, "pytorch"))), limits.Default()); ok {
+		t.Fatal("ONNX producer_name string claimed as CoreML")
+	}
 	// An ONNX-shaped model has no Model.type field >= 200.
 	onnxLike := cat(pvar(1, 8), pbytes(8, pvar(1, 17)), pbytes(7, pstr(2, "g")))
 	if _, ok := sniff(source.Mem("m.onnx", onnxLike), limits.Default()); ok {

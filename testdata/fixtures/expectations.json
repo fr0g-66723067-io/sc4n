@@ -108,6 +108,15 @@
       ],
       "notes": "NeuralNetwork.layers[].custom (NeuralNetworkLayer.custom = 500) naming a host-supplied custom layer class."
     },
+    "coreml_no_type_field.mlmodel": {
+      "expect": null,
+      "forbid": [
+        "SC4N-ONNX-STRUCT",
+        "SC4N-FORMAT-EXTENSION-MISMATCH",
+        "SC4N-COREML-CUSTOM-LAYER"
+      ],
+      "notes": "specificationVersion + a nested ModelDescription and no Model.type field: the whisperkit .mlmodelc shape, where the weights are a sibling file. The CoreML sniffer has to claim it on the description, because the ONNX sniffer accepts the field-1 varint alone and would report ONNX structural errors for a CoreML file."
+    },
     "double_compressed.pkl.gz.bz2": {
       "expect": [
         "SC4N-ARCHIVE-NESTED-COMPRESSION",
@@ -445,6 +454,13 @@
         "SC4N-ONNX-STRUCT"
       ],
       "notes": "A ModelProto.functions body: a subgraph supplied by the file. The runtime resolves and executes it, so it is attacker-controlled code that the standard operator schemas do not describe."
+    },
+    "onnx_producer_name_string.onnx": {
+      "expect": null,
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "The negative control for the CoreML description discriminator: field 2 carries the string \"pytorch\", which is a well-formed-looking tag sequence only until the third byte, so the file stays ONNX. It pins that a real ModelProto's producer_name is not stolen by the CoreML sniffer."
     },
     "pickle_b64_exec.pkl": {
       "expect": [
