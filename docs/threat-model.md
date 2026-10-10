@@ -54,13 +54,13 @@ the model:
 | # | Threat class | Evidence | Detectors | Mitigation | Residual risk |
 |---|---|---|---|---|---|
 | 3 | Deserialization code execution (pickle family) | CVE-2026-23001, CVE-2026-31239, arXiv 2508.19774, arXiv 2607.17503, arXiv 2508.15987 | `SC4N-PICKLE-*` (24 rules) | Load only with `weights_only=True` (torch ≥ 2.6 default) or a safetensors artifact; never `pickle.load` untrusted data | Weights-only is not a sandbox: it constrains the *opcode* surface, not the model's behaviour once loaded |
-| 4 | Loader- and config-driven execution | VU#456290, CVE-2026-4372, VU#253266 / CVE-2024-3660, CVE-2025-1550 | `SC4N-CONFIG-*`, `SC4N-LOADER-*`, `SC4N-KERAS-*` | `trust_remote_code=False`, `safe_mode=True` with a current Keras, pin `revision=` | The allowlist is a moving target; a new layer class is unknown until the list is updated |
-| 5 | Container and format-confusion smuggling | Feb-2025 nullifAI campaign, modelscan issue #354, CVE-2022-25882, CVE-2024-27318 | `SC4N-ARCHIVE-*`, `SC4N-POLYGLOT-*`, `SC4N-FORMAT-*`, `SC4N-ONNX-EXTERNAL-*` | Verify provenance out of band; never trust the extension | A container the scanner cannot decompress (xz/zstd/lz4/7z) is reported, not read: the payload inside it is not analysed |
-| 6 | Template and metadata code paths | CVE-2026-5760 / VU#915947, arXiv 2602.04653 | `SC4N-JINJA-*`, `SC4N-TEMPLATE-INJECTION`, `SC4N-GGUF-TEMPLATE-*` | Run templates in a sandboxed renderer with no globals | Template engines differ; the analyzer covers Jinja2's construct surface, not every engine's |
+| 4 | Loader- and config-driven execution | VU#456290, CVE-2026-4372, VU#253266 / CVE-2024-3660, CVE-2025-1550, CVE-2026-12481/12484 | `SC4N-CONFIG-*`, `SC4N-LOADER-*`, `SC4N-KERAS-*` | `trust_remote_code=False`, `safe_mode=True` with a current Keras, pin `revision=` | The allowlist is a moving target; a new layer class is unknown until the list is updated |
+| 5 | Container and format-confusion smuggling | Feb-2025 nullifAI campaign, modelscan issue #354, CVE-2022-25882, CVE-2024-27318 | `SC4N-ARCHIVE-*`, `SC4N-POLYGLOT-*`, `SC4N-FORMAT-*`, `SC4N-TORCH-*`, `SC4N-ONNX-EXTERNAL-*`, `SC4N-HDF5-EXTERNAL-LINK` | Verify provenance out of band; never trust the extension | A container the scanner cannot decompress (xz/zstd/lz4/7z) is reported, not read: the payload inside it is not analysed |
+| 6 | Template, op and layer code paths | CVE-2026-5760 / VU#915947, arXiv 2602.04653 | `SC4N-JINJA-*`, `SC4N-TEMPLATE-INJECTION`, `SC4N-GGUF-TEMPLATE-*`, `SC4N-TF-PYFUNC`, `SC4N-TF-FILE-IO`, `SC4N-COREML-CUSTOM-LAYER`, `SC4N-TFLITE-CUSTOM-OP`, `SC4N-PTE-*` | Run templates in a sandboxed renderer with no globals; do not load a model that names a host-supplied class or plugin | Template engines differ; a layer/op name is reported as a *surface*, not as proof that a plugin is present |
 | 7 | Prompt injection and exfiltration via metadata | OWASP LLM01 | `SC4N-CARD-*`, `SC4N-METADATA-*`, `SC4N-UNICODE-ANOMALY` | Treat all card text as untrusted input; datamarking/spotlighting | A detector for instruction-shaped text cannot be complete; novel phrasing is missed by design |
 | 8 | Resource exhaustion | CVE-2025-5197, CVE-2025-3263, CVE-2025-2099, CVE-2024-12720 | `SC4N-LIMIT-*`, `SC4N-TOKENIZER-REDOS` | Serve untrusted models behind a resource-capped process | Caps bound the *scanner*; they do not bound the consumer's loader |
 | 9 | Weight-level backdoors | Neural Cleanse, ABS, STRIP, spectral signatures, MIST, Z-PEFT | `SC4N-WEIGHTS-*` (info only, behind `-deep-stats`) | Out-of-band dynamic analysis; provenance | **Static scanning cannot prove or disprove a backdoor.** See §6 |
-| 10 | Provenance and supply chain | sigstore `model_signing`, `cosign verify`, CycloneDX ML-BOM | CycloneDX output, `SC4N-GITATTRIBUTES-*` | Verify signatures before download; pin revisions | The Hub exposes no native signature badge; absence of a signature is not evidence of malice |
+| 10 | Provenance and supply chain | sigstore `model_signing`, `cosign verify`, CycloneDX ML-BOM | CycloneDX output, `SC4N-GITATTRIBUTES-*`, `SC4N-HFCACHE-*` | Verify signatures before download; pin revisions | The Hub exposes no native signature badge; absence of a signature is not evidence of malice |
 | 11 | Scanner bypass (why parsers look like this) | picklescan CVE-2025-10157, fickling CVE-2025-67747 / CVE-2026-14534, modelscan issue #354 | the parser contract itself | Keep the scanner current; treat "no findings" as "nothing matched", not "safe" | Every bypass in the history is a case where a scanner returned before the payload was reached. See §5 |
 
 ## 3. Deserialization code execution
@@ -179,10 +179,11 @@ loader bugs `CVE-2026-12479` / `CVE-2026-12480` / `CVE-2026-12570` (path
 traversal, HDF5 arbitrary read, shape-bomb DoS).
 
 **Detectors.** `SC4N-KERAS-LAMBDA` (critical), `SC4N-KERAS-TORCH-WRAPPER`
-(critical), the class-allowlist rule for any other `class_name`/
-`registered_name` outside the safe set, and `SC4N-HDF5-EXTERNAL-LINK` for
-external-link/external-storage references. Extracted `code`/`closure`/`defaults`
-strings go to the Python analyzer and the indicator engine.
+(critical), `SC4N-KERAS-CLASS-UNKNOWN` for any other `class_name`/
+`registered_name` outside the safe set, `SC4N-KERAS-STRUCT`,
+`SC4N-HDF5-STRUCT` and `SC4N-HDF5-EXTERNAL-LINK` for external-link/
+external-storage references. Extracted `code`/`closure`/`defaults` strings go to
+the Python analyzer and the indicator engine.
 
 **Mitigation.** `keras.models.load_model(..., safe_mode=True)` on a current Keras,
 and treat any H5 as if `safe_mode` did not exist. Do not load `.keras` from an
@@ -192,6 +193,49 @@ untrusted source at all if a Lambda is present.
 class with a `from_config` that does something surprising is unknown until the
 list is updated. `SC4N-LOADER-KERAS-SAFE-MODE` catches the caller passing
 `safe_mode=False` only when sc4n is scanning the caller's code.
+
+### 4.4 TensorFlow: ops, file I/O and assets
+
+**Mechanism.** A SavedModel's `GraphDef` is a program for the TF runtime.
+`PyFunc`/`EagerPyFunc` call into a Python function supplied by the environment;
+`ReadFile`/`WriteFile`/`SaveV2`/`RestoreV2`/`MatchingFiles`/`FileName` read and
+write paths named *inside the graph*, so a model that carries an absolute path or
+a `..` traversal is an arbitrary file read/write primitive once loaded. A file
+under `assets/`/`assets.extra/` is served by the loader, so a native executable or
+a shell script there is code shipped with the model. TFLite's `custom_code` /
+`builtin_code` names a **device plugin** the host must supply, and
+`custom_options` is an opaque blob; TF.js flex ops are the same class.
+
+**Detectors.** `SC4N-TF-PYFUNC`, `SC4N-TF-FILE-IO` (absolute/`..` path constants
+only), `SC4N-TF-ASSET-EXECUTABLE`, `SC4N-TF-STRUCT`,
+`SC4N-TF-CHECKPOINT-STRUCT` / `SC4N-TF-CHECKPOINT-NO-CODE` (a bare checkpoint
+carries no inline code — the rule says so), `SC4N-TFLITE-CUSTOM-OP`,
+`SC4N-TFLITE-NATIVE-MAGIC`, `SC4N-TFLITE-ENTROPY`, `SC4N-TFLITE-STRUCT`,
+`SC4N-TFJS-FLEX-OP`.
+
+**Mitigation.** Load SavedModels from a sandbox with no filesystem access beyond
+the model directory; treat any `PyFunc` op as "the environment must supply code".
+
+**Residual risk.** An op name is a *capability*, not a payload: a legitimate
+SavedModel can use `ReadFile` on a relative path, and a custom op can be a
+first-party plugin. The findings say which, and the severity is set so a
+path-shaped constant is what raises it.
+
+### 4.5 CoreML and ExecuTorch: host-supplied code
+
+**Mechanism.** A CoreML `CustomModel` (protobuf field 555) or a neural-network
+layer with `CustomLayerParams.className` (field 500) names a class **the host
+application** must provide; a poisoned package pairs with a host plugin that
+resolves the name, which is why it is high rather than critical. ExecuTorch
+`.pte` carries segments and can embed native code.
+
+**Detectors.** `SC4N-COREML-CUSTOM-LAYER`, `SC4N-COREML-STRUCT`,
+`SC4N-COREML-PROGRAM-UNVERIFIED`, `SC4N-PTE-NATIVE`, `SC4N-PTE-STRUCT`, and
+`SC4N-PTE-UNVERIFIED` (info: the deep flatbuffer parse is out of v1 and the rule
+says so).
+
+**Residual risk.** The class name is reported, not resolved: whether it is
+dangerous depends on the host, which a scanner cannot see.
 
 ### 4.3 Chat templates: SSTI and inference-time backdoors
 
@@ -267,7 +311,31 @@ analysed*; the finding says so, but the bytes are unread. `MaxDepth` bounds a
 legitimate nest (`joblib → object pickle`, `zip → pickle`) and will also stop a
 pathological one — the limit finding is how you tell.
 
-### 5.3 Polyglots and single-file executables
+### 5.3 Torch archive shapes
+
+**Mechanism.** `torch.save` has three shapes and the loader accepts all of them,
+which is why a scanner that only looks for a zip misses two thirds of the attack
+surface: the *new* format (an uncompressed zip holding `data.pkl` and
+`data/<n>`), the *legacy* format (`MAGIC_NUMBER` + a protocol-1001 pickle + raw
+storage appended) and legacy tar archives with `storages`/`tensors`/`pickle`
+members. A **prefixed** archive (bytes before the first local header) still loads,
+because Python's `_is_zipfile` checks the current offset while the C++ reader
+initialises miniz over the whole range. A `.pt` that is really a 7z archive is the
+February 2025 campaign: the loader deserialised it while every extension-driven
+scanner saw "not a zip".
+
+**Detectors.** `SC4N-TORCH-ZIP`, `SC4N-TORCH-LEGACY`, `SC4N-TORCH-LEGACY-TAR`,
+`SC4N-TORCH-SCRIPT` and `SC4N-TORCH-PT2` (info: the shape was recognised and
+handed to the right engine), `SC4N-TORCH-PREFIXED-ARCHIVE` (high),
+`SC4N-TORCH-7Z` (critical), `SC4N-TORCH-STRUCT`. Every pickle inside every shape
+goes to the pickle engine — a fixture proves `data.pkl` with a `REDUCE` of
+`os.system` is reported *through* the torch path — and `code/**/*.py` inside a
+TorchScript archive goes to the Python analyzer.
+
+**Residual risk.** The 7z case is detected and reported but not decompressed
+(no stdlib 7z decoder): the payload inside is unread, and the finding says so.
+
+### 5.4 Polyglots and single-file executables
 
 **Mechanism.** A file can be two things at once: a `.safetensors` with an ELF
 appended, a GGUF with an APE stub (llamafile), a zip that is also a tar. The
@@ -288,7 +356,7 @@ buried in the middle of a 13 GiB tensor file is not found by a window scan; the
 format parsers' own trailing-data rules (`SC4N-SAFETENSORS-TRAILING-DATA`,
 `SC4N-GGUF-TRAILING-DATA`, `SC4N-NUMPY-TRAILING`) are what cover the tail.
 
-### 5.4 ONNX external data
+### 5.5 ONNX external data
 
 **Mechanism.** `TensorProto.external_data` names a file and an offset; the loader
 reads it. An absolute path, a `..` traversal, or a symlink that leaves the model
@@ -309,7 +377,7 @@ directory turns model loading into arbitrary file read; a crafted
 a legitimate-but-unusual layout may therefore be reported rather than followed,
 and a file that is *not* present at scan time cannot be judged.
 
-### 5.5 GGUF metadata and parser structure
+### 5.6 GGUF metadata and parser structure
 
 **Mechanism.** GGUF carries arbitrary key/value metadata, including the chat
 template, and a parser that trusts declared counts can be made to allocate,
@@ -422,6 +490,8 @@ classically catastrophic is not.
 | `SC4N-REPO-SITE-CUSTOMIZE` | `sitecustomize.py`/`usercustomize.py` |
 | `SC4N-REPO-PYC-ORPHAN`, `-WORKFLOW-PRT`, `-WHEEL-IN-MODEL`, `-DOCKERFILE`, `-SPACE-APP` | an orphan `.pyc`, a PR-triggered workflow with write permissions, a package archive in the tree, a `Dockerfile`, a Space `app.py` |
 | `SC4N-GITATTRIBUTES-LFS`, `-FILTER` | `.gitattributes` LFS patterns and any non-LFS filter/diff driver that names a command |
+| `SC4N-HFCACHE-SYMLINK-ESCAPE` (high) | a cache snapshot symlink resolving outside the cache root — `os.Root` containment rejects it rather than following it |
+| `SC4N-HFCACHE-BLOB-MISSING`, `SC4N-HFCACHE-REF-MALFORMED` | a referenced blob that is absent, and a `refs/` entry that is not a 40-hex commit |
 
 **Mitigation.** Never `pip install` an untrusted model repository; inspect
 `.pth`/`.start`/`setup.py` before any install; treat a `Dockerfile` and a workflow
