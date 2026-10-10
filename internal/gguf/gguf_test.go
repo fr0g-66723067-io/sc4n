@@ -3,7 +3,13 @@ package gguf_test
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/gguf"
@@ -437,6 +443,168 @@ func TestChatTemplates(t *testing.T) {
 	if len(got) != 3 || got[0] != tmpl || got[1] != "a" || got[2] != "b" {
 		t.Fatalf("got %q, want the default template plus the two array entries", got)
 	}
+}
+
+// craftKVPairs builds a tensor-less GGUF declaring n metadata pairs, each a
+// distinct short key with a one-byte value. A file this shape is what makes the
+// cap matter: the count is validated only against the bytes present, so a few
+// megabytes can declare hundreds of thousands of records, and every one the
+// walk runs allocates.
+func craftKVPairs(n int) []byte {
+	var b bytes.Buffer
+	b.Grow(n*18 + 32)
+	b.WriteString("GGUF")
+	b.Write(u32b(3, binary.LittleEndian))
+	b.Write(u64b(0, binary.LittleEndian)) // tensor_count
+	b.Write(u64b(uint64(n), binary.LittleEndian))
+	var lenb [8]byte
+	var typb [4]byte
+	binary.LittleEndian.PutUint32(typb[:], 0) // UINT8 value
+	for i := range n {
+		k := "k" + strconv.Itoa(i)
+		binary.LittleEndian.PutUint64(lenb[:], uint64(len(k)))
+		b.Write(lenb[:])
+		b.WriteString(k)
+		b.Write(typb[:])
+		b.WriteByte(0)
+	}
+	return b.Bytes()
+}
+
+func parseWithLimits(t *testing.T, data []byte, l limits.Limits) []report.Finding {
+	t.Helper()
+	c := report.NewCollector(0)
+	if _, err := gguf.Parse(source.Mem("t.gguf", data), l, c.For("t.gguf")); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	return c.Findings()
+}
+
+// TestEntriesCapStopsWalk pins both halves of the fix: an over-cap KV count
+// emits SC4N-LIMIT-ENTRIES plus a note saying how many records were not read,
+// and the walk really stops, so the per-record allocation no longer scales with
+// the declared count. The A/B raises the cap past the declared count to
+// reproduce the pre-fix allocation in the same run, on the same bytes.
+func TestEntriesCapStopsWalk(t *testing.T) {
+	const n = 500_000
+	data := craftKVPairs(n)
+	if len(data) < 6<<20 {
+		t.Fatalf("crafted file is only %d bytes; the heap bound would be hollow", len(data))
+	}
+
+	run := func(l limits.Limits) (findings []report.Finding, delta uint64) {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		findings = parseWithLimits(t, data, l)
+		runtime.ReadMemStats(&after)
+		return findings, after.HeapAlloc - before.HeapAlloc
+	}
+
+	cappedFind, cappedDelta := run(limits.Default())
+	if !hasRule(cappedFind, "SC4N-LIMIT-ENTRIES") {
+		t.Fatalf("capped run: want SC4N-LIMIT-ENTRIES, got %v", ids(cappedFind))
+	}
+	note := false
+	for _, f := range cappedFind {
+		if f.RuleID == "SC4N-GGUF-STRUCT" && strings.Contains(f.Evidence, "were not read") {
+			note = true
+		}
+	}
+	if !note {
+		t.Fatalf("capped run: want a 'records not read' note, got %v", ids(cappedFind))
+	}
+
+	full := limits.Default()
+	full.SetMaxEntries(n + 1)
+	fullFind, fullDelta := run(full)
+	if hasRule(fullFind, "SC4N-LIMIT-ENTRIES") {
+		t.Fatalf("uncapped run: unexpected SC4N-LIMIT-ENTRIES: %v", ids(fullFind))
+	}
+
+	t.Logf("file=%d bytes; capped HeapAlloc delta=%d, uncapped=%d; capped findings=%v",
+		len(data), cappedDelta, fullDelta, ids(cappedFind))
+	if cappedDelta > uint64(float64(len(data))*1.2) {
+		t.Errorf("capped heap delta %d exceeds 1.2x the %d-byte file", cappedDelta, len(data))
+	}
+	if cappedDelta*2 >= fullDelta {
+		t.Errorf("capped heap delta %d is not materially below the uncapped %d", cappedDelta, fullDelta)
+	}
+}
+
+// vocabGGUFs are the tokenizer-only GGUFs llama.cpp ships; they are the
+// real-corpus control for the entries cap. None is near the cap, so the clamped
+// walk must leave each one's finding set exactly as it was.
+var vocabGGUFs = []string{
+	"ggml-vocab-aquila.gguf",
+	"ggml-vocab-baichuan.gguf",
+	"ggml-vocab-bert-bge.gguf",
+	"ggml-vocab-command-r.gguf",
+	"ggml-vocab-deepseek-coder.gguf",
+	"ggml-vocab-deepseek-llm.gguf",
+	"ggml-vocab-falcon.gguf",
+	"ggml-vocab-gemma-4.gguf",
+	"ggml-vocab-gpt-2.gguf",
+	"ggml-vocab-gpt-neox.gguf",
+	"ggml-vocab-llama-bpe.gguf",
+	"ggml-vocab-llama-spm.gguf",
+	"ggml-vocab-mpt.gguf",
+	"ggml-vocab-nomic-bert-moe.gguf",
+	"ggml-vocab-phi-3.gguf",
+	"ggml-vocab-qwen2.gguf",
+	"ggml-vocab-qwen35.gguf",
+	"ggml-vocab-refact.gguf",
+	"ggml-vocab-starcoder.gguf",
+}
+
+func tally(fs []report.Finding) []string {
+	m := map[string]int{}
+	for _, f := range fs {
+		m[f.RuleID]++
+	}
+	out := make([]string, 0, len(m))
+	for id, n := range m {
+		out = append(out, fmt.Sprintf("%s x%d", id, n))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestRealVocabGGUFsUnchanged is the real-corpus gate for the cap change: the
+// tokenizer-only GGUFs must report the same rules and counts as before, and
+// their declared counts must be below the cap so the clamp cannot have fired.
+func TestRealVocabGGUFsUnchanged(t *testing.T) {
+	base := os.Getenv("SC4N_LLAMA_MODELS")
+	if base == "" {
+		base = "../../../gh33p1n7-projects/cpp-trending-2026-09/analysis/llama-cpp/index-src/models"
+	}
+	found := 0
+	for _, name := range vocabGGUFs {
+		data, err := os.ReadFile(filepath.Join(base, name))
+		if err != nil {
+			t.Logf("skip %s: %v", name, err)
+			continue
+		}
+		found++
+		c := report.NewCollector(0)
+		meta, err := gguf.Parse(source.Mem(name, data), limits.Default(), c.For(name))
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", name, err)
+		}
+		if meta.KVCount > uint64(limits.Default().MaxEntries) || meta.TensorCount > uint64(limits.Default().MaxEntries) {
+			t.Errorf("%s: declared kv=%d tensor=%d exceeds the cap; the control is no longer below the cap",
+				name, meta.KVCount, meta.TensorCount)
+		}
+		if got := tally(c.Findings()); len(got) > 0 {
+			t.Logf("%s (kv=%d tensors=%d): %v", name, meta.KVCount, meta.TensorCount, got)
+		} else {
+			t.Logf("%s (kv=%d tensors=%d): clean", name, meta.KVCount, meta.TensorCount)
+		}
+	}
+	if found == 0 {
+		t.Fatalf("no real vocab GGUFs found under %s", base)
+	}
+	t.Logf("checked %d vocab GGUFs", found)
 }
 
 func FuzzGGUF(f *testing.F) {

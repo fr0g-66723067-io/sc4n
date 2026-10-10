@@ -174,18 +174,29 @@ func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
 	}
 
 	defaultLimits(&st.lim)
-	if st.lim.MaxEntries > 0 {
-		if kvCount > uint64(st.lim.MaxEntries) {
-			st.limit(limits.RuleEntries, "MaxEntries", clampInt64(kvCount), int64(st.lim.MaxEntries), "metadata_kv_count")
-		}
-		if tensorCount > uint64(st.lim.MaxEntries) {
-			st.limit(limits.RuleEntries, "MaxEntries", clampInt64(tensorCount), int64(st.lim.MaxEntries), "tensor_count")
-		}
+	// The counts are validated against the bytes remaining above, so the file
+	// size (not the cap) is the real ceiling on the work: a 7 MB crafted header
+	// can declare 500 000 records. The cap therefore has to stop the walk, not
+	// just annotate it, or the per-record allocations (a copied key, a seen-map
+	// entry, a tensor struct) scale with the file and defeat the memory budget.
+	// Each clamp emits its limit finding and one structural note naming the
+	// number of records that were consequently not read.
+	kvRead := kvCount
+	if st.lim.MaxEntries > 0 && kvCount > uint64(st.lim.MaxEntries) {
+		st.limit(limits.RuleEntries, "MaxEntries", clampInt64(kvCount), int64(st.lim.MaxEntries), "metadata_kv_count")
+		kvRead = uint64(st.lim.MaxEntries)
+		st.structf(16, "metadata_kv_count %d exceeds MaxEntries %d, so %d record(s) were not read", kvCount, st.lim.MaxEntries, kvCount-kvRead)
+	}
+	tensorRead := tensorCount
+	if st.lim.MaxEntries > 0 && tensorCount > uint64(st.lim.MaxEntries) {
+		st.limit(limits.RuleEntries, "MaxEntries", clampInt64(tensorCount), int64(st.lim.MaxEntries), "tensor_count")
+		tensorRead = uint64(st.lim.MaxEntries)
+		st.structf(8, "tensor_count %d exceeds MaxEntries %d, so %d record(s) were not read", tensorCount, st.lim.MaxEntries, tensorCount-tensorRead)
 	}
 
 	// Metadata.
-	seen := make(map[string]bool, minU64(kvCount, 1024))
-	for range kvCount {
+	seen := make(map[string]bool, minU64(kvRead, 1024))
+	for range kvRead {
 		keyOff := r.off
 		kl, ok := r.u64()
 		if !ok {
@@ -238,8 +249,8 @@ func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
 		off     uint64
 		infoOff int64
 	}
-	tensors := make([]tensor, 0, minU64(tensorCount, 4096))
-	for range tensorCount {
+	tensors := make([]tensor, 0, minU64(tensorRead, 4096))
+	for range tensorRead {
 		infoOff := r.off
 		nl, ok := r.u64()
 		if !ok {
@@ -299,6 +310,15 @@ func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
 			return st.meta, nil
 		}
 		tensors = append(tensors, tensor{name: name, dims: dims, typ: typ, off: toff, infoOff: infoOff})
+	}
+
+	if kvRead != kvCount || tensorRead != tensorCount {
+		// The cap stopped the walk, so r.off is not the end of the metadata
+		// section and the padding/data-section geometry cannot be located from
+		// it. Computing it anyway would report the unread records' bytes as
+		// broken padding and fabricate tensor geometry, so stop here with what
+		// the walk did establish.
+		return st.meta, nil
 	}
 
 	// Alignment and the padding that separates the metadata region from the
