@@ -31,8 +31,10 @@ var (
 		Class:      "polyglot",
 		Description: "A complete native executable header (ELF, PE/DOS, Mach-O, an ar object archive or an OLE " +
 			"compound file) was found inside an artifact that was dispatched as something else. The header was " +
-			"accepted by Go's own debug/elf, debug/macho or debug/pe parser, so this is real code, not four " +
-			"bytes that happen to match a magic. Nothing in sc4n executes it; the finding is the statement that " +
+			"validated — by Go's own debug/elf, debug/macho or debug/pe parser for those three, and by the " +
+			"structural check in internal/bytescan for an ar object archive and an OLE compound file, for which " +
+			"the standard library has no parser at all — so this is real code, not four bytes that happen to " +
+			"match a magic. Nothing in sc4n executes it; the finding is the statement that " +
 			"the file carries a program alongside the model, which is the shape both a malicious repository and " +
 			"a self-extracting single-file model (an APE/llamafile is exactly this) present to a loader.",
 		Refs: []string{
@@ -57,7 +59,9 @@ var (
 		CWE:        []string{"CWE-436"},
 		Class:      "polyglot",
 		Description: "The artifact carries a native-executable magic (ELF, PE/DOS, Mach-O, ar, OLE or an APE " +
-			"sigil) but the standard library's header parser rejects it, so the magic is data that looks like a " +
+			"sigil) but the validation for that kind rejects it — debug/elf, debug/macho and debug/pe for the " +
+			"first three, the structural check in internal/bytescan for ar, OLE and an APE whose PE header does " +
+			"not parse — so the magic is data that looks like a " +
 			"header rather than a loadable program. Reported at info because a four-byte match is common in " +
 			"binary tensor data; it is the validated match (SC4N-POLYGLOT-NATIVE) that means code. A leading " +
 			"magic that does not validate is also how a truncated or deliberately malformed executable is " +
