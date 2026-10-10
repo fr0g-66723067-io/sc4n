@@ -556,12 +556,17 @@ unsigned.
 
 ## 12. Mapping from rule to fixture
 
-Every rule in §2–§9 is exercised by a committed fixture under `testdata/fixtures`
-and pinned by `testdata/fixtures/expectations.json`: the malicious fixtures list
-the rule IDs they must produce (`expect`) and the IDs they must not (`forbid`),
-and `internal/scan`'s corpus gate asserts the scanner's finding set is a superset
-of `expect` and disjoint from `forbid` for every file on disk. The benign set
+Every rule a committed fixture exercises is pinned by
+`testdata/fixtures/expectations.json`: the malicious fixtures list the rule IDs they
+must produce (`expect`) and the IDs they must not (`forbid`), and `internal/scan`'s
+corpus gate asserts the scanner's finding set is a superset of `expect` and
+disjoint from `forbid` for every file on disk. The benign set
 (`testdata/fixtures/benign/`) is the false-positive gate: it must produce no
-`high` or `critical` finding at all. `sc4n rules` prints the live catalogue with
-each rule's CWE, and `sc4n formats` prints the per-format depth of analysis and
-the deliberate gaps.
+`high` or `critical` finding at all.
+
+The gate covers the fixtures that exist, not the rule catalogue: 135 of the 190
+rules are named in `expectations.json`, and the other 55 — the limit rules, the
+parse-failure rules and the hf-cache collector rules, which need a crafted input or
+a crafted cache to reach — are covered by Go tests only. `sc4n rules` prints the
+live catalogue with each rule's CWE, and `sc4n formats` prints the per-format depth
+of analysis and the deliberate gaps.
