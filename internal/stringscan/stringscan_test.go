@@ -322,3 +322,36 @@ func TestURLHuntTerminatesOnBareH(t *testing.T) {
 		}
 	}
 }
+
+// TestCredentialEnvironmentNameNeedsARead pins the F7-adjacent correction: the
+// bare name of a credential environment variable is not an indicator, because a
+// tool schema or a deployment note names it to say which variables exist. On
+// llama.cpp's 71 real chat templates that mention was the only high finding.
+// Reading the value is the indicator.
+func TestCredentialEnvironmentNameNeedsARead(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"GITHUB_TOKEN", false},
+		{"set GITHUB_TOKEN as a tool parameter", false},
+		{"AWS_SECRET_ACCESS_KEY, HF_TOKEN and their relatives", false},
+		{"echo ${GITHUB_TOKEN}", true},
+		{"echo $GITHUB_TOKEN", true},
+		{"%GITHUB_TOKEN%", true},
+		{`os.environ["GITHUB_TOKEN"]`, true},
+		{"os.environ['HF_TOKEN']", true},
+		{`getenv("OPENAI_API_KEY")`, true},
+		{"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI", true},
+	} {
+		var got bool
+		for _, h := range hitsFor(t, tc.text) {
+			if h.Rule.ID == "SC4N-STRING-CREDENTIAL" || h.Rule.ID == "SC4N-STRING-SECRET-VALUE" {
+				got = true
+			}
+		}
+		if got != tc.want {
+			t.Errorf("%q: reported=%v, want %v", tc.text, got, tc.want)
+		}
+	}
+}

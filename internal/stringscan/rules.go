@@ -38,12 +38,14 @@ var (
 		Confidence: report.ConfidenceMedium,
 		CWE:        []string{"CWE-522", "CWE-200"},
 		Class:      "content",
-		Description: "A string in the artifact references a credential store or a credential environment " +
-			"variable: ~/.ssh and id_rsa, ~/.aws/credentials, the Hugging Face token cache, /etc/shadow, " +
-			"/proc/self/environ, .netrc, .git-credentials, .docker/config.json, .kube/config, wallet.dat, " +
-			"service-account.json, or the environment names AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, HF_TOKEN " +
-			"and their relatives. A model artifact has no functional reason to name any of these; the " +
-			"reason to name one is to read it.",
+		Description: "A string in the artifact references a credential store or *reads* a credential " +
+			"from the environment: ~/.ssh and id_rsa, ~/.aws/credentials, the Hugging Face token cache, " +
+			"/etc/shadow, /proc/self/environ, .netrc, .git-credentials, .docker/config.json, " +
+			".kube/config, wallet.dat, service-account.json, or a shell/batch expansion or environment " +
+			"lookup of AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, HF_TOKEN and their relatives. A model " +
+			"artifact has no functional reason to reach for any of these. The bare *name* of a credential " +
+			"environment variable is deliberately not an indicator: a tool schema or a deployment note " +
+			"naming GITHUB_TOKEN is describing which variables exist, not reading one.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/522.html"},
 		Tags: []string{"credential-access"},
 	})

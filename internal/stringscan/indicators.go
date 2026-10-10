@@ -261,11 +261,26 @@ func buildIndicatorTable() []indicator {
 		".npmrc", ".pypirc", "wallet.dat", "login.keychain", "credentials.json",
 		"service-account.json", "macaroons", "cookies.sqlite",
 	)
-	add(ruleCredential, "credential-env", false,
+	// A credential environment variable is reported when it is *read*, not when it
+	// is merely named. The name alone is what a tool schema, an agent prompt or a
+	// deployment document contains: on llama.cpp's 71 real chat templates the only
+	// high finding was "GITHUB_TOKEN" listed as a tool's parameter, which is the
+	// template telling the model which variables exist. The shapes below all take
+	// the value: a shell or batch expansion of the name, and an environment lookup
+	// of it. A literal `NAME=value` is covered separately by
+	// SC4N-STRING-SECRET-VALUE, which redacts the match.
+	credentialEnv := []string{
 		"AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GITHUB_TOKEN", "GH_TOKEN",
 		"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN",
 		"SLACK_TOKEN", "DOCKER_AUTH", "KUBECONFIG", "NPM_TOKEN", "PYPI_TOKEN",
-	)
+	}
+	for _, n := range credentialEnv {
+		add(ruleCredential, "credential-env-access", false,
+			"$"+n, "${"+n+"}", "%"+n+"%",
+			`environ["`+n+`"]`, "environ['"+n+"']",
+			`getenv("`+n+`")`, "getenv('"+n+"')",
+		)
+	}
 
 	// A literal `NAME=` followed by a value is the shape a hard-coded secret takes.
 	// These are the redacting indicators: the match itself is secret material.

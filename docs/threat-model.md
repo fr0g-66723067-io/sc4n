@@ -302,7 +302,7 @@ before it reached the payload, and reported clean.**
 | `SC4N-ARCHIVE-LINK` | symlink/hardlink/device members |
 | `SC4N-ARCHIVE-NAME-MISMATCH` | the local header name differing from the central directory name: the classic way to make a scanner read one file and a loader another |
 | `SC4N-ARCHIVE-DUPLICATE-NAME`, `-ENCRYPTED`, `-CRC` | duplicate names, encrypted members (which cannot be inspected), CRC mismatches |
-| `SC4N-ARCHIVE-NATIVE-MEMBER`, `-SHEBANG` | a validated native executable or a script inside an archive |
+| `SC4N-ARCHIVE-NATIVE-MEMBER`, `-SHEBANG` | a validated native executable or a script inside an archive (high, not critical: loading the model does not run the member) |
 | `SC4N-ARCHIVE-NESTED-COMPRESSION`, `-UNSUPPORTED-COMPRESSION` | a wrapper inside a wrapper, and a wrapper with no stdlib decoder (xz, lzma, lz4, zstd, 7z, rar, joblib-legacy `ZF`) |
 | `SC4N-LIMIT-ENTRIES`, `-RATIO`, `-DECOMPRESSED`, `-DEPTH`, `-SPILL` | the bomb defences, each naming the limit and the observed value |
 
@@ -367,7 +367,8 @@ directory turns model loading into arbitrary file read; a crafted
 `GHSA-p433-9wv8-28xj`, `CVE-2026-27489` = `GHSA-3r9x-f23j-gc73`,
 `CVE-2026-34445` = `GHSA-538c-55jv-c5g9`, `GHSA-cmw6-hcpp-c6jp`.
 
-**Detectors.** `SC4N-ONNX-EXTERNAL-TRAVERSAL` (critical),
+**Detectors.** `SC4N-ONNX-EXTERNAL-TRAVERSAL` (high: a file-read primitive, the
+same calibration as every other path-escape rule),
 `SC4N-ONNX-EXTERNAL-KEY` (high; dunder keys are marked in the evidence),
 `SC4N-ONNX-EXTERNAL-BOUNDS` (high), `SC4N-ONNX-EXTERNAL-SYMLINK` (high),
 `SC4N-ONNX-CUSTOM-DOMAIN`, `SC4N-ONNX-FUNCTION`, `SC4N-ONNX-STRUCT`, and
