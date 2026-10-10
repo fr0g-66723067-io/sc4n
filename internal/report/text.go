@@ -58,17 +58,29 @@ func (r *Report) WriteText(w io.Writer, o TextOptions) error {
 		// A finding inside a container is stamped "outer:member" (see Sink.Named),
 		// so an exact match would show a container row with no findings while its
 		// members carry them. Count both the row itself and anything nested in it.
+		//
+		// The nested half is built once: for each finding, every colon-separated
+		// prefix of its artifact is incremented, so a row's total is a map lookup
+		// rather than a scan of every finding key per row (the scan was quadratic
+		// in artifacts x finding artifacts). Walking all prefixes — not just the
+		// first — keeps the old behaviour for a member of a member: "a:b:c" counts
+		// toward both "a:b" and "a"; the walk stays linear in the total path length.
 		counts := map[string]int{}
+		nested := map[string]int{}
 		for _, f := range r.Findings {
 			counts[f.Artifact]++
+			for i := 0; i < len(f.Artifact); {
+				j := strings.IndexByte(f.Artifact[i:], ':')
+				if j < 0 {
+					break
+				}
+				i += j
+				nested[f.Artifact[:i]]++
+				i++ // step over the colon so the next prefix is strictly longer
+			}
 		}
 		for _, a := range r.Artifacts {
-			n := counts[a.Path]
-			for k, v := range counts {
-				if len(k) > len(a.Path) && strings.HasPrefix(k, a.Path) && k[len(a.Path)] == ':' {
-					n += v
-				}
-			}
+			n := counts[a.Path] + nested[a.Path]
 			line := []string{a.Path, a.Format, humanBytes(a.Size), strconv.Itoa(n)}
 			if a.Error != "" {
 				line[1] = "unreadable"
