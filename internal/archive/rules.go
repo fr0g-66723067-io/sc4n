@@ -77,18 +77,23 @@ var (
 		Refs: []string{"https://cwe.mitre.org/data/definitions/354.html"},
 	})
 
-	// ruleArchiveNameMismatch fires when the local header name and the central
-	// directory name disagree.
+	// ruleArchiveNameMismatch fires when the local file header and the central
+	// directory disagree about a member: its name, its compression method, its
+	// CRC, or its sizes. The ID is historical (the name case came first); the
+	// finding is "two records describe different bytes".
 	ruleArchiveNameMismatch = report.DefineRule(report.Rule{
 		ID:         "SC4N-ARCHIVE-NAME-MISMATCH",
-		Title:      "Zip local header name differs from the central directory name",
+		Title:      "Zip local header disagrees with the central directory",
 		Severity:   report.SeverityMedium,
 		Confidence: report.ConfidenceHigh,
 		CWE:        []string{"CWE-436"},
 		Class:      "archive",
-		Description: "A member's name in the local file header differs from its name in the central " +
-			"directory. A reader that trusts one and a loader that trusts the other see two different files, " +
-			"which is the classic way to show a scanner a benign member and load a hostile one.",
+		Description: "A member's local file header and its central-directory record disagree about its " +
+			"name, compression method, CRC-32 or sizes. A reader that trusts one record and a loader that " +
+			"trusts the other see two different files — the classic way to show a scanner a benign member " +
+			"and load a hostile one — and a method disagreement means the bytes sc4n read are not the bytes " +
+			"a loader would decompress. The same rule reports a stored member whose central record declares " +
+			"different compressed and uncompressed sizes, which cannot both be true.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/436.html"},
 	})
 

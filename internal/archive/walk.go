@@ -34,6 +34,10 @@ type Member struct {
 	// LinkKind is "" for a regular file, else "symlink"/"hardlink"/"device".
 	LinkKind string
 	Link     string // link target, when LinkKind != ""
+	// LocalMismatch describes any disagreement between the local header and the
+	// central directory (name, method, CRC, sizes); LocalName carries the name
+	// case for evidence.
+	LocalMismatch string
 	// LocalName is the name in the local header when it disagrees with the
 	// central directory, else "".
 	LocalName string
@@ -102,9 +106,10 @@ func Collect(s source.Source, l limits.Limits) (Members, error) {
 			case 0x4000:
 				m.IsDir = true
 			}
-			body, localName, localErr := resolveLocal(s, *e)
+			body, localName, mismatch, localErr := resolveLocal(s, *e)
 			m.dataOff = body
 			m.LocalName = localName
+			m.LocalMismatch = mismatch
 			m.localErr = localErr
 			ms.Members = append(ms.Members, m)
 		}
@@ -159,13 +164,23 @@ func (ms Members) Check(ctx *artifact.Ctx) {
 		if m.Encrypted {
 			ctx.Sink.EmitExtra(ruleArchiveEncrypted, 0, "encrypted member "+snippet(m.Name), map[string]string{"member": m.Name})
 		}
-		if m.LocalName != "" {
-			ctx.Sink.EmitExtra(ruleArchiveNameMismatch, 0,
-				"central directory says "+snippet(m.Name)+" but local header says "+snippet(m.LocalName),
-				map[string]string{"member": m.Name, "localName": m.LocalName})
+		if m.LocalMismatch != "" {
+			extra := map[string]string{"member": m.Name, "disagreement": m.LocalMismatch}
+			if m.LocalName != "" {
+				extra["localName"] = m.LocalName
+			}
+			ctx.Sink.EmitExtra(ruleArchiveNameMismatch, 0, m.LocalMismatch, extra)
 		}
 		if m.localErr != "" {
 			ctx.Sink.EmitExtra(ruleArchiveMemberError, 0, m.localErr+" in member "+snippet(m.Name), map[string]string{"member": m.Name, "error": m.localErr})
+		}
+		if m.Method == 0 && m.Size > 0 && m.CompressedSize != m.Size {
+			// A stored member's data is the file's bytes, so the two sizes cannot
+			// differ. A record that claims they do describes bytes that do not
+			// exist, and a reader that trusts one number reads the wrong region.
+			ctx.Sink.EmitExtra(ruleArchiveNameMismatch, 0,
+				"stored member "+snippet(m.Name)+" declares "+itoa64(m.CompressedSize)+" compressed and "+itoa64(m.Size)+" uncompressed bytes, which cannot both be true",
+				map[string]string{"member": m.Name, "compressedSize": itoa64(m.CompressedSize), "uncompressedSize": itoa64(m.Size)})
 		}
 		if m.Name != "" {
 			if seen[m.Name] {
@@ -303,6 +318,13 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 	for i := range ms.Members {
 		m := ms.Members[i]
 		if m.IsDir || m.LinkKind != "" || m.Encrypted {
+			continue
+		}
+		if m.localErr != "" {
+			// The local header could not be read, so dataOff is meaningless: the
+			// read would start at offset 0 and analyse the artifact's own leading
+			// bytes under this member's name. Members.Check has already reported
+			// the failure.
 			continue
 		}
 		if m.Method == 0 && m.Size > max {

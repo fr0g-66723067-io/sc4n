@@ -6,6 +6,7 @@ import (
 	"hash/crc32"
 	"io"
 	"strconv"
+	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
@@ -313,30 +314,57 @@ func parseZip64Extra(extra []byte, e *zipEntry) {
 }
 
 // resolveLocal reads the local file header to find the member body offset and to
-// compare the local name against the central directory name. A disagreement is
-// returned as localName; an unreadable local header as errStr.
-func resolveLocal(s source.Source, e zipEntry) (bodyOff int64, localName, errStr string) {
+// compare the whole record against the central directory's: the name, the
+// compression method, the CRC-32 and both sizes. A disagreement is returned as
+// localName (the name case) and mismatch (a description of any disagreement); an
+// unreadable local header as errStr, in which case bodyOff is meaningless and the
+// member must not be read.
+func resolveLocal(s source.Source, e zipEntry) (bodyOff int64, localName, mismatch, errStr string) {
 	if e.localOff < 0 || e.localOff+30 > s.Size() {
-		return 0, "", "local header offset out of range"
+		return 0, "", "", "local header offset out of range"
 	}
 	hdr, err := s.Bytes(e.localOff, 30)
 	if err != nil && len(hdr) < 30 {
-		return 0, "", "local header unreadable"
+		return 0, "", "", "local header unreadable"
 	}
 	if le32(hdr) != sigLocal {
-		return 0, "", "local header signature invalid"
+		return 0, "", "", "local header signature invalid"
 	}
 	nameLen := int64(le16(hdr[26:]))
 	extraLen := int64(le16(hdr[28:]))
 	bodyOff = e.localOff + 30 + nameLen + extraLen
 	ln, lerr := s.Bytes(e.localOff+30, nameLen)
 	if lerr != nil && int64(len(ln)) < nameLen {
-		return bodyOff, "", "local header name unreadable"
+		return bodyOff, "", "", "local header name unreadable"
 	}
 	if string(ln) != e.name {
-		return bodyOff, string(ln), ""
+		localName = string(ln)
+		mismatch = "central directory says " + snippet(e.name) + " but local header says " + snippet(localName)
 	}
-	return bodyOff, "", ""
+	// The fields a loader uses to find and decompress the data. A disagreement
+	// here means the bytes sc4n read are not the bytes a loader would use.
+	var diffs []string
+	if lm := le16(hdr[8:]); lm != e.method {
+		diffs = append(diffs, "method "+itoa(int(lm))+" vs "+itoa(int(e.method)))
+	}
+	if lc := le32(hdr[14:]); lc != e.crc {
+		diffs = append(diffs, "crc32 0x"+strconv.FormatUint(uint64(lc), 16)+" vs 0x"+strconv.FormatUint(uint64(e.crc), 16))
+	}
+	if lc := uint64(le32(hdr[18:])); lc != e.comp {
+		diffs = append(diffs, "compressed size "+itoa64(int64(lc))+" vs "+itoa64(int64(e.comp)))
+	}
+	if lu := uint64(le32(hdr[22:])); lu != e.uncomp {
+		diffs = append(diffs, "uncompressed size "+itoa64(int64(lu))+" vs "+itoa64(int64(e.uncomp)))
+	}
+	if len(diffs) > 0 {
+		extra := "local header disagrees with the central directory about " + strings.Join(diffs, ", ")
+		if mismatch != "" {
+			mismatch += "; " + extra
+		} else {
+			mismatch = extra
+		}
+	}
+	return bodyOff, localName, mismatch, ""
 }
 
 // openZipMember returns a reader over one member's decompressed bytes. It

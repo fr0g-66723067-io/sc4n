@@ -861,3 +861,38 @@ func TestSkippedTarMembersAreReported(t *testing.T) {
 	plain = append(plain, make([]byte, 1024)...)
 	forbid(t, scanAs(t, "plain.tar", plain, artifact.FormatTar, limits.Default()), "SC4N-ARCHIVE-MEMBER-SKIPPED")
 }
+
+// TestZipLocalHeaderFieldsAreCompared: only the local header's *name* used to be
+// compared, so a member whose local header said "deflate" while the central
+// directory said "stored" was read as stored bytes with no finding, and a stored
+// member whose central record declared two different sizes was accepted.
+func TestZipLocalHeaderFieldsAreCompared(t *testing.T) {
+	base := buildZip(t, []zspec{{name: "a.txt", data: []byte("hello world")}}, false)
+
+	// Local method patched to deflate; the central directory still says stored.
+	method := append([]byte(nil), base...)
+	binary.LittleEndian.PutUint16(method[8:], 8)
+	want(t, scanZip(t, "method.zip", method, limits.Default()), "SC4N-ARCHIVE-NAME-MISMATCH")
+
+	// Central record's compressed size patched away from the uncompressed size.
+	sizes := append([]byte(nil), base...)
+	cd := bytes.Index(sizes, []byte("PK\x01\x02"))
+	if cd < 0 {
+		t.Fatal("no central directory record in the fixture")
+	}
+	binary.LittleEndian.PutUint32(sizes[cd+20:], 99)
+	want(t, scanZip(t, "sizes.zip", sizes, limits.Default()), "SC4N-ARCHIVE-NAME-MISMATCH")
+
+	// An unreadable local header must not be read as if it started at offset 0:
+	// the artifact's own leading bytes are not the member.
+	broken := append([]byte(nil), base...)
+	copy(broken[0:4], "XXXX")
+	got := scanZip(t, "nolocal.zip", broken, limits.Default())
+	want(t, got, "SC4N-ARCHIVE-MEMBER-ERROR")
+	forbid(t, got, "SC4N-ARCHIVE-CRC")
+
+	// The unmodified zip must be clean of both.
+	clean := scanZip(t, "clean.zip", base, limits.Default())
+	forbid(t, clean, "SC4N-ARCHIVE-NAME-MISMATCH")
+	forbid(t, clean, "SC4N-ARCHIVE-MEMBER-ERROR")
+}
