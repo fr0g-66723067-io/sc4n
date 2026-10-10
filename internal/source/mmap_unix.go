@@ -100,7 +100,9 @@ func (s *mmapSource_) Bytes(off, n int64) ([]byte, error) {
 		return nil, errors.New("source: negative range")
 	}
 	b := s.h.b
-	if off > s.size || off+n > s.size {
+	// n > size-off rather than off+n > size: off+n wraps for a large n and the
+	// guard would pass, leaving b[off : off+n] to panic on a negative high bound.
+	if off > s.size || n > s.size-off {
 		end := s.size
 		if off > end {
 			off = end

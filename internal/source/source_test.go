@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,6 +36,48 @@ func TestMemBytesIsZeroCopyAndBoundsChecked(t *testing.T) {
 	}
 	if _, err := s.Bytes(0, -1); err == nil {
 		t.Fatal("Bytes accepted a negative length")
+	}
+	// A length large enough that off+n wraps must be refused with
+	// io.ErrUnexpectedEOF, not panic on a negative slice bound.
+	for _, tc := range []struct{ off, n int64 }{
+		{0, math.MaxInt64},
+		{math.MaxInt64, 1},
+		{5, math.MaxInt64},
+	} {
+		if _, err := s.Bytes(tc.off, tc.n); !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("Bytes(%d,%d): err = %v, want io.ErrUnexpectedEOF", tc.off, tc.n, err)
+		}
+	}
+}
+
+// TestMappedBytesRejectsOverflowingRange covers the same guard on the mapped
+// implementation, which is the one a real model file goes through.
+func TestMappedBytesRejectsOverflowingRange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "m.bin")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("sc4n"), 512), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := limits.Default()
+	l.MmapThreshold = 16
+	s, err := Open(path, l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for _, tc := range []struct{ off, n int64 }{
+		{0, math.MaxInt64},
+		{math.MaxInt64, 1},
+		{s.Size(), math.MaxInt64},
+		{s.Size() + 1, 1},
+	} {
+		if _, err := s.Bytes(tc.off, tc.n); !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("Bytes(%d,%d): err = %v, want io.ErrUnexpectedEOF", tc.off, tc.n, err)
+		}
+	}
+	if _, err := s.Bytes(0, s.Size()); err != nil {
+		t.Fatalf("Bytes(0,size): %v", err)
 	}
 }
 
