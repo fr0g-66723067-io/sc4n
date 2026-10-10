@@ -61,9 +61,11 @@ func init() {
 			"rather than left implied. Dispatch is on content, never on the extension, because `.ptl` is " +
 			"also used for the PyTorch Mobile lite flatbuffer.",
 	})
-	// Priority 72: above the generic sniffPTE placeholder at 70 and every
-	// extension-heuristic sniffer, below the unambiguous magics. The check is the
-	// documented one -- the file magic lives at offset 4, not offset 0.
+	// Priority 72: above every extension-heuristic sniffer, below the
+	// unambiguous magics. This is the only sniffer for FormatPTE -- the
+	// generic offset-0 placeholder in internal/artifact is gone, because the
+	// documented check is the file magic at offset 4, not offset 0, and two
+	// sniffers for one format silently let dispatch order decide coverage.
 	artifact.RegisterSniffer("pte-magic", 72, sniff)
 	artifact.RegisterParser(artifact.FormatPTE, parser{})
 }
@@ -110,7 +112,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 			if extSize < minExtHeader || extSize > size {
 				ctx.Sink.Emit(RuleStruct, 0, "extended header size "+strconv.FormatInt(extSize, 10)+" is out of range")
 			}
-			if progSize > size {
+			if progSize < 0 || progSize > size {
 				ctx.Sink.Emit(RuleStruct, 0, "declared program data size exceeds the file")
 			}
 			if segBase < 0 || segSize < 0 || segBase > size || segSize > size-segBase {

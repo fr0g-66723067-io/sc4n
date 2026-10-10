@@ -1,44 +1,62 @@
-package artifact
+package artifact_test
 
 import (
 	"testing"
 
+	// Registers the ExecuTorch content sniffer (priority 72) that owns FormatPTE
+	// now that the generic offset-0 probe this package used to carry is gone.
+	// Deliberately not internal/formats: this test needs only the pte sniffer,
+	// and linking every format would make the table below depend on siblings'
+	// sniffers.
+	_ "github.com/fr0g-66723067-io/sc4n/internal/pte"
+
+	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
-func sniff(t *testing.T, name string, b []byte) (Format, string) {
+func sniff(t *testing.T, name string, b []byte) (artifact.Format, string) {
 	t.Helper()
 	s := source.Mem(name, b)
 	defer s.Close()
-	return Sniff(s, limits.Default())
+	return artifact.Sniff(s, limits.Default())
 }
 
 func TestSniffByContentNotExtension(t *testing.T) {
 	cases := []struct {
 		name string
 		data []byte
-		want Format
+		want artifact.Format
 	}{
 		// A torch 7z-in-.pt: the name says checkpoint, the bytes say 7z.
-		{"model.pt", []byte("7z\xbc\xaf\x27\x1caaaaaaaaaaaaaaaa"), FormatSevenZip},
+		{"model.pt", []byte("7z\xbc\xaf\x27\x1caaaaaaaaaaaaaaaa"), artifact.FormatSevenZip},
 		// A gzip file named .safetensors.
-		{"model.safetensors", append([]byte{0x1f, 0x8b, 0x08, 0x00}, make([]byte, 32)...), FormatGzip},
-		{"a.pkl", []byte("\x80\x04\x95\x00\x00"), FormatPickle},
-		{"a.bin", []byte("GGUF\x03\x00\x00\x00"), FormatGGUF},
-		{"a.npy", append([]byte("\x93NUMPY"), 0x01, 0x00), FormatNPY},
-		{"x.h5", []byte("\x89HDF\r\n\x1a\n"), FormatHDF5},
-		{"x.tflite", append([]byte{0x1c, 0x00, 0x00, 0x00}, []byte("TFL3")...), FormatTFLite},
-		{"x.ubj", []byte("UBJ\x82"), FormatXGBoostUBJ},
-		{"x.pte", []byte{'E', 'T', 0x00, 0x00, '1', '2', 0x00}, FormatPTE},
-		{"x.so", []byte("\x7fELF\x02\x01\x01"), FormatNative},
-		{"x.exe", []byte("MZ\x90\x00"), FormatNative},
-		{"x.tar", append(append(make([]byte, 257), []byte("ustar")...), make([]byte, 100)...), FormatTar},
-		{"x.xz", []byte("\xfd7zXZ\x00"), FormatXz},
-		{"x.zst", []byte("\x28\xb5\x2f\xfd"), FormatZstd},
-		{"x.lz4", []byte("\x04\x22\x4d\x18"), FormatLz4},
-		{"x.json", []byte(`{"a": 1}`), FormatJSON},
-		{"x.txt", []byte("just some plain text\n"), FormatText},
+		{"model.safetensors", append([]byte{0x1f, 0x8b, 0x08, 0x00}, make([]byte, 32)...), artifact.FormatGzip},
+		{"a.pkl", []byte("\x80\x04\x95\x00\x00"), artifact.FormatPickle},
+		{"a.bin", []byte("GGUF\x03\x00\x00\x00"), artifact.FormatGGUF},
+		{"a.npy", append([]byte("\x93NUMPY"), 0x01, 0x00), artifact.FormatNPY},
+		{"x.h5", []byte("\x89HDF\r\n\x1a\n"), artifact.FormatHDF5},
+		{"x.tflite", append([]byte{0x1c, 0x00, 0x00, 0x00}, []byte("TFL3")...), artifact.FormatTFLite},
+		// UBJSON has no file identifier, so a bare "UBJ" prefix is not
+		// evidence of the format: only internal/xgb's walk claims a real
+		// document. Text that merely begins "UBJ" is not UBJSON.
+		{"x.ubj", []byte("UBJ hello world"), artifact.FormatText},
+		// Real .pte shape: a root uint32 at offset 0 and "ET" + two ASCII
+		// version digits at offset 4. Claimed by internal/pte's content sniffer,
+		// not by any table in this package.
+		{"x.pte", []byte{0x1c, 0x00, 0x00, 0x00, 'E', 'T', '1', '2'}, artifact.FormatPTE},
+		// Text that merely begins "ET," is not a .pte: the magic lives at
+		// offset 4, so claiming it from offset 0 would dispatch ordinary text
+		// to the flatbuffer parser.
+		{"x.pte", []byte("ET,01234\n"), artifact.FormatText},
+		{"x.so", []byte("\x7fELF\x02\x01\x01"), artifact.FormatNative},
+		{"x.exe", []byte("MZ\x90\x00"), artifact.FormatNative},
+		{"x.tar", append(append(make([]byte, 257), []byte("ustar")...), make([]byte, 100)...), artifact.FormatTar},
+		{"x.xz", []byte("\xfd7zXZ\x00"), artifact.FormatXz},
+		{"x.zst", []byte("\x28\xb5\x2f\xfd"), artifact.FormatZstd},
+		{"x.lz4", []byte("\x04\x22\x4d\x18"), artifact.FormatLz4},
+		{"x.json", []byte(`{"a": 1}`), artifact.FormatJSON},
+		{"x.txt", []byte("just some plain text\n"), artifact.FormatText},
 	}
 	for _, tc := range cases {
 		got, _ := sniff(t, tc.name, tc.data)
@@ -52,7 +70,7 @@ func TestSniffUnknownForOpqaqueBinary(t *testing.T) {
 	// NUL bytes and no magic: nothing structural recognises it, and the text
 	// fallback must refuse binary content rather than claim it is text.
 	got, sniffer := sniff(t, "blob.bin", []byte{0x00, 0x11, 0x22, 0x00, 0x33, 0x44, 0xff, 0x00})
-	if got != FormatUnknown {
+	if got != artifact.FormatUnknown {
 		t.Fatalf("Sniff = %s (%s), want unknown", got, sniffer)
 	}
 }
@@ -73,29 +91,29 @@ func TestSniffIsDeterministic(t *testing.T) {
 func TestExtensionPlausible(t *testing.T) {
 	cases := []struct {
 		path string
-		f    Format
+		f    artifact.Format
 		want bool
 	}{
-		{"model.pt", FormatSevenZip, true}, // a .pt really is sometimes a 7z
-		{"model.pt", FormatNative, false},  // but never an ELF
-		{"model.safetensors", FormatGzip, false},
-		{"weights.bin", FormatSafetensors, true},
-		{"weights.bin", FormatPickle, true},
-		{"model.gguf", FormatGGUF, true},
-		{"notes.unknown-ext", FormatNative, true}, // nothing to contradict
-		{"noext", FormatNative, true},
-		{"trailing.", FormatNative, true},
+		{"model.pt", artifact.FormatSevenZip, true}, // a .pt really is sometimes a 7z
+		{"model.pt", artifact.FormatNative, false},  // but never an ELF
+		{"model.safetensors", artifact.FormatGzip, false},
+		{"weights.bin", artifact.FormatSafetensors, true},
+		{"weights.bin", artifact.FormatPickle, true},
+		{"model.gguf", artifact.FormatGGUF, true},
+		{"notes.unknown-ext", artifact.FormatNative, true}, // nothing to contradict
+		{"noext", artifact.FormatNative, true},
+		{"trailing.", artifact.FormatNative, true},
 	}
 	for _, tc := range cases {
-		if got := ExtensionPlausible(tc.path, tc.f); got != tc.want {
+		if got := artifact.ExtensionPlausible(tc.path, tc.f); got != tc.want {
 			t.Errorf("ExtensionPlausible(%q, %s) = %v, want %v", tc.path, tc.f, got, tc.want)
 		}
 	}
 }
 
 func TestFormatTableHasNoGaps(t *testing.T) {
-	seen := map[Format]bool{}
-	for _, i := range AllFormats() {
+	seen := map[artifact.Format]bool{}
+	for _, i := range artifact.AllFormats() {
 		if seen[i.Format] {
 			t.Fatalf("format %s appears twice", i.Format)
 		}
@@ -104,7 +122,7 @@ func TestFormatTableHasNoGaps(t *testing.T) {
 			t.Fatalf("format %s has no capability note", i.Format)
 		}
 	}
-	if !seen[FormatUnknown] {
+	if !seen[artifact.FormatUnknown] {
 		t.Fatal("FormatUnknown must be described so `sc4n formats` explains what an unmatched file gets")
 	}
 }
@@ -118,26 +136,26 @@ func TestRegisterFormatRejectsDuplicate(t *testing.T) {
 			t.Fatal("RegisterFormat accepted a duplicate")
 		}
 	}()
-	RegisterFormat(Info{Format: FormatUnknown, Notes: "duplicate"})
+	artifact.RegisterFormat(artifact.Info{Format: artifact.FormatUnknown, Notes: "duplicate"})
 }
 
 func TestMemberDepthBudget(t *testing.T) {
-	sess := NewSession(nil, "", limits.Limits{MaxDepth: 1})
+	sess := artifact.NewSession(nil, "", limits.Limits{MaxDepth: 1})
 	ctx := sess.NewCtx("root", limits.Limits{MaxDepth: 1})
-	child, ok := ctx.Member("a", FormatZip)
+	child, ok := ctx.Member("a", artifact.FormatZip)
 	if !ok {
 		t.Fatal("first member rejected")
 	}
-	if _, ok := child.Member("b", FormatZip); ok {
+	if _, ok := child.Member("b", artifact.FormatZip); ok {
 		t.Fatal("second nested member accepted with MaxDepth 1")
 	}
 }
 
 func TestFormatStringIsStable(t *testing.T) {
-	if FormatSafetensors.String() != "safetensors" {
-		t.Fatalf("FormatSafetensors.String() = %q", FormatSafetensors.String())
+	if artifact.FormatSafetensors.String() != "safetensors" {
+		t.Fatalf("FormatSafetensors.String() = %q", artifact.FormatSafetensors.String())
 	}
-	if got := Format(250).String(); got != "format(250)" {
+	if got := artifact.Format(250).String(); got != "format(250)" {
 		t.Fatalf("unregistered format renders as %q", got)
 	}
 }
@@ -160,12 +178,11 @@ func FuzzSniffNeverPanics(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s := source.Mem("fuzz", data)
 		defer s.Close()
-		got, _ := Sniff(s, limits.Default())
+		got, _ := artifact.Sniff(s, limits.Default())
 		// Determinism under fuzz as well: a format that flips between runs would
 		// make the report non-reproducible.
-		if again, _ := Sniff(s, limits.Default()); again != got {
+		if again, _ := artifact.Sniff(s, limits.Default()); again != got {
 			t.Fatalf("Sniff is not deterministic: %s then %s", got, again)
 		}
 	})
 }
-

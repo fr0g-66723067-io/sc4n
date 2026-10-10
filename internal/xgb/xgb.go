@@ -58,7 +58,7 @@ import (
 func init() {
 	artifact.RegisterFormat(artifact.Info{
 		Format: artifact.FormatXGBoostUBJ,
-		Magic:  "UBJ, or a UBJSON object/array opener (a bare deep parse follows)",
+		Magic:  "a UBJSON object or array opener (a bare deep parse follows); a leading UBJ identifier is skipped, not trusted",
 		Depth:  artifact.DepthStructural,
 		Notes: "the UBJSON value stream is walked with protowire-free bounded reads: string and container " +
 			"lengths are validated against the bytes remaining and MaxStringBlob before allocation, typed " +
@@ -139,11 +139,15 @@ var errStop = errors.New("xgb: stop")
 type stopKind uint8
 
 const (
-	// stopRunning is the zero value: the walk has not stopped.
+	// stopRunning is the zero value: the walk has not stopped. A walk that
+	// reaches the end of the root value leaves it here, so it is also the
+	// "document complete and consistent" verdict the sniffer accepts.
 	stopRunning stopKind = iota
 	// stopExhausted means the bytes available ran out while the document was
 	// still consistent. A head-limited sniff of a real (larger) document looks
-	// exactly like this, so it is not evidence against UBJSON.
+	// exactly like this, which is why it is not evidence against UBJSON when the
+	// walk was given only a prefix of the artifact; when the walk had the whole
+	// artifact, an exhaustion means the document itself is unfinished.
 	stopExhausted
 	// stopInvalid means the bytes contradict the format.
 	stopInvalid
@@ -182,29 +186,37 @@ func (w *uwalker) mark(k stopKind) {
 
 // looksLikeUBJ is the sniffer's verdict on a quiet head walk.
 //
-// A document that parsed to its end is UBJSON. So is one that ran out of bytes
-// after making real progress, because that is what a large document looks like
-// when only its first bytes are available. A structural failure is only evidence
-// against the format when it happens in the ambiguous prefix — the first bytes,
-// where `{` plus `#` is both a UBJSON object with a count and a Jinja comment
-// opener, and the two only diverge when the bytes after the marker are read.
-func (w *uwalker) looksLikeUBJ() bool {
-	if w.stop == stopRunning {
+// A walk that reached the end of the root value is UBJSON. A walk that ran out
+// of bytes while still consistent is UBJSON only when it was handed a strict
+// prefix of the artifact, because then the exhaustion is a property of the sniff
+// window rather than of the document; when the whole artifact was available and
+// the walk still found no end, the parser reports the document as structurally
+// invalid and the sniffer must not contradict it. A walk that recorded a
+// contradiction (stopInvalid) is never evidence for the format, at any offset:
+// `{#` is both a UBJSON object with a count and a Jinja comment opener, but that
+// ambiguity is resolved by the byte immediately after the marker, not by sixteen
+// bytes of progress — the old rule accepted a contradiction past 16 bytes, so the
+// sniffer could claim documents its own parser reports as invalid.
+func (w *uwalker) looksLikeUBJ(headIsWhole bool) bool {
+	switch w.stop {
+	case stopRunning:
 		return true
+	case stopExhausted:
+		return !headIsWhole
+	default: // stopInvalid
+		return false
 	}
-	return w.off >= ubjSniffProgress
 }
-
-// ubjSniffProgress is how far a quiet walk must get before a structural failure
-// counts as a property of the document rather than of its ambiguous prefix.
-const ubjSniffProgress = 16
 
 // ubjSniffHead bounds how much of an artifact the sniffer walks.
 const ubjSniffHead = 64 << 10
 
 func (w *uwalker) run() {
 	// XGBoost's UBJSON writer emits no magic prefix, but some producer of a
-	// downloadable corpus writes the optional "UBJ" file-identifier. Accept both.
+	// downloadable corpus writes the optional "UBJ" file-identifier in front of
+	// the document. It is not evidence of the format by itself (the sniff skips
+	// it and then walks the document); when this parser is handed the bytes, it
+	// skips the same prefix and parses what follows.
 	if b, err := w.r.Peek(3); err == nil && bytes.Equal(b, []byte("UBJ")) {
 		w.discard(3)
 	}
@@ -213,8 +225,13 @@ func (w *uwalker) run() {
 			// A structural stop: fail() or failShort() recorded which.
 			return
 		}
+		// The only other error value() returns is a short read, which is the
+		// document continuing past the bytes available rather than a
+		// contradiction. Record it as exhausted (the sniffer's verdict depends
+		// on that distinction: a head-limited sniff of a real, larger document
+		// looks exactly like this) while still reporting it.
 		w.mark(stopExhausted)
-		w.fail("truncated UBJSON value: " + err.Error())
+		w.emitStruct("truncated UBJSON value: " + err.Error())
 		return
 	}
 	// The walk completed; stopRunning (the zero value) is the verdict.
@@ -638,6 +655,31 @@ func (w *uwalker) typedValues(t byte, n int64, depth int) error {
 	case mNull, mNoop, mTrue, mFalse:
 		// A strongly typed container of payload-less values has an empty body.
 		return nil
+	case mArray, mObject:
+		// The spec allows a container's declared element type to be a container
+		// itself ("an array or object to define their type as [ or { to signal
+		// that they themselves contain additional containers"). Each element is
+		// that container with its own opening marker omitted, so the element
+		// body is walked directly: the marker the element would carry is already
+		// implied by this header.
+		if cap := w.arrayCap(); n > cap {
+			if !w.quiet {
+				limits.Emit(w.sink, limits.RuleEntries, "MaxArrayElements", n, cap, "ubjson typed container array")
+			}
+			return errStop
+		}
+		for range n {
+			var err error
+			if t == mArray {
+				err = w.array(depth + 1)
+			} else {
+				err = w.object(depth + 1)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	case mString, mHigh:
 		if cap := w.arrayCap(); n > cap {
 			if !w.quiet {
@@ -673,6 +715,12 @@ func (w *uwalker) typedValue(t byte, depth int) error {
 		return w.skipFixedBytes(4)
 	case mInt64, mFloat64:
 		return w.skipFixedBytes(8)
+	case mArray:
+		// As in typedValues: a container-typed object holds containers whose
+		// opening marker is omitted, so the body is walked directly.
+		return w.array(depth)
+	case mObject:
+		return w.object(depth)
 	case mString, mHigh:
 		return w.stringValue()
 	default:
@@ -702,8 +750,12 @@ func (w *uwalker) skipFixed(n, size int64) error {
 // used to be claimed here, scanned as a broken UBJSON document, and never
 // analysed as a template.
 //
-// The invariant this restores: a sniffer MUST NOT accept a document that its own
-// parser reports as structurally invalid.
+// The invariant this restores: a sniffer MUST NOT accept a document that its
+// parser reports as structurally invalid. There is no file identifier to lean on
+// — the three bytes "UBJ" that some writers put in front of the document are not
+// evidence, because any text file can begin with them; they are only skipped here
+// (and by run() when it parses) so that the shape check and the walk below, which
+// are the actual evidence, see the document itself.
 func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	size := s.Size()
 	if size < 3 {
@@ -713,31 +765,35 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if err != nil && len(head) < 3 {
 		return artifact.FormatUnknown, false
 	}
-	if bytes.HasPrefix(head, []byte("UBJ")) {
-		return artifact.FormatXGBoostUBJ, true
+	doc := head
+	if bytes.HasPrefix(doc, []byte("UBJ")) {
+		doc = doc[3:]
 	}
-	if len(head) < 2 {
+	if len(doc) < 2 {
 		return artifact.FormatUnknown, false
 	}
 	var shaped bool
-	switch head[0] {
+	switch doc[0] {
 	case mObject:
-		shaped = isObjectStart(head[1])
+		shaped = isObjectStart(doc[1])
 	case mArray:
-		shaped = isArrayStart(head[1])
+		shaped = isArrayStart(doc[1])
 	}
 	if !shaped {
 		return artifact.FormatUnknown, false
 	}
-	if !ubjHeadIsConsistent(head, l) {
+	if !ubjHeadIsConsistent(doc, int64(len(head)) >= size, l) {
 		return artifact.FormatUnknown, false
 	}
 	return artifact.FormatXGBoostUBJ, true
 }
 
 // ubjHeadIsConsistent walks head as UBJSON with every finding suppressed and
-// reports whether the bytes are consistent with the format.
-func ubjHeadIsConsistent(head []byte, l limits.Limits) bool {
+// reports whether the bytes are consistent with the format. headIsWhole states
+// whether head is the entire artifact, which is what distinguishes a walk that
+// ran out of bytes because the sniff window ended from one that ran out because
+// the document is truncated.
+func ubjHeadIsConsistent(head []byte, headIsWhole bool, l limits.Limits) bool {
 	w := &uwalker{
 		sink:  report.NewCollector(0).For("sniff"),
 		l:     l,
@@ -746,7 +802,7 @@ func ubjHeadIsConsistent(head []byte, l limits.Limits) bool {
 		quiet: true,
 	}
 	w.run()
-	return w.looksLikeUBJ()
+	return w.looksLikeUBJ(headIsWhole)
 }
 
 func isObjectStart(b byte) bool {

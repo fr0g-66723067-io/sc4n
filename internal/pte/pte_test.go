@@ -108,6 +108,16 @@ func TestSegmentOutOfRangeReported(t *testing.T) {
 	}
 }
 
+func TestProgramSizeOverflowReported(t *testing.T) {
+	// progSize is a u64 on disk. Its maximum (2^64-1) narrows to -1 as int64,
+	// which a bare `progSize > size` check lets through; the sign test must
+	// report it as out of range rather than skipping the check.
+	fs := parse(t, "overflow.pte", build("ET12", "eh12", -1, nil))
+	if !hasRule(fs, RuleStruct.ID) {
+		t.Fatalf("expected %s for a program size of 2^64-1, got %v", RuleStruct.ID, ids(fs))
+	}
+}
+
 func TestSniffIsContentBased(t *testing.T) {
 	data := build("ET10", "eh10", 48, nil)
 	// The .ptl extension belongs to TorchScript or PyTorch Mobile; dispatch must

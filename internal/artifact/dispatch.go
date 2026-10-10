@@ -297,7 +297,6 @@ var magicSniffer = []struct {
 	{[]byte("\xca\xfe\xba\xbe"), FormatNative, 0},
 	{[]byte("\xd0\xcf\x11\xe0"), FormatNative, 0},
 	{[]byte("!<arch>\n"), FormatNative, 0},
-	{[]byte("ZF"), FormatZlibJoblibLegacy, 0},
 	{[]byte("\x78\x01"), FormatZlib, 0},
 	{[]byte("\x78\x9c"), FormatZlib, 0},
 	{[]byte("\x78\xda"), FormatZlib, 0},
