@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"sort"
 	"strings"
 
@@ -358,30 +359,78 @@ type jsonBlob struct {
 	doc any
 }
 
-// extractJSONObjects recovers up to max JSON objects from data by attempting a
-// decode at each '{'. It is how the shallow HDF5 reader finds model_config
-// without an object-header reader: attributes are stored as opaque bytes in the
-// object header, and the JSON value is one of them. Each candidate is bounded by
-// cap and the walk advances past whatever decoded, so the cost is linear.
-func extractJSONObjects(data []byte, cap int64, max int) []jsonBlob {
-	var out []jsonBlob
+// hdf5RecoveryBudgetFloor is added to the region-relative decode budget below so
+// that even a tiny region gets a usable allowance.
+const hdf5RecoveryBudgetFloor = 1 << 16
+
+// countReader counts the bytes the JSON decoder pulls from it. It exists so the
+// recovery can charge its decode budget by what a failed attempt actually read
+// (json.Decoder.InputOffset stays at the previous token boundary after an error),
+// rather than by the distance to the last '}' — the latter would charge a whole
+// region for a one-byte syntax error and truncate a benign file with many stray
+// '{' bytes.
+type countReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// extractJSONObjects recovers up to max JSON objects from data. It is how the
+// shallow HDF5 reader finds model_config without an object-header reader:
+// attributes are stored as opaque bytes in the object header, and the JSON value
+// is one of them.
+//
+// The walk attempts a decode at every '{', as it always did, but first finds the
+// last '}' in the region: once no '}' remains after the current '{', no value
+// starting at it — or at any later '{' — can be complete, so every remaining
+// decode could only fail after scanning the tail. That test is what makes a deep
+// unterminated nest such as `{"a":{"a":` linear: the original walk advanced one
+// byte and re-decoded the whole tail at every later '{', which was quadratic. It
+// is exact, not a heuristic: it skips only decodes that cannot produce a recorded
+// object, so the recovered set is unchanged.
+//
+// A decode budget bounds the total bytes the decoder reads, so a region whose
+// braces are matched but repeatedly undecodable (the nest above closed by as many
+// '}') cannot run away; spent and limit carry the budget figures, and limit is
+// zero when the budget did not stop the walk, so the caller can report a
+// truncation rather than leave it silent.
+func extractJSONObjects(data []byte, cap int64, max int) (out []jsonBlob, spent, limit int64) {
 	if cap <= 0 {
 		cap = limits.Default().MaxStringBlob
 	}
+	limit = 8*int64(len(data)) + hdf5RecoveryBudgetFloor
+	lastClose := bytes.LastIndexByte(data, '}')
 	for i := 0; i < len(data) && len(out) < max; {
 		j := bytes.IndexByte(data[i:], '{')
 		if j < 0 {
 			break
 		}
 		start := i + j
-		dec := json.NewDecoder(bytes.NewReader(data[start:]))
+		if start >= lastClose {
+			break // no '}' remains: every later decode would fail
+		}
+		cr := &countReader{r: bytes.NewReader(data[start:])}
+		dec := json.NewDecoder(cr)
 		dec.UseNumber()
 		var v any
 		if err := dec.Decode(&v); err != nil {
+			spent += cr.n
+			if spent > limit {
+				return out, spent, limit
+			}
 			i = start + 1
 			continue
 		}
 		end := start + int(dec.InputOffset())
+		spent += int64(end - start)
+		if spent > limit {
+			return out, spent, limit
+		}
 		if int64(end-start) > cap {
 			i = end
 			continue
@@ -391,7 +440,7 @@ func extractJSONObjects(data []byte, cap int64, max int) []jsonBlob {
 		}
 		i = end
 	}
-	return out
+	return out, 0, 0
 }
 
 // scanExternalPaths reports URL-shaped, absolute and traversal-bearing strings in

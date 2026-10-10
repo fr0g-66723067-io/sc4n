@@ -15,6 +15,7 @@ package tfmodel
 
 import (
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
+	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
@@ -65,8 +66,13 @@ func (hdf5Parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 // region and applies the Keras class analysis to every document it finds.
 func scanHDF5Region(ctx *artifact.Ctx, base int64, region []byte) {
 	cap := ctx.Limits.MaxStringBlob
-	for _, blob := range extractJSONObjects(region, cap, hdf5MaxObjects) {
+	blobs, spent, limit := extractJSONObjects(region, cap, hdf5MaxObjects)
+	for _, blob := range blobs {
 		analyzeKerasValue(ctx, base+blob.off, "hdf5 model_config", blob.doc, 0)
+	}
+	if limit > 0 {
+		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxRecoveryBytes", spent, limit,
+			"HDF5 JSON recovery decode budget exhausted, so later objects in the region were not recovered")
 	}
 	scanExternalPaths(ctx, base, region)
 }
