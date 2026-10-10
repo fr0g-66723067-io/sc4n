@@ -86,10 +86,12 @@ func Statements(src []byte, toks []Token) [][]Token {
 }
 
 // Calls indexes the call expressions in one statement. A call is a dotted name
-// immediately followed by `(`. Every name token that forms a call's callee is
-// consumed so that `os.system` yields one call (`os.system`) rather than two
-// (`os.system` and `system`), while a call nested inside another call's arguments
-// is still found because the scan does not skip the argument tokens.
+// immediately followed by `(`. Every token of the callee's chain is consumed, so
+// that `os.system` yields one call (`os.system`) rather than two (`os.system` and
+// `system`), while a call nested inside another call's arguments is still found
+// because the scan does not skip the argument tokens. A chain that is not a call
+// is consumed as well, because none of its elements can be a call either and the
+// alternative re-walks the whole chain once per element.
 func Calls(src []byte, stmt []Token) []Call {
 	var calls []Call
 	if len(stmt) == 0 {
@@ -104,17 +106,21 @@ func Calls(src []byte, stmt []Token) []Call {
 		if t.Kind != TokName && t.Kind != TokKeyword {
 			continue
 		}
-		parts := []string{t.Text(src)}
-		j := i
-		for j+2 < len(stmt) && isDot(src, stmt[j+1]) && (stmt[j+2].Kind == TokName || stmt[j+2].Kind == TokKeyword) {
-			parts = append(parts, stmt[j+2].Text(src))
-			j += 2
+		j := chainEnd(src, stmt, i)
+		parts := make([]string, 0, (j-i)/2+1)
+		for k := i; k <= j; k += 2 {
+			parts = append(parts, stmt[k].Text(src))
+		}
+		// Mark the whole chain consumed whether or not it is a call. A chain
+		// that is not followed by `(` has no call at any of its elements
+		// either (a suffix reaches the same final token), so without this the
+		// outer loop would re-walk the chain once per element; on a long dotted
+		// chain that is quadratic (measured: `a.` x 200000 > 120 s).
+		for k := i; k <= j; k++ {
+			consumed[k] = true
 		}
 		if j+1 >= len(stmt) || !isOpenParen(src, stmt[j+1]) {
 			continue
-		}
-		for k := i; k <= j; k++ {
-			consumed[k] = true
 		}
 		c := Call{
 			Dotted: strings.Join(parts, "."),
@@ -198,19 +204,18 @@ func isAssignOp(src []byte, t Token) bool {
 	return t.Kind == TokOp && t.Len() == 1 && t.Bytes(src)[0] == '='
 }
 
-// chainAt collects the dotted name beginning at token index k. It reports ok when
-// stmt[k] is a name or keyword and returns the index of the chain's last token.
-func chainAt(src []byte, stmt []Token, k int) (dotted string, end int, ok bool) {
-	if k >= len(stmt) || (stmt[k].Kind != TokName && stmt[k].Kind != TokKeyword) {
-		return "", k, false
-	}
-	parts := []string{stmt[k].Text(src)}
+// chainEnd returns the token index of the last element of the dotted chain that
+// begins at stmt[k], which must be a name or a keyword. The chain is a name
+// followed by any number of `.name` pairs; the walk visits each pair once, so a
+// caller that walks k..chainEnd is linear in the chain length. (The previous
+// chainAt called strings.Join for every element-aligned suffix, which was
+// quadratic on a long dotted chain.)
+func chainEnd(src []byte, stmt []Token, k int) int {
 	j := k
 	for j+2 < len(stmt) && isDot(src, stmt[j+1]) && (stmt[j+2].Kind == TokName || stmt[j+2].Kind == TokKeyword) {
-		parts = append(parts, stmt[j+2].Text(src))
 		j += 2
 	}
-	return strings.Join(parts, "."), j, true
+	return j
 }
 
 func dottedLast(d string) string {

@@ -487,6 +487,24 @@ func (a *analyzer) stmt(st []Token) {
 
 // ---- source / taint detection -------------------------------------------------
 
+// sourcePrefixes and networkSourcePrefixes are the package roots whose every
+// attribute access is a source. They are shared by the predicates below and by
+// rangeSource (which tests a chain's non-final elements against them), so a
+// chain scan and the predicates agree on what a prefix match is.
+var (
+	sourcePrefixes        = []string{"requests."}
+	networkSourcePrefixes = []string{"requests.", "socket.", "urllib.", "httpx.", "aiohttp."}
+)
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func isSourceDotted(d string) bool {
 	if d == "" {
 		return false
@@ -505,7 +523,7 @@ func isSourceDotted(d string) bool {
 	case "read", "readline", "readlines", "recv", "recvfrom", "getenv", "b64decode", "fromhex", "decode":
 		return true
 	}
-	if strings.HasPrefix(d, "requests.") {
+	if hasAnyPrefix(d, sourcePrefixes) {
 		return true
 	}
 	return false
@@ -517,8 +535,7 @@ func isNetworkSourceDotted(d string) bool {
 		"socket.recv", "socket.recvfrom":
 		return true
 	}
-	if strings.HasPrefix(d, "requests.") || strings.HasPrefix(d, "socket.") ||
-		strings.HasPrefix(d, "urllib.") || strings.HasPrefix(d, "httpx.") || strings.HasPrefix(d, "aiohttp.") {
+	if hasAnyPrefix(d, networkSourcePrefixes) {
 		return true
 	}
 	return dottedLast(d) == "from_pretrained"
@@ -527,6 +544,39 @@ func isNetworkSourceDotted(d string) bool {
 // rangeTainted reports whether tokens [s,e] contain a source expression or a name
 // previously marked tainted.
 func (a *analyzer) rangeTainted(st []Token, s, e int) bool {
+	return a.rangeSource(st, s, e, a.tainted, isSourceDotted, sourcePrefixes)
+}
+
+// rangeNetworkTainted reports whether tokens [s,e] contain a network or download
+// source, used by the pickle-load-of-remote-data rule.
+func (a *analyzer) rangeNetworkTainted(st []Token, s, e int) bool {
+	return a.rangeSource(st, s, e, a.netTainted, isNetworkSourceDotted, networkSourcePrefixes)
+}
+
+// rangeSource reports whether tokens [s,e] contain a name in tainted or a dotted
+// name that isSource accepts. Each dotted chain is walked once and the scan
+// resumes after it, so the pass is linear in the token count; the previous shape
+// called chainAt (and strings.Join) for every element of every chain, which was
+// quadratic on a long dotted chain (`a.` x 200000 measured > 120 s).
+//
+// Every element-aligned suffix of a chain is still tested, which is what the
+// previous per-element chainAt did. isSource matches a suffix in exactly three
+// ways: an exact name of at most three elements, a final element from its
+// dottedLast set, or a leading package prefix (prefixes). So the last three
+// suffixes are built and checked -- the single-element one covers the dottedLast
+// rule for every suffix, since the last element is the same for all of them --
+// and each non-final element is tested against the package prefixes. isSource is
+// never called with a suffix longer than it can match.
+//
+// tainted holds simple names only (markAssigned skips attribute targets), so the
+// per-element taint test is the only taint test a suffix needs; the old
+// `a.tainted[d]` term for a dotted d was always false.
+//
+// e is always the last token of a statement or of an argument, never a token
+// inside a dotted chain, so the chain that starts at or before e also ends at or
+// before e and every element is inside the scanned range (the old scan iterated
+// k in [s,e] and chainAt ran to the chain's end either way).
+func (a *analyzer) rangeSource(st []Token, s, e int, tainted map[string]bool, isSource func(string) bool, prefixes []string) bool {
 	if s < 0 {
 		s = 0
 	}
@@ -535,32 +585,36 @@ func (a *analyzer) rangeTainted(st []Token, s, e int) bool {
 	}
 	for k := s; k <= e; k++ {
 		t := st[k]
-		if t.Kind == TokName || t.Kind == TokKeyword {
-			if a.tainted[t.Text(a.src)] {
+		if t.Kind != TokName && t.Kind != TokKeyword {
+			continue
+		}
+		if tainted[t.Text(a.src)] {
+			return true
+		}
+		last := chainEnd(a.src, st, k)
+		elems := make([]string, 0, (last-k)/2+1)
+		for j := k; j <= last; j += 2 {
+			elems = append(elems, st[j].Text(a.src))
+		}
+		for i := 1; i < len(elems); i++ {
+			if tainted[elems[i]] {
 				return true
 			}
 		}
-		if d, _, ok := chainAt(a.src, st, k); ok && (isSourceDotted(d) || a.tainted[d]) {
-			return true
-		}
-	}
-	return false
-}
-
-func (a *analyzer) rangeNetworkTainted(st []Token, s, e int) bool {
-	if e >= len(st) {
-		e = len(st) - 1
-	}
-	for k := s; k <= e; k++ {
-		t := st[k]
-		if t.Kind == TokName || t.Kind == TokKeyword {
-			if a.netTainted[t.Text(a.src)] {
+		// An exact name has at most three elements, so only the chain itself and
+		// its last two element-aligned suffixes can match one.
+		for i := len(elems) - 1; i >= 0 && i >= len(elems)-3; i-- {
+			if isSource(strings.Join(elems[i:], ".")) {
 				return true
 			}
 		}
-		if d, _, ok := chainAt(a.src, st, k); ok && isNetworkSourceDotted(d) {
-			return true
+		// A non-final package element makes every suffix from it a prefix match.
+		for i := range len(elems) - 1 {
+			if hasAnyPrefix(elems[i]+".", prefixes) {
+				return true
+			}
 		}
+		k = last
 	}
 	return false
 }
