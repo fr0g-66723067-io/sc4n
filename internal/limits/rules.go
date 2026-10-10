@@ -134,3 +134,18 @@ func Emit(sink *report.Sink, r *report.Rule, limit string, value, cap int64, det
 		"cap":   strconv.FormatInt(cap, 10),
 	})
 }
+
+// RuleSpill fires when a single archive member exceeds MaxSpillBytes and could not
+// be materialised for parsing.
+var RuleSpill = report.DefineRule(report.Rule{
+	ID:         "SC4N-LIMIT-SPILL",
+	Title:      "Archive member exceeds MaxSpillBytes",
+	Severity:   report.SeverityMedium,
+	Confidence: report.ConfidenceHigh,
+	CWE:        []string{"CWE-770"},
+	Class:      "limits",
+	Description: "A compressed archive member is larger than MaxSpillBytes, so it was not materialised " +
+		"for parsing. The member's own container checks (name, link, CRC) still ran; its *content* was " +
+		"not analysed, and the finding says so rather than leaving a reader to assume a clean member.",
+	Refs: []string{"https://cwe.mitre.org/data/definitions/770.html"},
+})

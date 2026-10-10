@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -264,26 +265,30 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	// source it is a second sequential pass over the mapping: page-cache
 	// bandwidth, not resident memory, and it hides behind the parse.
 	var (
-		digest string
-		hashWG sync.WaitGroup
+		digest, scope string
+		hashWG        sync.WaitGroup
 	)
 	hashWG.Add(1)
 	go func() {
 		defer hashWG.Done()
-		digest = digestSource(src)
+		digest, scope = digestSource(src, l.MaxHashBytes)
 	}()
 
 	f, perr := scanGuarded(sess, src, name, l)
 	hashWG.Wait()
 
 	sum.SHA256 = digest
+	sum.SHA256Scope = scope
 	sum.Format = f.String()
 	if perr != nil {
 		sess.Collector.For(name).EmitExtra(ruleParseFailed, 0, perr.Error(), nil)
 		sum.SubFormat = "parse-error: " + perr.Error()
 	}
 	if e.Digest != "" {
-		if prev, first := sess.MarkSeen(e.Digest, name); !first {
+		// The dedup key is the digest *and* its scope, so a prefix digest of a
+		// huge blob can never collide with the full digest of a small one.
+		key := scope + ":" + e.Digest
+		if prev, first := sess.MarkSeen(key, name); !first {
 			sum.SubFormat = "duplicate of " + prev
 		}
 	}
@@ -375,12 +380,36 @@ func (b *memBudget) releaseLarge() { <-b.large }
 // digestSource hashes the whole source. It reads through the section reader
 // rather than ReadAt so that a large mapping is read with the kernel's sequential
 // readahead instead of a stream of independent pread calls.
-func digestSource(s source.Source) string {
-	h := sha256.New()
-	if _, err := io.Copy(h, s.Reader(0)); err != nil {
-		return ""
+// digestBuf is the buffer the digest pass hashes through. It is deliberately much
+// larger than io.Copy's 32 KiB default: sha256's Write path reaches its full rate
+// only on multi-megabyte chunks, and on a 13 GiB artifact the difference between
+// 32 KiB and 4 MiB per call is the difference between ~300 MB/s and ~2 GB/s — the
+// digest is the dominant cost of scanning a large, well-formed artifact, because
+// everything else reads only the header.
+var digestBufPool = sync.Pool{New: func() any { b := make([]byte, 4<<20); return &b }}
+
+// digestSource returns the artifact's sha256 and what that digest covers.
+//
+// max caps the bytes hashed (Limits.MaxHashBytes). A capped digest is not a
+// lesser *finding*, it is a lesser *identity*, so the scope travels with it in
+// the report rather than being implied.
+func digestSource(s source.Source, max int64) (string, string) {
+	size := s.Size()
+	if max <= 0 || max > size {
+		max = size
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	h := sha256.New()
+	bufp := digestBufPool.Get().(*[]byte)
+	defer digestBufPool.Put(bufp)
+	buf := (*bufp)[:min(len(*bufp), int(max))]
+	if _, err := io.CopyBuffer(h, io.LimitReader(s.Reader(0), max), buf); err != nil {
+		return "", ""
+	}
+	scope := "full"
+	if max < size {
+		scope = "prefix:" + strconv.FormatInt(max, 10)
+	}
+	return hex.EncodeToString(h.Sum(nil)), scope
 }
 
 func digestBytes(b []byte) string {

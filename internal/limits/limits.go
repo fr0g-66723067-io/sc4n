@@ -48,6 +48,25 @@ type Limits struct {
 	// JSON). Default 16 MiB.
 	MaxStringBlob int64
 
+	// MaxHashBytes caps how much of an artifact the scan digests. Default
+	// 256 MiB. The digest identifies an artifact and de-duplicates a blob
+	// reachable from several cache revisions; it is not a provenance proof, and
+	// `sc4n hash` is the command that computes a full sha256. The cap exists
+	// because sha256 is CPU-bound (measured 0.35 GB/s on the reference host,
+	// which has AVX2 but no SHA-NI), so a full digest of a 13 GiB checkpoint
+	// would cost ~37 s — more than the whole scan budget — while the digest
+	// itself is not what the scan is for. Above the cap the digest covers the
+	// first MaxHashBytes and the report says so in sha256Scope.
+	MaxHashBytes int64
+
+	// MaxSpillBytes caps a single archive member that has to be materialised on
+	// disk before it can be parsed — a compressed member far larger than memory,
+	// such as the multi-gigabyte storage entries inside a torch archive. Default
+	// 4 GiB: above every published single-member shape, and low enough that a
+	// decompression bomb cannot fill the temporary filesystem. Members above it
+	// are reported as SC4N-LIMIT-SPILL rather than parsed.
+	MaxSpillBytes int64
+
 	// MaxFindings caps the findings list so a crafted artifact with a million
 	// trigger sites cannot exhaust memory. Default 100_000.
 	MaxFindings int
@@ -73,6 +92,8 @@ func Default() Limits {
 		MaxDecompressedBytes: 8 << 30,
 		MaxRatio:             200,
 		MaxStringBlob:        16 << 20,
+		MaxHashBytes:         256 << 20,
+		MaxSpillBytes:        4 << 30,
 		MaxFindings:          100_000,
 		MaxStackDepth:        1 << 20,
 		MmapThreshold:        1 << 20,
@@ -103,6 +124,12 @@ func (l Limits) withDefaults() Limits {
 	if l.MaxStringBlob == 0 {
 		l.MaxStringBlob = d.MaxStringBlob
 	}
+	if l.MaxHashBytes == 0 {
+		l.MaxHashBytes = d.MaxHashBytes
+	}
+	if l.MaxSpillBytes == 0 {
+		l.MaxSpillBytes = d.MaxSpillBytes
+	}
 	if l.MaxFindings == 0 {
 		l.MaxFindings = d.MaxFindings
 	}
@@ -129,6 +156,8 @@ func (l Limits) Normalize() (Limits, error) {
 		{"MaxDecompressedBytes", l.MaxDecompressedBytes},
 		{"MaxRatio", l.MaxRatio},
 		{"MaxStringBlob", l.MaxStringBlob},
+		{"MaxHashBytes", l.MaxHashBytes},
+		{"MaxSpillBytes", l.MaxSpillBytes},
 		{"MaxFindings", int64(l.MaxFindings)},
 		{"MaxStackDepth", int64(l.MaxStackDepth)},
 		{"MmapThreshold", l.MmapThreshold},
@@ -164,6 +193,12 @@ func (l *Limits) SetMaxDecompressedBytes(v int64) { l.MaxDecompressedBytes = v }
 
 // SetMaxRatio overrides the decompression ratio cap.
 func (l *Limits) SetMaxRatio(v int64) { l.MaxRatio = v }
+
+// SetMaxHashBytes overrides the digest cap.
+func (l *Limits) SetMaxHashBytes(v int64) { l.MaxHashBytes = v }
+
+// SetMaxSpillBytes overrides the per-member spill cap.
+func (l *Limits) SetMaxSpillBytes(v int64) { l.MaxSpillBytes = v }
 
 // SetMaxEntries overrides the archive member cap.
 func (l *Limits) SetMaxEntries(v int) { l.MaxEntries = v }

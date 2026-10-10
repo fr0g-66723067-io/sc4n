@@ -228,18 +228,31 @@ func RunUniversal(ctx *Ctx, s source.Source, f Format) {
 	}
 }
 
-// ScanMember dispatches and parses a nested member's bytes. It is the entry point
-// container parsers use, so that container nesting, naming and depth accounting
-// are implemented exactly once.
-func ScanMember(parent *Ctx, name string, data []byte) (Format, error) {
-	s := source.Mem(parent.Sink.Named(name).Artifact(), data)
-	defer s.Close()
+// ScanMember dispatches and parses a nested member from a Source. It is the entry
+// point container parsers use, so that container nesting, naming and depth
+// accounting are implemented exactly once.
+//
+// It takes a Source rather than a byte slice because a member can be far larger
+// than memory: a stored member is a zero-copy Section over the parent's mapping,
+// and a compressed member is decompressed into a private temporary file that is
+// mapped (source.Spill). A container parser that has the member's bytes in hand
+// uses ScanMemberBytes.
+func ScanMember(parent *Ctx, name string, s source.Source) (Format, error) {
 	sub, ok := parent.Member(name, FormatUnknown)
 	if !ok {
 		emitLimitDepth(parent, name)
 		return FormatUnknown, nil
 	}
 	return Scan(sub, s)
+}
+
+// ScanMemberBytes is ScanMember for a member that is already in memory. The
+// Source wraps the caller's slice, which must not be mutated until the call
+// returns.
+func ScanMemberBytes(parent *Ctx, name string, data []byte) (Format, error) {
+	s := source.Mem(parent.Sink.Named(name).Artifact(), data)
+	defer s.Close()
+	return ScanMember(parent, name, s)
 }
 
 func emitLimitDepth(ctx *Ctx, name string) {

@@ -19,11 +19,17 @@ type Tool struct {
 // ArtifactSummary is one scanned file. SHA256 is computed streaming while the
 // file is being scanned, never in a second pass.
 type ArtifactSummary struct {
-	Path      string `json:"path"`
-	Size      int64  `json:"size"`
-	SHA256    string `json:"sha256,omitempty"`
-	Format    string `json:"format"`
-	SubFormat string `json:"subFormat,omitempty"`
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256,omitempty"`
+	// SHA256Scope says what SHA256 covers: "full" for the whole artifact, or
+	// "prefix:<bytes>" when the artifact is larger than Limits.MaxHashBytes and
+	// only its first bytes were digested. It is always present when SHA256 is,
+	// because a prefix digest presented as a file digest is exactly the kind of
+	// silent truncation the rest of this tool refuses to do.
+	SHA256Scope string `json:"sha256Scope,omitempty"`
+	Format      string `json:"format"`
+	SubFormat   string `json:"subFormat,omitempty"`
 	// Error is set when the path could not be opened or read. It is *not* a
 	// finding: an unreadable path is a tool/layout problem, reported with exit
 	// code 3, while an unreadable *member* is a finding, because a container
