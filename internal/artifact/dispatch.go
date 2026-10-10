@@ -343,7 +343,7 @@ func init() {
 	RegisterFormat(Info{Format: FormatJSONLines, Magic: "one JSON value per line", Depth: DepthShallow,
 		Notes: "no per-line decoder: the file is scanned as text by the shared indicator engine, so an indicator anywhere in it is found, while a malformed line is not reported and no per-line structure is decoded."})
 	RegisterFormat(Info{Format: FormatPython, Magic: "text; extension .py", Depth: DepthStructural,
-		Notes: "hand-written Python 3.14 lexer plus a statement-level taint engine over the source/sink pairs listed in docs/architecture.md; there is no type inference, so taint is intra-statement and intra-function."})
+		Notes: "hand-written Python 3.14 lexer plus a statement-level taint engine over the source/sink pairs listed in internal/pysrc/rules.go (isSourceDotted, isShellSink, isDeserializeSink, isNetworkSink and the standalone-construct predicates); there is no type inference, so taint is intra-statement and intra-function."})
 	RegisterFormat(Info{Format: FormatNotebook, Magic: "JSON with a \"cells\" array", Depth: DepthStructural,
 		Notes: "code cells are mapped back to their original line numbers in the .ipynb file; IPython magics and shell escapes are reported separately from ordinary Python findings."})
 	RegisterFormat(Info{Format: FormatJinja, Magic: "text containing {{ }} or {% %}", Depth: DepthStructural,
