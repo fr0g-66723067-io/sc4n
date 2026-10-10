@@ -81,15 +81,22 @@ func dedupeArtifacts(arts []ArtifactSummary) []ArtifactSummary {
 // names a path that therefore has no summary -- and that is exactly when a dangling
 // reference would otherwise appear.
 func declareFindingArtifacts(arts []ArtifactSummary, findings []Finding) []ArtifactSummary {
-	have := make(map[string]bool, len(arts))
-	for _, a := range arts {
-		have[a.Path] = true
-	}
+	have := newArtifactIndex(arts)
 	var extra []ArtifactSummary
 	declared := map[string]bool{}
 	for _, f := range findings {
-		path, _ := splitArtifact(f.Artifact)
-		if path == "" || have[path] || declared[path] {
+		path, _, covered := have.resolve(f.Artifact)
+		if covered {
+			// A declared row already covers this name, so every encoder's
+			// reference resolves and there is nothing to declare.
+			continue
+		}
+		// Nothing declared covers this name. The finding is about the name
+		// itself (a path the scan could not open, a cache ref), so declare it
+		// whole: truncating at a colon would invent a path that does not exist,
+		// which is how "a:b.pkl" used to become a phantom "a".
+		path = f.Artifact
+		if path == "" || declared[path] {
 			continue
 		}
 		declared[path] = true
@@ -104,6 +111,43 @@ func declareFindingArtifacts(arts []ArtifactSummary, findings []Finding) []Artif
 	}
 	sort.SliceStable(extra, func(i, j int) bool { return extra[i].Path < extra[j].Path })
 	return append(arts, extra...)
+}
+
+// artifactIndex answers "is this a declared row?" for the encoders that must map
+// a finding's artifact name onto the row it belongs to.
+type artifactIndex map[string]bool
+
+func newArtifactIndex(arts []ArtifactSummary) artifactIndex {
+	ix := make(artifactIndex, len(arts))
+	for _, a := range arts {
+		if a.Path != "" {
+			ix[a.Path] = true
+		}
+	}
+	return ix
+}
+
+// resolve maps a finding's artifact name to the summary row it belongs to and the
+// member chain inside it. Sink.Named stamps a finding inside a container as
+// "outer:member", but a path may itself contain ':' (a Windows drive letter, a
+// URL, or a file literally named "a:b.pkl"), so the separator cannot be found by
+// splitting at the first colon: the declared rows are the authority. An exact
+// match wins; otherwise the longest row path P for which the name is P+":"+rest
+// wins; otherwise ok is false and the caller decides. The scan is backwards over
+// the name's colons, so it costs O(len(name)) per finding, not O(rows).
+func (ix artifactIndex) resolve(artifact string) (path, member string, ok bool) {
+	if ix[artifact] {
+		return artifact, "", true
+	}
+	for i := len(artifact) - 1; i > 0; i-- {
+		if artifact[i] != ':' {
+			continue
+		}
+		if p := artifact[:i]; ix[p] {
+			return p, artifact[i+1:], true
+		}
+	}
+	return "", "", false
 }
 
 // Report is the complete scan result.

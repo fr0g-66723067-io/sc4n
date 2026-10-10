@@ -147,11 +147,13 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 		bom.Components = append(bom.Components, c)
 	}
 
+	ix := newArtifactIndex(r.Artifacts)
 	for _, f := range r.Findings {
-		path, member := splitArtifact(f.Artifact)
+		path, member, resolved := ix.resolve(f.Artifact)
 		ref, ok := refs[path]
-		if !ok {
+		if !resolved || !ok {
 			ref = "sc4n:" + f.Artifact
+			member = ""
 		}
 		v := cdxVulnerability{
 			ID: f.RuleID,

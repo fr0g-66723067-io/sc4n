@@ -133,6 +133,7 @@ const informationURI = "https://github.com/fr0g-66723067-io/sc4n"
 
 // WriteSARIF emits a SARIF 2.1.0 log.
 func (r *Report) WriteSARIF(w io.Writer) error {
+	arts := newArtifactIndex(r.Artifacts)
 	rules := Rules()
 	index := make(map[string]int, len(rules))
 	descriptors := make([]sarifRule, 0, len(rules))
@@ -194,7 +195,12 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 				Properties:           sarifRuleProps{Tags: f.CWE, Precision: f.Confidence.String(), SecuritySeverity: SeverityBand(f.Severity)},
 			})
 		}
-		path, member := splitArtifact(f.Artifact)
+		path, member, found := arts.resolve(f.Artifact)
+		if !found {
+			// A name no row covers (a path the scan could not open): the location
+			// is the name itself, and there is no member chain to name.
+			path, member = f.Artifact, ""
+		}
 		region := sarifRegion{
 			StartLine:  1,
 			ByteOffset: f.Offset,
@@ -309,17 +315,6 @@ func helpMarkdown(r *Rule) string {
 		}
 	}
 	return b.String()
-}
-
-// splitArtifact separates the container path from the nested member chain that
-// Sink.Named appends as ":member". SARIF's artifactLocation must name a file that
-// exists on disk for a consumer to render an annotation, so the member chain goes
-// into the message instead.
-func splitArtifact(name string) (path, member string) {
-	if i := strings.IndexByte(name, ':'); i >= 0 {
-		return name[:i], name[i+1:]
-	}
-	return name, ""
 }
 
 // pathURI renders a relative path as SARIF's artifactLocation.uri. A URI with a

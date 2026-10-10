@@ -634,3 +634,53 @@ func TestTextCountsNestedFindings(t *testing.T) {
 		t.Fatalf("the container row does not count its member's finding: %q\n%s", line, buf.String())
 	}
 }
+
+// TestArtifactResolutionHandlesColons: a path may itself contain ':' (a Windows
+// drive letter, a URL, a file literally named "a:b.pkl"), so the member separator
+// cannot be found by splitting at the first colon. The declared rows are the
+// authority: an exact match wins, otherwise the longest row path that prefixes the
+// name wins.
+func TestArtifactResolutionHandlesColons(t *testing.T) {
+	arts := []ArtifactSummary{
+		{Path: "a:b.pkl"},
+		{Path: "outer.zip"},
+		{Path: "outer.zip:inner.zip"},
+	}
+	ix := newArtifactIndex(arts)
+	cases := []struct {
+		in     string
+		path   string
+		member string
+		ok     bool
+	}{
+		{"a:b.pkl", "a:b.pkl", "", true},
+		{"outer.zip", "outer.zip", "", true},
+		{"outer.zip:member.pkl", "outer.zip", "member.pkl", true},
+		{"outer.zip:inner.zip:x.pkl", "outer.zip:inner.zip", "x.pkl", true},
+		{"missing.pkl", "", "", false},
+		{"", "", "", false},
+	}
+	for _, tc := range cases {
+		path, member, ok := ix.resolve(tc.in)
+		if path != tc.path || member != tc.member || ok != tc.ok {
+			t.Errorf("resolve(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.in, path, member, ok, tc.path, tc.member, tc.ok)
+		}
+	}
+
+	// A finding on a declared path must not add a second row, and a finding on a
+	// name nothing declares is declared whole (never truncated to a phantom).
+	got := declareFindingArtifacts(arts, []Finding{
+		{RuleID: "X", Artifact: "a:b.pkl"},
+		{RuleID: "X", Artifact: "outer.zip:member.pkl"},
+		{RuleID: "X", Artifact: "dangling:thing"},
+	})
+	var paths []string
+	for _, a := range got {
+		paths = append(paths, a.Path)
+	}
+	want := []string{"a:b.pkl", "outer.zip", "outer.zip:inner.zip", "dangling:thing"}
+	if strings.Join(paths, "|") != strings.Join(want, "|") {
+		t.Fatalf("rows = %v, want %v", paths, want)
+	}
+}
