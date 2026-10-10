@@ -146,18 +146,6 @@ func (g *Global) ModuleMatches(m string) bool {
 	return g.Module == m || strings.HasPrefix(g.Module, m+".")
 }
 
-func newGlobal(module, name string, off int64) Val {
-	return Val{kind: kGlobal, text: module + "." + name, global: &Global{Module: module, Name: name, Off: off}}
-}
-
-func (v Val) isContainer() bool {
-	switch v.kind {
-	case kList, kTuple, kDict, kSet, kFrozenSet:
-		return true
-	}
-	return false
-}
-
 // containerOf builds a container value from its retained elements.
 func containerOf(k valKind, elems []Val, total int) Val {
 	retained := elems
@@ -195,8 +183,6 @@ type stack struct {
 	vals []Val
 }
 
-func (s *stack) depth() int { return len(s.vals) }
-
 func (s *stack) push(v Val) { s.vals = append(s.vals, v) }
 
 func (s *stack) pop() (Val, bool) {
@@ -225,16 +211,6 @@ func (s *stack) popMark() ([]Val, bool) {
 			copy(out, s.vals[i+1:])
 			s.vals = s.vals[:i]
 			return out, true
-		}
-	}
-	return nil, false
-}
-
-// peekMark returns the values above the nearest mark without popping them.
-func (s *stack) peekMark() ([]Val, bool) {
-	for i := len(s.vals) - 1; i >= 0; i-- {
-		if s.vals[i].kind == kMark {
-			return s.vals[i+1:], true
 		}
 	}
 	return nil, false

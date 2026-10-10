@@ -288,7 +288,6 @@ var magicSniffer = []struct {
 	{[]byte("\x28\xb5\x2f\xfd"), FormatZstd, 0},
 	{[]byte("7z\xbc\xaf\x27\x1c"), FormatSevenZip, 0},
 	{[]byte("Rar!\x1a\x07"), FormatRar, 0},
-	{[]byte("UBJ"), FormatXGBoostUBJ, 0},
 	{[]byte("\x7fELF"), FormatNative, 0},
 	{[]byte("MZ"), FormatNative, 0},
 	{[]byte("\xfe\xed\xfa\xce"), FormatNative, 0},
@@ -309,7 +308,6 @@ func init() {
 	RegisterSniffer("magic", 100, sniffMagic)
 	RegisterSniffer("tarkind", 90, sniffTar)
 	RegisterSniffer("pickle-proto", 80, sniffPickleHeader)
-	RegisterSniffer("pte", 70, sniffPTE)
 	RegisterSniffer("text", -100, sniffText)
 
 	RegisterFormat(Info{Format: FormatUnknown, Magic: "(none)", Depth: DepthNone,
@@ -414,21 +412,6 @@ func sniffPickleHeader(s source.Source, l limits.Limits) (Format, bool) {
 	return FormatUnknown, false
 }
 
-// sniffPTE recognises the ExecuTorch/PyTorch-Mobile flatbuffer: the bytes "ET"
-// followed by two ASCII digits.
-func sniffPTE(s source.Source, l limits.Limits) (Format, bool) {
-	b, err := s.Bytes(0, 6)
-	if err != nil || len(b) < 6 {
-		return FormatUnknown, false
-	}
-	if b[0] == 'E' && b[1] == 'T' && isDigit(b[4]) && isDigit(b[5]) {
-		return FormatPTE, true
-	}
-	return FormatUnknown, false
-}
-
-func isDigit(b byte) bool { return b >= '0' && b <= '9' }
-
 // sniffText is the last-resort classifier. It runs only when no structural
 // sniffer matched, and it never claims a binary file: a NUL byte in the first
 // kilobyte disqualifies the content.
@@ -480,17 +463,4 @@ func min64(a, b int64) int64 {
 		return a
 	}
 	return b
-}
-
-// ReadFullAt is a small helper for parsers that need exactly n bytes and want a
-// clear error instead of a short slice.
-func ReadFullAt(s source.Source, off, n int64) ([]byte, error) {
-	if n < 0 {
-		return nil, errors.New("artifact: negative length")
-	}
-	b, err := s.Bytes(off, n)
-	if err != nil && len(b) < int(n) {
-		return b, io.ErrUnexpectedEOF
-	}
-	return b, nil
 }

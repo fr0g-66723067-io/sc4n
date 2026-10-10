@@ -230,11 +230,11 @@ func analyzeCodeValue(ctx *artifact.Ctx, base int64, what, key, val string) {
 	scanTextCapped(ctx, base, key+" in "+what, val)
 
 	text := val
-	decoded := false
 	if key == "code" {
 		if b, ok := decodeBase64Loose(val); ok {
+			// The decoded variant is reported with its own label, so the Python
+			// analysis below needs no note about it.
 			text = string(b)
-			decoded = true
 			scanTextCapped(ctx, base, key+" (base64-decoded) in "+what, text)
 		}
 	}
@@ -245,11 +245,6 @@ func analyzeCodeValue(ctx *artifact.Ctx, base int64, what, key, val string) {
 	if !ok {
 		return
 	}
-	suffix := ""
-	if decoded {
-		suffix = " (base64-decoded)"
-	}
-	_ = suffix
 	pysrc.Analyze(mctx, []byte(text))
 }
 

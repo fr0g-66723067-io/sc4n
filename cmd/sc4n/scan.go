@@ -167,7 +167,9 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		cfg.Collector = collector
 		cfg.Entries = make([]scan.Entry, 0, len(entries))
 		for _, e := range entries {
-			cfg.Entries = append(cfg.Entries, scan.Entry{Path: e.Path, Display: e.Display, Digest: e.Digest})
+			cfg.Entries = append(cfg.Entries, scan.Entry{
+				Path: e.Path, Display: e.Display, Digest: e.Digest, Revision: e.Revision,
+			})
 		}
 	}
 

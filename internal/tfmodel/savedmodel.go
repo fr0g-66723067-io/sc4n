@@ -604,7 +604,7 @@ func parseTFJS(ctx *artifact.Ctx, s source.Source) {
 		if _, isKeras := topo["class_name"]; isKeras {
 			analyzeKerasValue(ctx, 0, "modelTopology", topo, 0)
 		} else {
-			walkTopology(ctx, topo, 0)
+			walkTopology(ctx, topo)
 		}
 	}
 	if manifest, ok := doc["weightsManifest"].([]any); ok {
@@ -612,11 +612,10 @@ func parseTFJS(ctx *artifact.Ctx, s source.Source) {
 	}
 }
 
-// walkTopology walks a GraphDef-as-JSON: node[].op and node[].attr strings.
-func walkTopology(ctx *artifact.Ctx, topo map[string]any, depth int) {
-	if depth > 8 {
-		return
-	}
+// walkTopology walks a GraphDef-as-JSON: node[].op and node[].attr strings. The
+// walk does not recurse (a node's attr strings are collected by
+// jsonStringsBelow), so it carries no depth.
+func walkTopology(ctx *artifact.Ctx, topo map[string]any) {
 	nodes, _ := topo["node"].([]any)
 	for _, nv := range nodes {
 		n, ok := nv.(map[string]any)

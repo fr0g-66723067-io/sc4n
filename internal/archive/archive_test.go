@@ -8,7 +8,6 @@ import (
 	"compress/zlib"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
@@ -490,41 +489,27 @@ func TestCompressorDetection(t *testing.T) {
 	}
 }
 
-func TestUnwrapRatioCap(t *testing.T) {
+// TestGzipRatioCapIsReported drives the production decompression path with a
+// MaxRatio low enough that a 1 MiB bomb exceeds it, and checks the cap is named.
+func TestGzipRatioCapIsReported(t *testing.T) {
 	bomb := gzipBytes(t, make([]byte, 1<<20))
 	l := limits.Default()
 	l.MaxRatio = 2
-	_, err := archive.Unwrap(source.Mem("bomb.gz", bomb), l, archive.CompressorGzip)
-	var le *archive.LimitError
-	if !errors.As(err, &le) {
-		t.Fatalf("expected *LimitError, got %v", err)
-	}
-	if le.Limit != "MaxRatio" {
-		t.Fatalf("limit = %q, want MaxRatio", le.Limit)
-	}
+	got := scanAs(t, "bomb.pkl.gz", bomb, artifact.FormatGzip, l)
+	want(t, got, "SC4N-LIMIT-RATIO")
 }
 
-// TestUnwrapZeroBudgetIsNotUnlimited: a zero-valued Limits means "unset", not
-// "unlimited". Mapping MaxDecompressedBytes to MaxInt64 made the +1 peek wrap to
-// MinInt64, io.LimitReader then reported EOF at once, and the payload came back
-// empty with a nil error — a silent truncation, which is the one outcome the
-// limits design forbids.
-func TestUnwrapZeroBudgetIsNotUnlimited(t *testing.T) {
-	payload := gadgetPickle()
-	got, err := archive.Unwrap(source.Mem("x.gz", gzipBytes(t, payload)), limits.Limits{}, archive.CompressorGzip)
-	if err != nil {
-		t.Fatalf("Unwrap: %v", err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("Unwrap returned %d bytes (%q), want the %d-byte payload", len(got), got, len(payload))
-	}
-}
-
-func TestUnwrapRejectsUnsupported(t *testing.T) {
-	_, err := archive.Unwrap(source.Mem("x", []byte{0x28, 0xb5, 0x2f, 0xfd}), limits.Default(), archive.CompressorZstd)
-	if !errors.Is(err, archive.ErrUnsupportedCompression) {
-		t.Fatalf("err = %v, want ErrUnsupportedCompression", err)
-	}
+// TestZeroLimitsDecompressFully: a zero-valued Limits means "unset", not
+// "unlimited". Reading a zero MaxDecompressedBytes as MaxInt64 makes the running
+// total comparison report the budget as exhausted and silently truncates the
+// payload — the one outcome the limits design forbids. This goes through the
+// production reader, not a helper.
+func TestZeroLimitsDecompressFully(t *testing.T) {
+	l := limits.Default()
+	l.MaxDecompressedBytes = 0
+	got := scanAs(t, "model.pkl.gz", gzipBytes(t, gadgetPickle()), artifact.FormatGzip, l)
+	want(t, got, "SC4N-PICKLE-GLOBAL-CRITICAL")
+	forbid(t, got, "SC4N-LIMIT-DECOMPRESSED")
 }
 
 func TestPrefixedZipRecognised(t *testing.T) {

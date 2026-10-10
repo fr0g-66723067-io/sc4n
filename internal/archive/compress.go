@@ -2,11 +2,7 @@ package archive
 
 import (
 	"bytes"
-	"compress/bzip2"
-	"compress/gzip"
-	"compress/zlib"
 	"errors"
-	"io"
 	"math"
 	"strconv"
 	"sync"
@@ -67,32 +63,6 @@ func (c Compressor) String() string {
 }
 
 // Format returns the artifact.Format a bare stream of c is sniffed as.
-func (c Compressor) Format() artifact.Format {
-	switch c {
-	case CompressorZlib:
-		return artifact.FormatZlib
-	case CompressorGzip:
-		return artifact.FormatGzip
-	case CompressorBzip2:
-		return artifact.FormatBzip2
-	case CompressorXz:
-		return artifact.FormatXz
-	case CompressorLzma:
-		return artifact.FormatLzma
-	case CompressorLz4:
-		return artifact.FormatLz4
-	case CompressorZstd:
-		return artifact.FormatZstd
-	case CompressorZlibJoblibLegacy:
-		return artifact.FormatZlibJoblibLegacy
-	case CompressorSevenZip:
-		return artifact.FormatSevenZip
-	case CompressorRar:
-		return artifact.FormatRar
-	default:
-		return artifact.FormatUnknown
-	}
-}
 
 // ErrUnsupportedCompression is returned by Unwrap for a compressor with no
 // standard-library decoder.
@@ -203,9 +173,9 @@ func decompressionCap(compressed int64, l limits.Limits) (int64, *report.Rule) {
 	rule := limits.RuleDecompressed
 	if capBytes <= 0 {
 		// A zero budget means "unset", exactly as maxBlob and spillCap read it.
-		// Mapping it to MaxInt64 is worse than useless here: the +1 peek in
-		// Unwrap wraps to MinInt64, io.LimitReader then reports EOF immediately,
-		// and an unset cap silently produced an empty payload with no error.
+		// Mapping it to MaxInt64 is worse than useless here: the cap is compared
+		// against a running total, so a wrap would make the comparison report the
+		// budget as exhausted and silently truncate the payload.
 		capBytes = limits.Default().MaxDecompressedBytes
 	}
 	if l.MaxRatio > 0 && compressed > 0 {
@@ -244,64 +214,6 @@ func putBuf(b *bytes.Buffer) {
 		b.Reset()
 		bufPool.Put(b)
 	}
-}
-
-// Unwrap decompresses one layer of a supported compressor into memory, enforcing
-// MaxDecompressedBytes and MaxRatio while reading. On a cap it returns a
-// *LimitError; the caller emits the finding. On success the returned bytes are
-// owned by the caller.
-func Unwrap(s source.Source, l limits.Limits, c Compressor) ([]byte, error) {
-	var (
-		r     io.Reader
-		close func() error
-	)
-	switch c {
-	case CompressorGzip:
-		zr, err := gzip.NewReader(s.Reader(0))
-		if err != nil {
-			return nil, err
-		}
-		r, close = zr, zr.Close
-	case CompressorZlib:
-		zr, err := zlib.NewReader(s.Reader(0))
-		if err != nil {
-			return nil, err
-		}
-		r, close = zr, zr.Close
-	case CompressorBzip2:
-		r = bzip2.NewReader(s.Reader(0))
-	default:
-		return nil, ErrUnsupportedCompression
-	}
-	if close != nil {
-		defer close()
-	}
-
-	capBytes, rule := decompressionCap(s.Size(), l)
-	buf := getBuf()
-	defer putBuf(buf)
-	// The extra byte is what distinguishes "exactly at the cap" from "over it";
-	// it must not be computed when the cap is already the largest int64.
-	peek := capBytes
-	if peek < math.MaxInt64 {
-		peek++
-	}
-	n, err := io.Copy(buf, io.LimitReader(r, peek))
-	if n > capBytes {
-		return nil, &LimitError{
-			Rule:   rule,
-			Limit:  limitName(rule),
-			Value:  n,
-			Cap:    capBytes,
-			Detail: c.String() + " layer",
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	out := make([]byte, len(buf.Bytes()))
-	copy(out, buf.Bytes())
-	return out, nil
 }
 
 func limitName(r *report.Rule) string {

@@ -88,7 +88,6 @@ type Finding struct {
 	Col              *int              `json:"col,omitempty"`
 	Evidence         string            `json:"evidence,omitempty"`
 	EvidenceRedacted bool              `json:"evidenceRedacted,omitempty"`
-	Resolved         *bool             `json:"resolved,omitempty"`
 	Extra            map[string]string `json:"extra,omitempty"`
 }
 

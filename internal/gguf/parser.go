@@ -458,7 +458,6 @@ type state struct {
 	sink *report.Sink
 	lim  limits.Limits
 	meta *Meta
-
 }
 
 func (st *state) emit(r *report.Rule, off int64, ev string) {
@@ -985,8 +984,6 @@ func alignmentOf(v any) (uint64, bool) {
 		if x >= 0 {
 			return uint64(x), true
 		}
-	case uint32:
-		return uint64(x), true
 	}
 	return 0, false
 }

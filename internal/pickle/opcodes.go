@@ -132,13 +132,3 @@ var opTable = [256]opcodeInfo{
 // number any opcode in the table declares. A stream that opens with a PROTO
 // byte above it is reported rather than decoded.
 const highestProtocol = 5
-
-// opUnknownName is the name reported for a byte with no entry.
-const opUnknownName = "OP_UNKNOWN"
-
-func opcodeName(code byte) string {
-	if n := opTable[code].name; n != "" {
-		return n
-	}
-	return opUnknownName
-}

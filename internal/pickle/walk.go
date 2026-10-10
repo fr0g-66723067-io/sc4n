@@ -62,8 +62,6 @@ type Stream struct {
 	Bytes int64
 	// EndOffset is the offset just past the last STOP of the first segment.
 	EndOffset int64
-	// Segments is the number of complete pickles found (1 for a normal file).
-	Segments int
 	// SawStop reports whether any segment reached a STOP.
 	SawStop bool
 	// Globals are the names that appeared, in first-seen order.
@@ -91,14 +89,14 @@ func Walk(ctx *artifact.Ctx, s source.Source, opt Options) (*Stream, error) {
 		return &Stream{}, nil
 	}
 	w := &walker{
-		sink:      ctx.Sink,
-		lim:       ctx.Limits,
-		data:      data,
-		opt:       opt,
-		mm:        newMemo(),
-		globals:   map[string]*Global{},
-		structs:   map[string]*structStat{},
-		once:      map[string]bool{},
+		sink:    ctx.Sink,
+		lim:     ctx.Limits,
+		data:    data,
+		opt:     opt,
+		mm:      newMemo(),
+		globals: map[string]*Global{},
+		structs: map[string]*structStat{},
+		once:    map[string]bool{},
 	}
 	w.run()
 	w.flush()
@@ -127,7 +125,6 @@ type walker struct {
 
 	stream Stream
 	limit  int
-
 
 	// globals is keyed by qualified name so that a state_dict's hundreds of
 	// references to one rebuild function produce one finding.
@@ -281,14 +278,14 @@ func (w *walker) probePickle(off int) bool {
 		budget = off + maxProbeBytes
 	}
 	probe := &walker{
-		silent:    true,
-		lim:       w.lim,
-		data:      w.data,
-		limit:     budget,
-		mm:        newMemo(),
-		globals:   map[string]*Global{},
-		structs:   map[string]*structStat{},
-		once:      map[string]bool{},
+		silent:  true,
+		lim:     w.lim,
+		data:    w.data,
+		limit:   budget,
+		mm:      newMemo(),
+		globals: map[string]*Global{},
+		structs: map[string]*structStat{},
+		once:    map[string]bool{},
 	}
 	probe.segment(off)
 	hasProto := w.data[off] == opPROTO

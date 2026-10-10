@@ -46,6 +46,11 @@ type Entry struct {
 	// blob file name so that one blob referenced from twenty revisions is
 	// scanned once and labelled afterwards.
 	Digest string
+	// Revision is a comma-separated list of refs/<name> labels whose commit
+	// points at this entry, when the source knows them (the hf-cache walker
+	// reads them from refs/). It reaches the report so a finding can be
+	// attributed to the revision the user was actually using.
+	Revision string
 }
 
 // Config is the scan request.
@@ -477,6 +482,7 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	sum.SHA256 = digest
 	sum.SHA256Scope = scope
 	sum.Format = f.String()
+	sum.Revision = e.Revision
 	if perr != nil {
 		sess.Collector.For(name).EmitExtra(artifact.RuleParseFailed, 0, perr.Error(), nil)
 		sum.SubFormat = "parse-error: " + perr.Error()
@@ -486,6 +492,11 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 		sum.SubFormat = "digest unavailable: " + digestErr.Error()
 	}
 	if e.Digest != "" {
+		// A guard, not the primary mechanism: the hf-cache expander already
+		// de-duplicates a cache on the resolved blob path, so this normally never
+		// fires. It stays because one map lookup per artifact is cheap insurance
+		// for any future walker that yields the same bytes twice.
+		//
 		// The dedup key is the digest *and* its scope, so a prefix digest of a
 		// huge blob can never collide with the full digest of a small one.
 		key := scope + ":" + e.Digest

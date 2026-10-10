@@ -65,14 +65,14 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		budget = maxProbeBytes
 	}
 	probe := &walker{
-		silent:    true,
-		lim:       l,
-		data:      data,
-		limit:     budget,
-		mm:        newMemo(),
-		globals:   map[string]*Global{},
-		structs:   map[string]*structStat{},
-		once:      map[string]bool{},
+		silent:  true,
+		lim:     l,
+		data:    data,
+		limit:   budget,
+		mm:      newMemo(),
+		globals: map[string]*Global{},
+		structs: map[string]*structStat{},
+		once:    map[string]bool{},
 	}
 	if probe.probePickle(0) {
 		return artifact.FormatPickle, true

@@ -209,15 +209,3 @@ func requiresUnsafeLoader(code byte) bool {
 	}
 	return !weightsOnlyAccepted[code]
 }
-
-// callableOpcodes are the opcodes that turn a name from the stream into an actual
-// call: they are where a gadget becomes execution, so the gadget table is
-// consulted at every one of them.
-var callableOpcodes = map[byte]bool{
-	opREDUCE:    true,
-	opBUILD:     true,
-	opINST:      true,
-	opOBJ:       true,
-	opNEWOBJ:    true,
-	opNEWOBJ_EX: true,
-}

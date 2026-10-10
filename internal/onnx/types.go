@@ -105,7 +105,10 @@ var nodeFields = map[protowire.Number]fieldSpec{
 	10: {"device_configurations", kindMessage},
 }
 
-// tensorFields is TensorProto (v1.21.0 lines 605-787).
+// tensorFields is TensorProto (v1.21.0 lines 605-787). Field 3 (Segment) is
+// wire-type checked here but its body is not walked: ONNX deprecated segmented
+// tensors, the field carries no data a loader executes, and nothing else in this
+// walker reads it.
 var tensorFields = map[protowire.Number]fieldSpec{
 	1:  {"dims", kindPackedVarint},
 	2:  {"data_type", kindVarint},
@@ -122,12 +125,6 @@ var tensorFields = map[protowire.Number]fieldSpec{
 	13: {"external_data", kindMessage},
 	14: {"data_location", kindVarint},
 	16: {"metadata_props", kindMessage},
-}
-
-// segmentFields is TensorProto.Segment (v1.21.0 lines 673-676).
-var segmentFields = map[protowire.Number]fieldSpec{
-	1: {"begin", kindVarint},
-	2: {"end", kindVarint},
 }
 
 // attributeFields is AttributeProto (v1.21.0 lines 138-197; 12 and 16-19 are
@@ -210,9 +207,10 @@ var trainingInfoFields = map[protowire.Number]fieldSpec{
 // dataTypeBits maps TensorProto.DataType to its element width in bits
 // (v1.21.0 lines 606-661). STRING is absent: its elements are variable length
 // and are never carried in raw_data, so there is no width to check against.
-// UINT2/INT2 are 2 bits and UINT4/INT4/FLOAT4E2M1 are 4 bits, which is why the
-// raw_data check in parser.go is expressed in bits rather than bytes: ONNX packs
-// sub-byte elements two or four to a byte.
+// UINT2/INT2 are 2 bits and UINT4/INT4/FLOAT4E2M1 are 4 bits; ONNX packs
+// sub-byte elements two or four to a byte and pads the last byte, so the
+// raw_data check in parser.go computes ceil(product(dims) x bits / 8) bytes
+// rather than a plain element count.
 var dataTypeBits = map[int64]uint64{
 	1:  32,  // FLOAT
 	2:  8,   // UINT8

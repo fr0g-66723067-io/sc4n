@@ -31,6 +31,10 @@ type ArtifactSummary struct {
 	SHA256Scope string `json:"sha256Scope,omitempty"`
 	Format      string `json:"format"`
 	SubFormat   string `json:"subFormat,omitempty"`
+	// Revision names the refs/<name> labels a cache entry is reachable from, when
+	// the source knows them (-hf-cache). The snapshot path already carries the
+	// commit, so this is what names the *branch* the user pinned.
+	Revision string `json:"revision,omitempty"`
 	// Error is set when the path could not be opened or read. It is *not* a
 	// finding: an unreadable path is a tool/layout problem, reported with exit
 	// code 3, while an unreadable *member* is a finding, because a container
@@ -253,7 +257,6 @@ type findingJSON struct {
 	Col              *int              `json:"col,omitempty"`
 	Evidence         string            `json:"evidence,omitempty"`
 	EvidenceRedacted bool              `json:"evidenceRedacted,omitempty"`
-	Resolved         *bool             `json:"resolved,omitempty"`
 	Extra            map[string]string `json:"extra,omitempty"`
 }
 
@@ -325,7 +328,6 @@ func (r *Report) toJSON() reportJSON {
 			Col:              f.Col,
 			Evidence:         f.Evidence,
 			EvidenceRedacted: f.EvidenceRedacted,
-			Resolved:         f.Resolved,
 			Extra:            f.Extra,
 		})
 	}

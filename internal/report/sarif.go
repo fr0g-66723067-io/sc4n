@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -243,12 +242,6 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 				CWE:              f.CWE,
 				Extra:            f.Extra,
 			},
-		}
-		if f.Resolved != nil {
-			if res.Properties.Extra == nil {
-				res.Properties.Extra = map[string]string{}
-			}
-			res.Properties.Extra["resolved"] = strconv.FormatBool(*f.Resolved)
 		}
 		log.Runs[0].Results = append(log.Runs[0].Results, res)
 	}
