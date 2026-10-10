@@ -222,7 +222,19 @@ once, its digest is computed concurrently with the parse, the indicator engine i
 one Aho–Corasick pass over a buffer instead of N `regexp` calls, and no parser
 materialises more than a bounded slice of an attacker-controlled length.
 
-Two experimental accelerators are permitted but never required — the SIMD
-byte-class kernel (`goexperiment.simd`) and `encoding/json/v2`
-(`goexperiment.jsonv2`) — each behind a build tag with a pure-stdlib counterpart,
-and each shipped only if `make bench` shows at least 1.5× on its own kernel.
+Two experimental accelerators were permitted but never required, each behind a
+build tag with a pure-stdlib counterpart and each shipped only if `make bench`
+showed at least 1.5× on its own kernel. **Neither is shipped**, and the reasons are
+measurements rather than opinions:
+
+- **SIMD byte-class histogram** (`goexperiment.simd`, `simd/archsimd`): the pure-Go
+  histogram already runs at 1.13 GB/s, and the string engine's bottleneck is the
+  automaton's dependent load chain, which a histogram kernel does not touch. There
+  was no kernel for it to accelerate by 1.5×.
+- **`encoding/json/v2` header decoding** (`goexperiment.jsonv2`): the header decode
+  is microseconds per artifact against a scan dominated by I/O and hashing, so no
+  end-to-end win was measurable.
+
+`make test-simd` remains in the tree: it proves the whole module still builds and
+passes under `GOEXPERIMENT=simd` (and under the emulated `GODEBUG=simd=0` pass),
+which is where a future kernel would have to live.

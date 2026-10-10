@@ -1,11 +1,14 @@
-//go:build !goexperiment.simd
-
 package stringscan
 
-// The pure-Go byte kernel. A GOEXPERIMENT=simd build replaces the histogram with
-// internal/stringscan/kernel_simd.go; both files declare exactly the same
-// functions, so the two implementations cannot drift in signature and a stock
-// toolchain builds this one.
+// The byte kernel.
+//
+// A SIMD replacement for this histogram (goexperiment.simd, simd/archsimd) was
+// evaluated and not shipped: the pure-Go version already runs at 1.13 GB/s, and
+// the string engine's real cost is the Aho-Corasick walk's dependent load chain,
+// which a byte-class histogram does not touch. See docs/architecture.md for the
+// measured numbers and the rule the decision followed (>= 1.5x on its own kernel
+// or it does not land). The file therefore carries no build tag: there is exactly
+// one implementation, so there is nothing for a tag to select between.
 
 import "github.com/fr0g-66723067-io/sc4n/internal/bytescan"
 

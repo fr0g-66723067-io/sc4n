@@ -1,9 +1,20 @@
 # sc4n — static scanner for ML model artifacts and the code around them.
 #
-# Unlike gr4ph, nothing here *requires* an experiment: the SIMD byte-class
-# kernel (internal/stringscan/kernel_simd.go) and the encoding/json/v2 header
-# decoder (internal/jsonutil/...) live behind build tags with pure-stdlib
-# counterparts, so `go build ./cmd/sc4n` works on a stock toolchain.
+# Nothing here *requires* an experiment: every file builds on a stock toolchain.
+#
+# Two experiments were evaluated for the hot paths and neither is shipped, because
+# neither earned its place by the plan's own rule (>= 1.5x on its own kernel):
+#
+#   - a SIMD byte-class histogram (goexperiment.simd, simd/archsimd). The pure-Go
+#     histogram already runs at 1.13 GB/s, and the string engine's real bottleneck
+#     is the Aho-Corasick walk's dependent load chain, which a histogram kernel
+#     does not touch. Measured numbers are in docs/architecture.md.
+#   - encoding/json/v2 (goexperiment.jsonv2) for header decoding. The header
+#     decode is microseconds per artifact against a scan that is dominated by I/O
+#     and hashing; there was no measurable end-to-end win to show.
+#
+# `test-simd` remains: it proves the tree still builds and passes under
+# GOEXPERIMENT=simd, which is where a future kernel would have to live.
 
 GO ?= go
 BIN ?= sc4n
@@ -25,10 +36,10 @@ test:
 	$(GO) test ./...
 	$(GO) test -race ./...
 
-# The emulated pass (GODEBUG=simd=0) is a distinct code path from the native one
-# and is the only pass that runs the pure-Go fallback inside the same binary, so
-# both are required. Do not add GODEBUG=simd=256: it bypasses the CPU feature
-# check and can SIGILL.
+# Both passes are required: the emulated one (GODEBUG=simd=0) takes the
+# experiment's portable code paths, which is where a future SIMD kernel would
+# first break. Do not add GODEBUG=simd=256: it bypasses the CPU feature check and
+# can SIGILL.
 test-simd:
 	GOEXPERIMENT=simd $(GO) test ./...
 	GODEBUG=simd=0 GOEXPERIMENT=simd $(GO) test ./...
@@ -53,11 +64,30 @@ bench-big:
 fixtures:
 	$(GO) run ./tools/sc4nfixtures -out testdata/fixtures
 
+# Each parser's fuzz target, seeded from the fixture corpus. Invariant for all of
+# them: no panic, bounded memory, terminates. FUZZTIME is per target, so the whole
+# target costs roughly (number of targets) x FUZZTIME.
+FUZZTIME ?= 30s
 fuzz:
-	$(GO) test ./internal/pickle -run '^$$' -fuzz FuzzPickleWalk -fuzztime 30s
-	$(GO) test ./internal/artifact -run '^$$' -fuzz FuzzDispatch -fuzztime 30s
-	$(GO) test ./internal/gguf -run '^$$' -fuzz FuzzGGUF -fuzztime 30s
-	$(GO) test ./internal/safetensors -run '^$$' -fuzz FuzzSafetensors -fuzztime 30s
+	$(GO) test ./internal/pickle     -run '^$$' -fuzz FuzzPickleWalk     -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/artifact   -run '^$$' -fuzz FuzzSniffNeverPanics -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/gguf       -run '^$$' -fuzz FuzzGGUF           -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/safetensors -run '^$$' -fuzz FuzzSafetensors   -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/onnx       -run '^$$' -fuzz FuzzONNX           -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/tfmodel    -run '^$$' -fuzz FuzzKerasDocument  -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/tfmodel    -run '^$$' -fuzz FuzzKerasParse     -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/tfmodel    -run '^$$' -fuzz FuzzHDF5Parse      -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/tfmodel    -run '^$$' -fuzz FuzzSavedModelParse -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/tfmodel    -run '^$$' -fuzz FuzzCheckpointParse -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/tfmodel    -run '^$$' -fuzz FuzzTFLiteParse    -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/torch      -run '^$$' -fuzz FuzzTorch          -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/numpy      -run '^$$' -fuzz FuzzParseNPY       -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/numpy      -run '^$$' -fuzz FuzzParseJoblib    -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/msgpack    -run '^$$' -fuzz FuzzParseMsgpack   -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/xgb        -run '^$$' -fuzz FuzzUBJWalk        -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/coreml     -run '^$$' -fuzz FuzzCoreMLWalk     -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/pte        -run '^$$' -fuzz FuzzPTEHeader      -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/content    -run '^$$' -fuzz FuzzContentParse   -fuzztime $(FUZZTIME)
 
 # Optional differential check against fickling/picklescan/modelscan. Skipped
 # loudly when the tools are absent (they are absent on the reference host).
