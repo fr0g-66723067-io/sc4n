@@ -34,6 +34,14 @@ type Limits struct {
 	// MaxEntries caps the member count of one archive. Default 100_000.
 	MaxEntries int
 
+	// MaxArrayElements caps the element count of one *metadata* array — a
+	// tokenizer vocabulary, a UBJSON array, a MessagePack array. It is separate
+	// from MaxEntries, which counts archive members: a 256 000-token vocabulary is
+	// an ordinary file, while a 256 000-member archive is not. Default 1<<22,
+	// which is above every published vocabulary (Llama-3 is 128 256, Qwen is
+	// 151 936) with a wide margin and still bounds the work.
+	MaxArrayElements int
+
 	// MaxDecompressedBytes caps the cumulative decompressed output of one
 	// archive (and, independently, of one compression layer). Default 8 GiB.
 	MaxDecompressedBytes int64
@@ -97,6 +105,7 @@ func Default() Limits {
 		MaxHeaderBytes:       100 << 20,
 		MaxDepth:             4,
 		MaxEntries:           100_000,
+		MaxArrayElements:     1 << 22,
 		MaxDecompressedBytes: 8 << 30,
 		MaxRatio:             200,
 		MaxStringBlob:        16 << 20,
@@ -123,6 +132,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxEntries == 0 {
 		l.MaxEntries = d.MaxEntries
+	}
+	if l.MaxArrayElements == 0 {
+		l.MaxArrayElements = d.MaxArrayElements
 	}
 	if l.MaxDecompressedBytes == 0 {
 		l.MaxDecompressedBytes = d.MaxDecompressedBytes
@@ -165,6 +177,7 @@ func (l Limits) Normalize() (Limits, error) {
 		{"MaxHeaderBytes", l.MaxHeaderBytes},
 		{"MaxDepth", int64(l.MaxDepth)},
 		{"MaxEntries", int64(l.MaxEntries)},
+		{"MaxArrayElements", int64(l.MaxArrayElements)},
 		{"MaxDecompressedBytes", l.MaxDecompressedBytes},
 		{"MaxRatio", l.MaxRatio},
 		{"MaxStringBlob", l.MaxStringBlob},
@@ -218,3 +231,6 @@ func (l *Limits) SetMaxSpillBytes(v int64) { l.MaxSpillBytes = v }
 
 // SetMaxEntries overrides the archive member cap.
 func (l *Limits) SetMaxEntries(v int) { l.MaxEntries = v }
+
+// SetMaxArrayElements overrides the metadata-array element cap.
+func (l *Limits) SetMaxArrayElements(v int) { l.MaxArrayElements = v }

@@ -145,24 +145,55 @@ var (
 
 	// ruleTemplateInjection is the hidden-directive half. The phrase table is
 	// narrow on purpose and is not the shared chat pseudo-tag table.
+	//
+	// The phrase alone is not enough for the high-severity form: measured on
+	// llama.cpp's 71 real chat templates, three legitimate templates say "do not
+	// tell the user about function calls", which is a tool-use instruction. The
+	// high form therefore requires corroboration (see corroborated), and the
+	// phrase-only case is reported by ruleTemplateInjectionWeak.
 	ruleTemplateInjection = report.DefineRule(report.Rule{
 		ID:         "SC4N-TEMPLATE-INJECTION",
-		Title:      "Template embeds an instruction that overrides the conversation",
+		Title:      "Template embeds an instruction that overrides the conversation, with a channel to carry it out",
 		Severity:   report.SeverityHigh,
 		Confidence: report.ConfidenceMedium,
 		CWE:        []string{"CWE-1426", "CWE-94"},
 		Class:      "template",
 		Description: "A Jinja2 template carries an instruction aimed at the model rather than at a " +
-			"renderer: \"ignore previous instructions\", \"do not tell the user\", \"system prompt:\", " +
-			"\"exfiltrate\", a request to send the conversation elsewhere, or the same text hidden in a " +
-			"{# comment #} or a {% raw %} block. A chat template is pasted into every conversation the " +
-			"model serves, so an instruction in it is a standing prompt injection (OWASP LLM01) and, " +
-			"with a tool or a URL, a backdoor. The table deliberately excludes chat pseudo-tags like " +
-			"[INST] and <|im_start|>, which legitimate templates are built from, and the arguments of " +
-			"raise_exception(), which Transformers itself provides.",
+			"renderer — \"ignore previous instructions\", \"do not tell the user\", \"system prompt:\", " +
+			"\"exfiltrate\", a request to send the conversation elsewhere — *and* something in the same " +
+			"template that gives the instruction somewhere to go: a C2/webhook or raw-IP URL, a hidden " +
+			"HTML comment, an invisible-character run, or a base64 blob of at least 64 characters. A " +
+			"chat template is pasted into every conversation the model serves, so an instruction in it " +
+			"is a standing prompt injection (OWASP LLM01) and, with a channel to carry the result out, " +
+			"a backdoor. The corroboration requirement is what separates that from an ordinary " +
+			"tool-use sentence; the phrase-only case is SC4N-TEMPLATE-INJECTION-WEAK. The table " +
+			"deliberately excludes chat pseudo-tags like [INST] and <|im_start|>, which legitimate " +
+			"templates are built from, and the arguments of raise_exception(), which Transformers " +
+			"itself provides.",
 		Refs: []string{
 			"https://owasp.org/www-project-top-10-for-large-language-model-applications/",
 			"https://kb.cert.org/vuls/id/915947",
+		},
+		Tags: []string{"template", "prompt-injection"},
+	})
+
+	// ruleTemplateInjectionWeak is the same phrase with nothing to carry it out.
+	ruleTemplateInjectionWeak = report.DefineRule(report.Rule{
+		ID:         "SC4N-TEMPLATE-INJECTION-WEAK",
+		Title:      "Template contains model-directed instruction text (no channel corroborates it)",
+		Severity:   report.SeverityLow,
+		Confidence: report.ConfidenceLow,
+		CWE:        []string{"CWE-1426"},
+		Class:      "template",
+		Description: "A Jinja2 template contains a phrase that is aimed at a model rather than at a " +
+			"renderer, and nothing else in the template corroborates it: no C2/webhook or raw-IP URL, " +
+			"no hidden HTML comment, no invisible-character run, no base64 blob. Reported because the " +
+			"phrase is in the artifact's executable surface, at low severity because a legitimate " +
+			"tool-use instruction reads the same way — \"do not tell the user about function calls\" " +
+			"is how three of llama.cpp's shipped templates put it. Read the matched phrase before " +
+			"concluding; the high-severity SC4N-TEMPLATE-INJECTION is the form with a channel.",
+		Refs: []string{
+			"https://owasp.org/www-project-top-10-for-large-language-model-applications/",
 		},
 		Tags: []string{"template", "prompt-injection"},
 	})

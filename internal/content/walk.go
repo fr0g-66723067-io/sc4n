@@ -180,7 +180,10 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		cards.ScanText(ctx.Sink, 0, name, string(data))
 	case isJinjaName(base) || ctx.Format == artifact.FormatJinja:
 		jinja.Analyze(ctx.Sink, 0, name, string(data))
-		stringscan.Emit(ctx.Sink, 0, data)
+		// The template tier: the shared engine still looks for a reachable secret
+		// or endpoint, but the instruction/pseudo-tag indicator belongs to the
+		// template analyser, which knows it is reading a template.
+		stringscan.EmitKind(ctx.Sink, 0, data, stringscan.KindTemplate)
 	case base == "tokenizer.json":
 		if !truncated {
 			tokenizer.AnalyzeJSON(ctx.Sink, 0, name, data)

@@ -121,7 +121,9 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	}
 
 	// Header strings are a low-noise place for indicators (op names, debug info).
-	stringscan.Emit(ctx.Sink, 0, head)
+	// A flatbuffer segment is not prose: its strings are tensor names and operator
+	// attributes. Only a reachable secret or endpoint is a finding here.
+	stringscan.EmitKind(ctx.Sink, 0, head, stringscan.KindSecrets)
 
 	if hasExt && segSize > 0 {
 		scanNative(ctx, s, segBase, segSize)

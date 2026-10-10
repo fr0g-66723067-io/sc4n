@@ -165,9 +165,15 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 
 // directives reports imperative and tool-call directives that the shared
 // indicator table does not carry.
+//
+// One finding per phrase, not one per occurrence: a document *about* prompt
+// injection quotes the same directive several times, and
+// models/templates/README.md in llama.cpp's tree produced eight medium findings
+// that way. The count travels in the evidence instead.
 func directives(sink *report.Sink, base int64, what, text string) {
 	low := strings.ToLower(text)
 	for _, d := range cardDirectives {
+		first, count := -1, 0
 		from := 0
 		for {
 			at := strings.Index(low[from:], d)
@@ -175,10 +181,20 @@ func directives(sink *report.Sink, base int64, what, text string) {
 				break
 			}
 			off := from + at
-			sink.Emit(ruleCardInjection, base+int64(off),
-				what+" contains the model-directed directive "+strconv.Quote(d))
+			if first < 0 {
+				first = off
+			}
+			count++
 			from = off + len(d)
 		}
+		if first < 0 {
+			continue
+		}
+		ev := what + " contains the model-directed directive " + strconv.Quote(d)
+		if count > 1 {
+			ev += " (" + strconv.Itoa(count) + " occurrences)"
+		}
+		sink.Emit(ruleCardInjection, base+int64(first), ev)
 	}
 }
 

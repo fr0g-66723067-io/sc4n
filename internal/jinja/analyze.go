@@ -1,10 +1,12 @@
 package jinja
 
 import (
+	"encoding/base64"
 	"strconv"
 	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
+	"github.com/fr0g-66723067-io/sc4n/internal/stringscan"
 )
 
 // dunderNames is the introspection set. Every entry is a name a real chat
@@ -82,15 +84,67 @@ var templatePhrases = []string{
 	"you must obey",
 }
 
+// overridePhrases are the phrases that exist only to replace the application's own
+// instructions: they are the attack's own words. The rest of the table is the
+// concealment class ("do not tell the user", "do not mention this"), which is also
+// how a legitimate tool-use instruction reads — measured on llama.cpp's 71 real
+// chat templates, three of them say "do not tell the user about function calls".
+// That is the whole reason the rule has two severities.
+var overridePhrases = map[string]bool{
+	"ignore previous instructions": true,
+	"ignore all previous":          true,
+	"ignore the previous":          true,
+	"disregard previous":           true,
+	"disregard all previous":       true,
+	"override your instructions":   true,
+	"ignore your instructions":     true,
+	"new instructions:":            true,
+	"system prompt:":               true,
+	"exfiltrate":                   true,
+	"send the conversation":        true,
+	"send the chat history":        true,
+	"send all messages":            true,
+	"hidden instruction":           true,
+	"you must obey":                true,
+}
+
+// OverrideDirective reports whether a matched phrase belongs to the override
+// class: an instruction that has no legitimate reading in a chat template. A
+// concealment phrase is not one, and a caller that reports a phrase (this package
+// for templates, internal/gguf for GGUF chat templates) uses this to choose
+// between its high-severity rule and its weak one.
+func OverrideDirective(phrase string) bool {
+	return overridePhrases[strings.ToLower(strings.TrimSpace(phrase))]
+}
+
 // Analyze scans one Jinja2 template and reports every finding through sink at
 // offsets derived from base. name is used for evidence only.
 func Analyze(sink *report.Sink, base int64, name, template string) {
 	if template == "" {
 		return
 	}
-	a := &analyzer{sink: sink, base: base, name: name, toks: lex(template)}
+	a := &analyzer{
+		sink:         sink,
+		base:         base,
+		name:         name,
+		toks:         lex(template),
+		corroborated: corroborated(template),
+	}
 	a.structure()
 	a.expressions()
+	// The phrase findings are emitted last, because whether one deserves the
+	// high-severity rule depends on the rest of the template — including whether
+	// the template is a Python-object payload, which only the expression pass
+	// knows. The report orders findings by (artifact, offset), so deferring them
+	// changes nothing a reader sees.
+	for _, p := range a.pending {
+		if a.corroborated || a.ssti || OverrideDirective(p.phrase) {
+			a.emit(ruleTemplateInjection, p.off, p.ev)
+			continue
+		}
+		a.emit(ruleTemplateInjectionWeak, p.off, p.ev+
+			"; nothing else in the template corroborates it (no URL, hidden comment, invisible run, base64 blob or Python-object walk)")
+	}
 }
 
 type analyzer struct {
@@ -98,9 +152,127 @@ type analyzer struct {
 	base int64
 	name string
 	toks []token
+	// corroborated records whether the template carries a channel that makes an
+	// instruction phrase actionable. It is computed once, over the whole
+	// template, because the phrase and its channel are usually in different
+	// places (a directive in a comment, a webhook URL in a string).
+	corroborated bool
+	// ssti records that the expression pass reported a Python-object walk: a
+	// template that reaches __class__ or lipsum.__globals__ is a payload, so any
+	// instruction sentence in it is part of that payload.
+	ssti bool
+	// pending holds the model-directed phrases until the rest of the template has
+	// been analysed.
+	pending []pendingInjection
+}
+
+// pendingInjection is one phrase awaiting its severity decision.
+type pendingInjection struct {
+	off    int
+	ev     string
+	phrase string
+}
+
+// emitInjection queues a model-directed phrase. An override directive is the
+// attack's own words and is always reported at high severity; a concealment
+// phrase needs corroboration, because "do not tell the user about function calls"
+// is how a legitimate tool-use instruction reads. The decision is made in
+// Analyze, once the whole template has been analysed.
+func (a *analyzer) emitInjection(off int, ev, phrase string) {
+	a.pending = append(a.pending, pendingInjection{off: off, ev: ev, phrase: phrase})
+}
+
+// corroborated reports whether a template carries a channel that makes a
+// model-directed phrase actionable: a reachable secret or endpoint (the shared
+// table decides, so there is one definition of "exfil endpoint"), a hidden HTML
+// comment, an invisible-character run, or a base64 blob of at least minBase64Blob
+// characters. A Python-object walk corroborates too, but that is recorded by the
+// expression pass (see analyzer.ssti) rather than guessed from the text.
+func corroborated(template string) bool {
+	if stringscan.HasSecretHit(template) {
+		return true
+	}
+	if strings.Contains(template, "<!--") {
+		return true
+	}
+	return hasInvisibleRun(template) || hasBase64Blob(template)
+}
+
+// minBase64Blob is the shortest base64 run treated as a payload. Below it the
+// run is a token, a hash or an ordinary identifier.
+const minBase64Blob = 64
+
+// hasInvisibleRun reports whether the template contains three or more
+// consecutive characters from the zero-width, bidi-override and
+// soft-hyphen classes — the Trojan-Source channel (CWE-1007). One such
+// character is a formatting artefact; a run of them is a way to hide text.
+func hasInvisibleRun(template string) bool {
+	run := 0
+	for _, r := range template {
+		if isInvisible(r) {
+			run++
+			if run >= 3 {
+				return true
+			}
+			continue
+		}
+		run = 0
+	}
+	return false
+}
+
+func isInvisible(r rune) bool {
+	switch {
+	case r == 0x00AD || r == 0x200B || r == 0x200C || r == 0x200D || r == 0x2060 || r == 0xFEFF:
+		return true
+	case r >= 0x200E && r <= 0x200F: // LRM, RLM
+		return true
+	case r >= 0x202A && r <= 0x202E: // bidi embedding/override
+		return true
+	case r >= 0x2066 && r <= 0x2069: // bidi isolates
+		return true
+	case r == 0x061C: // Arabic letter mark
+		return true
+	}
+	return false
+}
+
+// hasBase64Blob reports whether the template contains a base64-alphabet run of at
+// least minBase64Blob characters that actually decodes. Requiring a successful
+// decode keeps a long identifier or a token from counting.
+func hasBase64Blob(template string) bool {
+	start := -1
+	for i := 0; i <= len(template); i++ {
+		if i < len(template) && isBase64Byte(template[i]) {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 && i-start >= minBase64Blob {
+			if _, err := base64.StdEncoding.DecodeString(template[start:i]); err == nil {
+				return true
+			}
+		}
+		start = -1
+	}
+	return false
+}
+
+func isBase64Byte(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		return true
+	case c == '+' || c == '/' || c == '=':
+		return true
+	}
+	return false
 }
 
 func (a *analyzer) emit(r *report.Rule, off int, ev string) {
+	if r == rulePyObject || r == ruleDangerousGlobal {
+		a.ssti = true
+	}
 	if a.name != "" {
 		ev += " (in " + a.name + ")"
 	}
@@ -116,16 +288,16 @@ func (a *analyzer) structure() {
 		switch t.kind {
 		case kindText:
 			if p, at := phraseIn(t.val); p != "" {
-				a.emit(ruleTemplateInjection, t.off+at, "template text contains the instruction "+strconv.Quote(p))
+				a.emitInjection(t.off+at, "template text contains the instruction "+strconv.Quote(p), p)
 			}
 		case kindComment:
 			if p, at := phraseIn(t.val); p != "" {
-				a.emit(ruleTemplateInjection, t.off+at, "a {# comment #} contains the instruction "+strconv.Quote(p))
+				a.emitInjection(t.off+at, "a {# comment #} contains the instruction "+strconv.Quote(p), p)
 			}
 		case kindRaw:
 			a.emit(ruleRaw, t.off, "{% raw %} hides "+strconv.Itoa(len(t.val))+" bytes from a {{ }} scanner")
 			if p, at := phraseIn(t.val); p != "" {
-				a.emit(ruleTemplateInjection, t.off+at, "a {% raw %} block contains the instruction "+strconv.Quote(p))
+				a.emitInjection(t.off+at, "a {% raw %} block contains the instruction "+strconv.Quote(p), p)
 			}
 		case kindTag:
 			if t.val != "{%" {
@@ -148,9 +320,16 @@ func (a *analyzer) structure() {
 	}
 }
 
-// analyzeSet reports a {% set %} whose right-hand side is computed rather than
-// a literal, a name or a known filter chain. inner starts at the "set" keyword
-// and excludes the closing tag.
+// analyzeSet reports a {% set %} whose right-hand side assembles a *name* out of
+// pieces. inner starts at the "set" keyword and excludes the closing tag.
+//
+// The trigger is deliberately positive rather than "anything not in the
+// allowlist". Measured on llama.cpp's 71 real chat templates, the allowlist form
+// produced 873 findings for statements like `{% set ns = namespace(...) %}`,
+// `{% set a = b + c %}` and `{% set x = y.attr %}` — ordinary template style, and
+// a wall of medium findings on every benign repository. What the rule is for is
+// the other shape: '__g' + 'lobals__', which exists only to keep a dunder name
+// out of a literal scanner.
 func (a *analyzer) analyzeSet(inner []token) {
 	eq := -1
 	for k := range inner {
@@ -162,11 +341,79 @@ func (a *analyzer) analyzeSet(inner []token) {
 	if eq < 0 || eq+1 >= len(inner) || len(inner) == 0 {
 		return
 	}
-	if simpleRHS(inner[eq+1:]) {
+	rhs := inner[eq+1:]
+	if simpleRHS(rhs) || !buildsAName(rhs) {
 		return
 	}
 	a.emit(ruleDynamicName, inner[0].off,
-		"{% set %} builds its value with a computed right-hand side, which hides the construction from a literal scan")
+		"{% set %} assembles a name out of literal pieces, which hides it from a literal scan")
+}
+
+// buildsAName reports whether rhs constructs a name rather than computing a
+// value: a chain of two or more string literals joined by + or ~, or a subscript
+// whose index is such a chain.
+func buildsAName(rhs []token) bool {
+	if stringLiteralChain(rhs) {
+		return true
+	}
+	depth := 0
+	for k := range rhs {
+		if rhs[k].kind != kindOp {
+			continue
+		}
+		switch rhs[k].val {
+		case "[":
+			if depth == 0 {
+				if end := matchingBracket(rhs, k); end > 0 && stringLiteralChain(rhs[k+1:end]) {
+					return true
+				}
+			}
+			depth++
+		case "]":
+			depth--
+		}
+	}
+	return false
+}
+
+// matchingBracket returns the index of the ] that closes the [ at k, or -1.
+func matchingBracket(rhs []token, k int) int {
+	depth := 0
+	for j := k; j < len(rhs); j++ {
+		if rhs[j].kind != kindOp {
+			continue
+		}
+		switch rhs[j].val {
+		case "[":
+			depth++
+		case "]":
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
+}
+
+// stringLiteralChain reports whether toks is two or more string literals joined
+// by + or ~ — the '__g' + 'lobals__' shape. A bare list of literals is not a
+// chain: the lexer drops commas, so `['a', 'b']` and `'a' + 'b'` have the same
+// literal count and only the presence of a join tells them apart. A single
+// literal, or a literal concatenated with a variable, is ordinary style.
+func stringLiteralChain(toks []token) bool {
+	literals, joins := 0, 0
+	for k := range toks {
+		switch {
+		case toks[k].kind == kindString:
+			literals++
+		case toks[k].kind == kindOp && (toks[k].val == "+" || toks[k].val == "~"):
+			joins++
+		default:
+			return false
+		}
+	}
+	return literals >= 2 && joins >= 1
 }
 
 // simpleRHS reports whether rhs is exactly the allowlisted shape: one literal,
@@ -217,7 +464,7 @@ func (a *analyzer) expressions() {
 		case kindString:
 			if !a.inRaiseException(i) {
 				if p, _ := phraseIn(t.val); p != "" {
-					a.emit(ruleTemplateInjection, t.off, "a template string contains the instruction "+strconv.Quote(p))
+					a.emitInjection(t.off, "a template string contains the instruction "+strconv.Quote(p), p)
 				}
 			}
 			joined, next, ok := a.concatAt(i)

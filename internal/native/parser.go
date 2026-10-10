@@ -64,7 +64,10 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	// strings (a C2 URL, a credential path, a shell payload) in an embedded
 	// binary are still surfaced from its head and tail.
 	for _, w := range polyglot.MagicWindows(s, size) {
-		stringscan.Emit(ctx.Sink, w.Base, w.Data)
+		// A compiled executable is not prose: its symbol table names libc functions
+		// and its string table holds whatever the program ships. Only a reachable
+		// secret or endpoint is a finding here.
+		stringscan.EmitKind(ctx.Sink, w.Base, w.Data, stringscan.KindSecrets)
 	}
 	return nil
 }

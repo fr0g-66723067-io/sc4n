@@ -229,16 +229,26 @@ func (w *uwalker) run() {
 // count consumes one structural element of the configured budget.
 func (w *uwalker) count() bool {
 	w.elems++
-	if w.elems > int64(w.l.MaxEntries) {
+	if cap := w.arrayCap(); w.elems > cap {
 		if !w.elemsHi {
 			w.elemsHi = true
 			if !w.quiet {
-				limits.Emit(w.sink, limits.RuleEntries, "MaxEntries", w.elems, int64(w.l.MaxEntries), "ubjson elements")
+				limits.Emit(w.sink, limits.RuleEntries, "MaxArrayElements", w.elems, cap, "ubjson elements")
 			}
 		}
 		return false
 	}
 	return true
+}
+
+// arrayCap is the element budget for one UBJSON container. It is
+// MaxArrayElements rather than MaxEntries: a UBJSON document is one array of
+// model data, and the archive-member cap has nothing to say about it.
+func (w *uwalker) arrayCap() int64 {
+	if w.l.MaxArrayElements > 0 {
+		return int64(w.l.MaxArrayElements)
+	}
+	return int64(limits.Default().MaxArrayElements)
 }
 
 // emitStruct emits the structural rule once per artifact.
@@ -629,9 +639,9 @@ func (w *uwalker) typedValues(t byte, n int64, depth int) error {
 		// A strongly typed container of payload-less values has an empty body.
 		return nil
 	case mString, mHigh:
-		if n > int64(w.l.MaxEntries) {
+		if cap := w.arrayCap(); n > cap {
 			if !w.quiet {
-				limits.Emit(w.sink, limits.RuleEntries, "MaxEntries", n, int64(w.l.MaxEntries), "ubjson typed string array")
+				limits.Emit(w.sink, limits.RuleEntries, "MaxArrayElements", n, cap, "ubjson typed string array")
 			}
 			return errStop
 		}

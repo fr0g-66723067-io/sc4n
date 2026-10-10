@@ -11,6 +11,7 @@ import (
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
+	"github.com/fr0g-66723067-io/sc4n/internal/jinja"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
@@ -310,6 +311,16 @@ func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
 	}
 	endInfos := r.off
 	dataStart := alignUp(endInfos, int64(align))
+	if tensorCount == 0 {
+		// A vocabulary-only GGUF (llama.cpp ships one per tokenizer) has no tensor
+		// data section at all, so there is no alignment padding to require: the
+		// metadata simply ends inside the file. Requiring the padding reported
+		// every one of those files as structurally broken.
+		if endInfos > size {
+			st.structf(endInfos, "the metadata section ends at %d, past EOF (%d)", endInfos, size)
+		}
+		return st.meta, nil
+	}
 	if dataStart > size {
 		st.structf(endInfos, "the aligned data section starts at %d, past EOF (%d)", dataStart, size)
 		return st.meta, nil
@@ -577,8 +588,12 @@ func (st *state) readArray(r *reader, key string, depth int) bool {
 		st.structf(off, "array %q declares %d elements but only %d bytes remain", key, cnt, remaining)
 		return false
 	}
-	if st.lim.MaxEntries > 0 && cnt > uint64(st.lim.MaxEntries) {
-		st.limit(limits.RuleEntries, "MaxEntries", clampInt64(cnt), int64(st.lim.MaxEntries), "array "+key)
+	// A metadata array is bounded by MaxArrayElements, not MaxEntries: a 256 000
+	// token vocabulary is an ordinary file, while a 256 000 member archive is not.
+	// The array is walked to its end either way, so the finding must name the cap
+	// that actually applies rather than one the walk does not enforce.
+	if st.lim.MaxArrayElements > 0 && cnt > uint64(st.lim.MaxArrayElements) {
+		st.limit(limits.RuleEntries, "MaxArrayElements", clampInt64(cnt), int64(st.lim.MaxArrayElements), "array "+key)
 	}
 	for range cnt {
 		if _, ok := st.value(r, et, key, depth+1); !ok {
@@ -640,7 +655,21 @@ func (st *state) considerString(key string, off int64, b []byte, inArray bool) {
 			}
 		}
 		if scan && st.sink != nil {
-			stringscan.Emit(st.sink, off, b)
+			// A tokenizer.ggml.* value is a vocabulary entry or a regex, not
+			// prose: `<|im_start|>` is a token the model is *supposed* to emit,
+			// and `os.system` is a substring of a BPE merge rule as easily as it
+			// is a call. Only a reachable secret or endpoint is a finding there.
+			// A chat template is a program that emits text, so the instruction
+			// indicator belongs to the template checks below, not to the generic
+			// metadata rule.
+			kind := stringscan.KindText
+			switch {
+			case isTemplateKey(key):
+				kind = stringscan.KindTemplate
+			case strings.HasPrefix(key, "tokenizer.ggml."):
+				kind = stringscan.KindSecrets
+			}
+			stringscan.EmitKind(st.sink, off, b, kind)
 		}
 	}
 
@@ -662,7 +691,14 @@ func (st *state) templateChecks(off int64, tmpl string) {
 			map[string]string{"construct": construct})
 	}
 	if directive, ok := findBackdoorDirective(tmpl); ok {
-		st.emitExtra(RuleTemplateBackdoor, off,
+		// The same split the Jinja analyser makes: an override directive is the
+		// attack's own words, while a concealment phrase or a chat pseudo-tag is
+		// also how a legitimate tool-use instruction reads.
+		rule := RuleTemplateBackdoorWeak
+		if jinja.OverrideDirective(directive) {
+			rule = RuleTemplateBackdoor
+		}
+		st.emitExtra(rule, off,
 			"chat template contains the instruction-override directive "+strconv.Quote(directive),
 			map[string]string{"directive": directive})
 	}

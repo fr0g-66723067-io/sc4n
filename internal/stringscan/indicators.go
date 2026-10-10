@@ -48,6 +48,73 @@ type Hit struct {
 	Extra map[string]string
 }
 
+// Kind selects which of the shared indicator rules apply to a buffer.
+//
+// The engine is context-free by construction — one automaton, one table — but its
+// rules are calibrated for *prose that a model reads*: a metadata value, a config
+// string, a model card, source code. Applied to a symbol table, a tokenizer
+// vocabulary or a flatbuffer segment, the shape rules match ordinary data, and
+// the scanner reports a benign file as hostile. The tier is how a caller says
+// which context it is in without the engine having to guess.
+type Kind uint8
+
+const (
+	// KindText applies every rule. It is the default, and it is right for
+	// metadata values, config, source code and cards.
+	KindText Kind = iota
+	// KindSecrets applies only the rules that are about a *reachable* secret or
+	// endpoint: C2/webhook URLs, raw-IP URLs, credentials and secret values. It
+	// is what a region that is not prose gets — a symbol table, a tokenizer
+	// vocabulary, a flatbuffer segment — where a shell fragment or a decoder name
+	// is just a string in a table.
+	KindSecrets
+	// KindTemplate applies every rule except the instruction/pseudo-tag
+	// indicator. A chat template is a program that emits text: `<|im_start|>` is
+	// the delimiter it exists to emit, and "do not tell the user about function
+	// calls" is a tool-use instruction. Judging that phrasing is the job of the
+	// template analyser (SC4N-TEMPLATE-INJECTION, SC4N-JINJA-*), which knows it
+	// is reading a template; the generic metadata rule cannot tell either apart
+	// from an injection, and reporting both is a duplicate with a worse verdict.
+	KindTemplate
+)
+
+// tier is which family a rule belongs to, for the Kind filter.
+type tier uint8
+
+const (
+	// tierShape is a shape that is only interesting in prose.
+	tierShape tier = iota
+	// tierSecret is a reachable secret or endpoint.
+	tierSecret
+)
+
+// ruleTiers names the rules that survive every Kind. Everything else is a shape.
+var ruleTiers = map[*report.Rule]tier{
+	ruleC2:          tierSecret,
+	ruleRawIPURL:    tierSecret,
+	ruleCredential:  tierSecret,
+	ruleSecretValue: tierSecret,
+}
+
+func tierOf(r *report.Rule) tier {
+	if t, ok := ruleTiers[r]; ok {
+		return t
+	}
+	return tierShape
+}
+
+// allows reports whether a hit is in scope for the kind.
+func (k Kind) allows(r *report.Rule) bool {
+	switch k {
+	case KindSecrets:
+		return tierOf(r) == tierSecret
+	case KindTemplate:
+		return r != ruleInjection
+	default:
+		return true
+	}
+}
+
 // Scan returns the indicator hits in b, ordered by offset and then rule ID so that
 // the result is a total order for a given input.
 func Scan(b []byte) []Hit { return scan(b) }
@@ -57,17 +124,45 @@ func ScanString(s string) []Hit { return scan(unsafeBytes(s)) }
 
 // Emit scans b and reports every hit through the sink at absolute offsets derived
 // from base.
-func Emit(sink *report.Sink, base int64, b []byte) {
-	for _, h := range Scan(b) {
-		emit(sink, base, h)
-	}
-}
+func Emit(sink *report.Sink, base int64, b []byte) { EmitKind(sink, base, b, KindText) }
 
 // EmitString is Emit for a string.
 func EmitString(sink *report.Sink, base int64, s string) {
-	for _, h := range ScanString(s) {
-		emit(sink, base, h)
+	EmitStringKind(sink, base, s, KindText)
+}
+
+// EmitKind is Emit with an explicit context tier.
+func EmitKind(sink *report.Sink, base int64, b []byte, k Kind) {
+	for _, h := range Scan(b) {
+		if k.allows(h.Rule) {
+			emit(sink, base, h)
+		}
 	}
+}
+
+// EmitStringKind is EmitKind for a string.
+func EmitStringKind(sink *report.Sink, base int64, s string, k Kind) {
+	for _, h := range ScanString(s) {
+		if k.allows(h.Rule) {
+			emit(sink, base, h)
+		}
+	}
+}
+
+// HasSecretHit reports whether s contains a reachable secret or endpoint — the
+// KindSecrets family: a C2/webhook URL, a raw-IP URL, a credential path or a
+// secret assignment.
+//
+// It exists so a caller that has to decide *how strongly* to report something
+// else (the template analyser, deciding between a directive and an ordinary
+// tool-use sentence) can ask this table rather than keeping a second copy of it.
+func HasSecretHit(s string) bool {
+	for _, h := range ScanString(s) {
+		if tierOf(h.Rule) == tierSecret {
+			return true
+		}
+	}
+	return false
 }
 
 func emit(sink *report.Sink, base int64, h Hit) {

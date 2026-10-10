@@ -167,4 +167,25 @@ var (
 		},
 		Tags: []string{"prompt-injection", "backdoor"},
 	})
+
+	// RuleTemplateBackdoorWeak is a concealment-class phrase with nothing else in
+	// the template to corroborate it.
+	RuleTemplateBackdoorWeak = report.DefineRule(report.Rule{
+		ID:         "SC4N-GGUF-TEMPLATE-BACKDOOR-WEAK",
+		Title:      "GGUF chat template contains model-directed instruction text (no channel corroborates it)",
+		Severity:   report.SeverityLow,
+		Confidence: report.ConfidenceLow,
+		CWE:        []string{"CWE-74"},
+		Class:      "template",
+		Description: "A tokenizer.chat_template value contains a concealment-class phrase (\"do not tell the " +
+			"user\", \"do not mention this\") or a chat pseudo-tag, and no override directive, endpoint or " +
+			"other corroboration. Reported at low severity because a legitimate tool-use instruction reads " +
+			"the same way — three of llama.cpp's shipped templates say \"do not tell the user about " +
+			"function calls\" — and because a template that emits <|system|> is doing its job. The " +
+			"high-severity SC4N-GGUF-TEMPLATE-BACKDOOR is the form that carries an override directive.",
+		Refs: []string{
+			"https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+		},
+		Tags: []string{"prompt-injection", "backdoor"},
+	})
 )

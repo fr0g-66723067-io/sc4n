@@ -363,9 +363,44 @@ func isOpaqueByte(c byte) bool {
 	return false
 }
 
+// isWordASCII reports whether c is the kind of byte a zero-width character is
+// inserted into to hide a name: a letter, a digit or an underscore.
+func isWordASCII(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '_':
+		return true
+	}
+	return false
+}
+
+// zeroWidthRun counts the consecutive zero-width characters starting at b.
+func zeroWidthRun(b []byte) int {
+	n := 0
+	for offset := 0; offset < len(b); {
+		r, size := utf8.DecodeRune(b[offset:])
+		switch r {
+		case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD:
+			n++
+			offset += size
+			continue
+		}
+		break
+	}
+	return n
+}
+
 func isHexByte(c byte) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
+
+// maxMixedScriptBytes bounds the mixed-script check to a *value*: an identifier,
+// a token, a metadata string. A longer buffer is a document, and a document that
+// contains two scripts is a multilingual document — llama.cpp's tokenizer test
+// inputs and a ByteDance chat template are both exactly that, and both were
+// reported as homoglyph attacks before this bound.
+const maxMixedScriptBytes = 256
 
 // scanUnicodeAnomalies reports invisible, order-changing and mixed-script runs.
 //
@@ -383,6 +418,10 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 		scriptKind byte
 		firstMixed = -1
 	)
+	// prevWord records whether the rune before this one was an ASCII letter,
+	// digit or underscore: the context in which a zero-width character hides
+	// something from a reader.
+	prevWord := false
 	for offset := 0; offset < len(b); {
 		// ASCII fast path. No ASCII byte is invisible, bidi or a line separator, and
 		// the only script class ASCII can carry is Latin, so the whole rune switch
@@ -396,13 +435,19 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 					firstMixed = offset
 				}
 			}
+			prevWord = isWordASCII(c)
 			offset++
 			continue
 		}
 		r, size := utf8.DecodeRune(b[offset:])
 		switch {
 		case r == 0x200B || r == 0x200C || r == 0x200D || r == 0x2060 || r == 0xFEFF || r == 0x00AD:
-			if !reported[0] {
+			// A zero-width character inside a word hides a name from a reader; the
+			// same character between two emoji is a ZWJ grapheme join, which is
+			// ordinary text ("😶‍🌫️" is one emoji, not a hidden identifier). A run of
+			// them is never legitimate, so it is reported either way.
+			nextWord := offset+size < len(b) && b[offset+size] < utf8.RuneSelf && isWordASCII(b[offset+size])
+			if (prevWord || nextWord || zeroWidthRun(b[offset:]) >= 2) && !reported[0] {
 				reported[0] = true
 				hits = append(hits, Hit{
 					Rule:  ruleUnicode,
@@ -453,9 +498,10 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 				}
 			}
 		}
+		prevWord = false
 		offset += size
 	}
-	if scriptKind > 1 && firstMixed >= 0 {
+	if scriptKind > 1 && firstMixed >= 0 && len(b) <= maxMixedScriptBytes {
 		hits = append(hits, Hit{
 			Rule:  ruleUnicode,
 			Off:   int64(firstMixed),

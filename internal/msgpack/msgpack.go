@@ -30,8 +30,9 @@ const (
 	// stack that could overflow the scanner.
 	maxDepth = 512
 	// maxElements bounds the total number of values walked. It is the same order
-	// as the archive entry cap and stops a map declaring billions of keys from
-	// occupying the scanner even before the byte-length check fires.
+	// as the metadata-array cap (Limits.MaxArrayElements, which a caller may
+	// lower) and stops a map declaring billions of keys from occupying the
+	// scanner even before the byte-length check fires.
 	maxElements = 1 << 22
 	// sniffBudget bounds how much of a candidate the sniffer parses. A larger
 	// document is accepted if its prefix parses cleanly, because the parser runs
@@ -76,7 +77,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	if err != nil && len(data) == 0 {
 		return err
 	}
-	w := &walker{ctx: ctx, data: data, emit: true}
+	w := &walker{ctx: ctx, data: data, lim: ctx.Limits, emit: true}
 	if verr := w.value(0); verr != nil {
 		if errors.Is(verr, errCap) {
 			return nil
@@ -91,7 +92,14 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 }
 
 // sniff claims a document whose first byte is a map or array header and whose
-// bounded prefix parses without a structural error.
+// bounded prefix parses without a structural error *and* accounts for the bytes
+// it was given.
+//
+// The coverage requirement is what the shape check alone was missing: `0x90` is a
+// complete one-byte MessagePack value (an empty array), so a ten-megabyte Chromium
+// data table that happens to start with it was claimed as MessagePack and then
+// reported as 10.8 MB of trailing bytes. A sniffer MUST NOT accept a document that
+// its own parser reports as structurally invalid.
 func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	size := s.Size()
 	if size < 2 {
@@ -109,10 +117,21 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		return artifact.FormatUnknown, false
 	}
 	w := &walker{data: head, lim: l, emit: false}
-	if verr := w.value(0); verr != nil && !errors.Is(verr, errTruncated) && !errors.Is(verr, errCap) {
+	switch verr := w.value(0); {
+	case verr == nil:
+		// The value closed. That is MessagePack only if it closed at the end of
+		// the bytes read; a value that closes early and leaves the rest of the
+		// buffer behind is not this format.
+		return artifact.FormatMsgpack, w.idx == len(head)
+	case errors.Is(verr, errTruncated), errors.Is(verr, errCap):
+		// The value needs more bytes than were read, or a cap was reached while
+		// the walk was still making sense of the document: either way the bytes so
+		// far are consistent with MessagePack, and the parser has something to
+		// report about the document (a truncation, or the cap).
+		return artifact.FormatMsgpack, true
+	default:
 		return artifact.FormatUnknown, false
 	}
-	return artifact.FormatMsgpack, true
 }
 
 // isContainerHeader reports whether b is a map or array header byte. Fixints and
@@ -141,6 +160,15 @@ type walker struct {
 	elements int
 }
 
+// elementCap is the value budget for one MessagePack document: MaxArrayElements
+// when the caller set one, otherwise the package default (the same number).
+func (w *walker) elementCap() int64 {
+	if w.lim.MaxArrayElements > 0 {
+		return int64(w.lim.MaxArrayElements)
+	}
+	return maxElements
+}
+
 func (w *walker) value(depth int) error {
 	if depth > maxDepth {
 		if w.emitting() {
@@ -150,8 +178,8 @@ func (w *walker) value(depth int) error {
 	}
 	if w.emitting() {
 		w.elements++
-		if w.elements > maxElements {
-			limits.Emit(w.ctx.Sink, limits.RuleEntries, "MaxEntries", int64(w.elements), int64(maxElements), "msgpack values")
+		if cap := w.elementCap(); int64(w.elements) > cap {
+			limits.Emit(w.ctx.Sink, limits.RuleEntries, "MaxArrayElements", int64(w.elements), cap, "msgpack values")
 			return errCap
 		}
 	}
