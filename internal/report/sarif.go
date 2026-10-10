@@ -10,14 +10,18 @@ import (
 
 // SARIF 2.1.0 output.
 //
-// Two consumer details drive the shape:
+// Three consumer details drive the shape:
 //
 //   - GitHub code scanning only surfaces a result when its ruleId appears in
 //     tool.driver.rules and its level is error/warning/note, so every emitted
 //     finding's rule is included in the descriptor list, and
 //   - GitHub ranks alerts by properties.security-severity using the bands
 //     9.0+/7.0-8.9/4.0-6.9/0.1-3.9, which is why the numeric band is emitted both
-//     on the rule and on the result.
+//     on the rule and on the result, and
+//   - GitHub de-duplicates on the primaryLocationLineHash entry of
+//     partialFingerprints — "Code scanning only uses the primaryLocationLineHash"
+//     (https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support)
+//     — so that is the key every result carries, not a tool-named one.
 //
 // GitHub caps one upload at 25 000 results and a 10 MB gzipped SARIF file. sc4n
 // does not truncate: -max-findings is the caller's lever, and a run that exceeds
@@ -188,13 +192,20 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 	for _, f := range r.Findings {
 		ri, ok := index[f.RuleID]
 		if !ok {
-			// A finding whose rule is not registered would be dropped by GitHub
-			// code scanning, so register it on the fly rather than losing it.
+			// A finding whose rule is not in the registry would be dropped by
+			// GitHub code scanning, so it is described on the fly rather than
+			// lost. Every RuleID the CLI emits comes from DefineRule, so this is
+			// a programming error rather than an input shape — and GitHub's SARIF
+			// support page makes shortDescription, fullDescription and help
+			// required on a reportingDescriptor, so all three are filled in.
 			ri = len(log.Runs[0].Tool.Driver.Rules)
+			unregistered := "rule " + f.RuleID + " is not in sc4n's rule registry"
 			log.Runs[0].Tool.Driver.Rules = append(log.Runs[0].Tool.Driver.Rules, sarifRule{
 				ID:                   f.RuleID,
 				Name:                 ruleName(f.RuleID),
 				ShortDescription:     sarifText{Text: f.Title},
+				FullDescription:      &sarifText{Text: unregistered},
+				Help:                 &sarifHelp{Text: unregistered},
 				DefaultConfiguration: sarifConfig{Level: SARIFLevel(f.Severity)},
 				Properties:           sarifRuleProps{Tags: f.CWE, Precision: f.Confidence.String(), SecuritySeverity: SeverityBand(f.Severity)},
 			})
@@ -235,7 +246,12 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 				ArtifactLocation: sarifArtifact{URI: pathURI(path)},
 				Region:           region,
 			}}},
-			PartialFingerprints: map[string]string{"sc4n/v1": Fingerprint(f)},
+			// GitHub code scanning reads only the primaryLocationLineHash
+			// fingerprint for de-duplication (see the sarif-support page linked
+			// from the package header), so that is the key emitted; the value is
+			// our own stable fingerprint, prefixed with the occurrence count the
+			// format calls for. A second, tool-named key would have no reader.
+			PartialFingerprints: map[string]string{"primaryLocationLineHash": "1:" + Fingerprint(f)},
 			Properties: sarifResultProp{
 				SecuritySeverity: SeverityBand(f.Severity),
 				Confidence:       f.Confidence.String(),

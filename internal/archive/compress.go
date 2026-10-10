@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -84,9 +85,13 @@ func DetectCompressor(s source.Source, l limits.Limits) (Compressor, bool) {
 	if s == nil || s.Size() < 2 {
 		return CompressorNone, false
 	}
+	// 32 bytes: enough for the widest header any check here inspects — the
+	// legacy joblib frame's 21-byte header plus the two zlib bytes after it. A
+	// 16-byte probe could never see that far, so a real legacy frame was not
+	// detected at all.
 	n := s.Size()
-	if n > 16 {
-		n = 16
+	if n > 32 {
+		n = 32
 	}
 	b, err := s.Bytes(0, n)
 	if len(b) < 2 {
@@ -114,17 +119,47 @@ func detectCompressorBytes(b []byte) (Compressor, bool) {
 		return CompressorBzip2, true
 	case len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b:
 		return CompressorGzip, true
-	case len(b) >= 2 && b[0] == 'Z' && b[1] == 'F':
+	case len(b) >= 2 && b[0] == 'Z' && b[1] == 'F' && JoblibLegacyShape(b):
 		return CompressorZlibJoblibLegacy, true
-	case len(b) >= 2 && b[0] == 0x78 && b[0]&0x0f == 8 && (int(b[0])<<8|int(b[1]))%31 == 0:
-		// zlib's two-byte header: CMF low nibble 8 (deflate) and a valid
-		// FCHECK so that CMF*256+FLG is a multiple of 31. This is the check
-		// described in RFC 1950 rather than a fixed list of FLG bytes.
+	case len(b) >= 2 && zlibShape(b):
+		// The check described in RFC 1950 rather than a fixed list of FLG bytes.
 		return CompressorZlib, true
 	case lzmaShape(b):
 		return CompressorLzma, true
 	}
 	return CompressorNone, false
+}
+
+// JoblibLegacyShape validates the frame joblib wrote before 0.10 (write_zfile in
+// joblib 0.9.4): "ZF", then the *uncompressed* length as a hex string with a "0x"
+// prefix, space-padded to 19 characters, then a zlib stream. The two magic bytes
+// are ordinary text, so a file that merely starts with "ZF" must not be called a
+// joblib archive: the header and the zlib stream both have to be plausible.
+func JoblibLegacyShape(b []byte) bool {
+	// "ZF" + len("0x10000000000000000") = 21; a joblib <= 0.8.4 header written
+	// under Python 2 is one byte wider, which is why the zlib stream is looked
+	// for at either offset.
+	const header = 21
+	if len(b) < header+2 {
+		return false
+	}
+	hexLen := strings.TrimRight(string(b[2:header]), " ")
+	if len(hexLen) < 3 || hexLen[0] != '0' || hexLen[1] != 'x' {
+		return false
+	}
+	for i := 2; i < len(hexLen); i++ {
+		c := hexLen[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return zlibShape(b[header:]) || (b[header] == ' ' && zlibShape(b[header+1:]))
+}
+
+// zlibShape is RFC 1950's two-byte check: CMF low nibble 8 (deflate) and a valid
+// FCHECK, so that CMF*256+FLG is a multiple of 31.
+func zlibShape(b []byte) bool {
+	return len(b) >= 2 && b[0]&0x0f == 8 && (int(b[0])<<8|int(b[1]))%31 == 0
 }
 
 // lzmaShape applies the header sanity check the plan requires: the 2-byte "\x5d\x00"

@@ -473,7 +473,9 @@ func TestCompressorDetection(t *testing.T) {
 		{[]byte{0x28, 0xb5, 0x2f, 0xfd}, archive.CompressorZstd},
 		{[]byte("7z\xbc\xaf\x27\x1c"), archive.CompressorSevenZip},
 		{[]byte("Rar!\x1a\x07\x00"), archive.CompressorRar},
-		{[]byte("ZF\x00"), archive.CompressorZlibJoblibLegacy},
+		// A legacy joblib frame is a 21-byte header and a zlib stream, not the
+		// two magic bytes: "ZF" alone is ordinary text.
+		{append([]byte("ZF"+hexLen(3)), zlibBytes(t, []byte("abc"))...), archive.CompressorZlibJoblibLegacy},
 	}
 	for _, c := range cases {
 		got, ok := archive.DetectCompressor(source.Mem("x", c.b), limits.Default())
@@ -483,6 +485,9 @@ func TestCompressorDetection(t *testing.T) {
 	}
 	if archive.Supported(archive.CompressorZstd) || archive.Supported(archive.CompressorXz) {
 		t.Fatal("zstd/xz must not be supported")
+	}
+	if got, ok := archive.DetectCompressor(source.Mem("x", []byte("ZF\x00")), limits.Default()); ok {
+		t.Fatalf("DetectCompressor(ZF NUL) = %v, want no detection", got)
 	}
 	if !archive.Supported(archive.CompressorGzip) || !archive.Supported(archive.CompressorBzip2) {
 		t.Fatal("gzip/bzip2 must be supported")
@@ -880,4 +885,42 @@ func TestZipLocalHeaderFieldsAreCompared(t *testing.T) {
 	clean := scanZip(t, "clean.zip", base, limits.Default())
 	forbid(t, clean, "SC4N-ARCHIVE-NAME-MISMATCH")
 	forbid(t, clean, "SC4N-ARCHIVE-MEMBER-ERROR")
+}
+
+// TestJoblibLegacyShape: the "ZF" frame is 21 bytes of header — the magic, the
+// uncompressed length as a padded hex string — and then a zlib stream. Two ASCII
+// letters are not enough to call a file a joblib archive.
+func TestJoblibLegacyShape(t *testing.T) {
+	body := []byte("hello joblib legacy")
+	zbody := zlibBytes(t, body)
+	frame := func(l int) []byte {
+		return append([]byte("ZF"+hexLen(l)), zbody...)
+	}
+	for _, tc := range []struct {
+		name string
+		in   []byte
+		want bool
+	}{
+		{"real frame", frame(len(body)), true},
+		{"python2 wide header", append([]byte("ZF"+"0x14"+strings.Repeat(" ", 16)), zbody...), true},
+		{"text starting with ZF", []byte("ZFooter notes for the release\n"), false},
+		{"magic only", []byte("ZF"), false},
+		{"header without a stream", append([]byte("ZF"+hexLen(4)), 'x', 'y'), false},
+		{"no hex length", append([]byte("ZF"+"not-hex-here"), zbody...), false},
+		{"zlib body but no header", append([]byte("ZF"), body...), false},
+	} {
+		if got := archive.JoblibLegacyShape(tc.in); got != tc.want {
+			t.Errorf("%s: JoblibLegacyShape = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// hexLen renders n the way joblib's write_zfile did: "0x…" padded with spaces to
+// the 19 characters a 64-bit length needs.
+func hexLen(n int) string {
+	s := "0x" + strconv.FormatInt(int64(n), 16)
+	for len(s) < 19 {
+		s += " "
+	}
+	return s
 }

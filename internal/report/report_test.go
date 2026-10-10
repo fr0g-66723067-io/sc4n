@@ -314,8 +314,10 @@ func TestSARIFShape(t *testing.T) {
 		if res.Properties.SecuritySeverity == "" {
 			t.Fatalf("result %s has no security-severity property", res.RuleID)
 		}
-		if res.PartialFingerprints["sc4n/v1"] == "" {
-			t.Fatalf("result %s has no partial fingerprint", res.RuleID)
+		// GitHub code scanning de-duplicates on primaryLocationLineHash, so that
+		// is the key that must carry a value.
+		if res.PartialFingerprints["primaryLocationLineHash"] == "" {
+			t.Fatalf("result %s has no primaryLocationLineHash fingerprint", res.RuleID)
 		}
 	}
 	levels := map[string]string{}
@@ -768,5 +770,18 @@ func TestDeclaredRowsAreNotCountedAsScanned(t *testing.T) {
 		if a.Path == "m.bin" && a.NotScanned {
 			t.Fatal("a scanned row was marked NotScanned")
 		}
+	}
+}
+
+// TestParseSeverityAcceptsTheEmptyString: -fail-on's documented default is the
+// zero value, so an explicitly empty value must mean info rather than a usage
+// error. The doc comment said so while the loop could never match "".
+func TestParseSeverityAcceptsTheEmptyString(t *testing.T) {
+	sev, err := ParseSeverity("")
+	if err != nil {
+		t.Fatalf(`ParseSeverity(""): %v`, err)
+	}
+	if sev != SeverityInfo {
+		t.Fatalf(`ParseSeverity("") = %v, want info`, sev)
 	}
 }

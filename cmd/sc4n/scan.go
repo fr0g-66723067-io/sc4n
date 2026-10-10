@@ -105,6 +105,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	sev, _ := report.ParseSeverity(f.failOn)
+	warnInertFlags(f, stderr)
 
 	l, err := buildLimits(f)
 	if err != nil {
@@ -276,6 +277,22 @@ func reportLimits(l limits.Limits) report.Limits {
 }
 
 // render writes rep in the requested format.
+// warnInertFlags prints one line for a flag that has no effect in this
+// invocation, so a caller who sets it does not believe it did something. None of
+// these is a usage error: -timings with -format sarif is a harmless mistake, and
+// exiting non-zero would break a wrapper script that passes a fixed flag set.
+func warnInertFlags(f scanFlags, w io.Writer) {
+	if f.timings && f.format != "json" && f.format != "text" {
+		fmt.Fprintf(w, "sc4n: -timings has no effect with -format %s (the timings block is part of json and text)\n", f.format)
+	}
+	if f.hfCacheDir != "" && !f.hfCache {
+		fmt.Fprintln(w, "sc4n: -hf-cache-dir has no effect without -hf-cache")
+	}
+	if f.name != "" && !f.stdin {
+		fmt.Fprintln(w, "sc4n: -name has no effect without -stdin")
+	}
+}
+
 // collectorLimit is the finding cap the collector is created with. With a baseline
 // it is unlimited, because suppression has to run before the cap.
 func collectorLimit(maxFindings, limitsDefault int, baseline map[string]bool) int {

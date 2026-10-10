@@ -285,10 +285,10 @@ func Sniff(s source.Source, l limits.Limits) (Format, string) {
 // when the *sniffed* format has no plausible relationship with any meaning of the
 // extension.
 var extensions = map[string][]Format{
-	"pkl":         {FormatPickle, FormatJoblib},
-	"pickle":      {FormatPickle, FormatJoblib},
+	"pkl":         {FormatPickle, FormatJoblib, FormatZlibJoblibLegacy},
+	"pickle":      {FormatPickle, FormatJoblib, FormatZlibJoblibLegacy},
 	"pcl":         {FormatPickle},
-	"joblib":      {FormatJoblib},
+	"joblib":      {FormatJoblib, FormatZlibJoblibLegacy},
 	"pt":          {FormatTorchNew, FormatTorchLegacy, FormatTorchScript, FormatPT2, FormatPickle, FormatSevenZip, FormatZip, FormatNPZ},
 	"pth":         {FormatTorchNew, FormatTorchLegacy, FormatPickle, FormatPython},
 	"ptl":         {FormatTorchScript, FormatPTE, FormatPickle},

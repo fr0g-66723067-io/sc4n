@@ -22,8 +22,10 @@
 // `case` and `type`.
 //
 // Tokens are offset views into the source (Token is 12 bytes, holding no string),
-// so lexing allocates only the token slice. String literal *values* are unescaped
-// lazily and under a cap by the callers that need a value, never by the lexer.
+// so lexing allocates only the token slice and the indentation stack. String
+// literal *values* are unescaped lazily and under a cap by the callers that need a
+// value, never by the lexer, and an identifier's keyword test uses the
+// allocation-free m[string(b)] form.
 package pysrc
 
 // Kind classifies a token. It is deliberately coarse: the rules care about
@@ -334,9 +336,10 @@ func (l *lexer) scanToken() int {
 		for j < len(l.src) && isIdentCont(l.src[j]) {
 			j++
 		}
-		word := string(l.src[l.i:j])
 		k := TokName
-		if keywords[word] {
+		// The keyword test uses the compiler's allocation-free m[string(b)]
+		// form rather than a named string, so an identifier costs no allocation.
+		if keywords[string(l.src[l.i:j])] {
 			k = TokKeyword
 		}
 		l.emit(k, l.i, j)

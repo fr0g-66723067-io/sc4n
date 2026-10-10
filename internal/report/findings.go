@@ -27,9 +27,9 @@ const (
 	SeverityCritical
 )
 
-// severityNames is indexed by Severity. "unknown" is unreachable for a
-// well-formed Finding and exists so that a zero-value Finding prints something
-// honest rather than "info".
+// severityNames is indexed by Severity. String reports "unknown" for an index
+// outside the array, which no well-formed Finding produces; the zero value is
+// SeverityInfo and prints "info".
 var severityNames = [...]string{"info", "low", "medium", "high", "critical"}
 
 func (s Severity) String() string {
@@ -39,9 +39,13 @@ func (s Severity) String() string {
 	return severityNames[s]
 }
 
-// ParseSeverity accepts the names produced by String, plus the empty string
-// which means the zero value (info).
+// ParseSeverity accepts the names produced by String, plus the empty string,
+// which means the zero value (info) — so an unset -fail-on is the documented
+// default rather than a usage error.
 func ParseSeverity(s string) (Severity, error) {
+	if s == "" {
+		return SeverityInfo, nil
+	}
 	for i, n := range severityNames {
 		if n == s {
 			return Severity(i), nil
