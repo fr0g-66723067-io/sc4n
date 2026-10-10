@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/policy"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/scan"
 )
@@ -30,6 +31,7 @@ type scanFlags struct {
 	root        string
 	stdin       bool
 	name        string
+	baseline    string
 	deepStats   bool
 	timings     bool
 	quiet       bool
@@ -52,6 +54,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&f.maxFindings, "max-findings", 100000, "finding cap")
 	fs.DurationVar(&f.timeout, "timeout", 0, "bound the whole scan (e.g. 10m; 0 = unbounded)")
 	fs.StringVar(&f.root, "root", "", "containment root for path-shaped values")
+	fs.StringVar(&f.baseline, "baseline", "", "suppress findings already present in a previous JSON report")
 	fs.BoolVar(&f.stdin, "stdin", false, "scan one artifact from stdin")
 	fs.StringVar(&f.name, "name", "", "artifact name to use with -stdin")
 	fs.BoolVar(&f.deepStats, "deep-stats", false, "enable informational weight-statistics findings")
@@ -114,11 +117,21 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
+	suppressed := 0
+	if f.baseline != "" {
+		base, err := policy.LoadBaseline(f.baseline)
+		if err != nil {
+			fmt.Fprintf(stderr, "sc4n: -baseline: %v\n", err)
+			return exitUsage
+		}
+		suppressed = res.Collector.Suppress(base)
+	}
+
 	var timings map[string]int64
 	if f.timings {
 		timings = res.Timings
 	}
-	rep := report.Build(report.Tool{Name: "sc4n", Version: version}, f.root, res.Artifacts, res.Collector, reportLimits(l), timings, 0)
+	rep := report.Build(report.Tool{Name: "sc4n", Version: version}, f.root, res.Artifacts, res.Collector, reportLimits(l), timings, suppressed)
 
 	w := stdout
 	var file *os.File
@@ -152,20 +165,12 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		// A path the user named could not be expanded. Reported separately from
 		// findings because it means part of the requested scope was not scanned.
 		fmt.Fprintf(stderr, "sc4n: %v\n", runErr)
-		return exitUnreadable
 	}
-	if res.Unreadable > 0 {
-		fmt.Fprintf(stderr, "sc4n: %d path(s) could not be opened\n", res.Unreadable)
-		return exitUnreadable
+	v := policy.Decide(rep.Findings, sev, res.Unreadable)
+	if v.Code == policy.CodeFindings || v.Code == policy.CodeUnreadable {
+		fmt.Fprintf(stderr, "sc4n: %s\n", v.Reason)
 	}
-	if rep.Findings != nil {
-		for _, fd := range rep.Findings {
-			if fd.Severity.AtLeast(sev) {
-				return exitFindings
-			}
-		}
-	}
-	return exitClean
+	return v.Code
 }
 
 func buildLimits(f scanFlags) (limits.Limits, error) {

@@ -233,3 +233,35 @@ func TestParseSize(t *testing.T) {
 		}
 	}
 }
+
+// TestBaselineGate is the plan's exit-code gate #7: a second run with the first
+// run's report as a baseline must exit 0 and say how many findings it suppressed.
+func TestBaselineGate(t *testing.T) {
+	fixtures := filepath.Join("..", "..", "testdata", "fixtures")
+	if _, err := os.Stat(fixtures); err != nil {
+		t.Skip("fixture corpus absent")
+	}
+	base := filepath.Join(t.TempDir(), "base.json")
+
+	var out, errOut bytes.Buffer
+	if code := run([]string{"scan", "-format", "json", "-out", base, fixtures}, &out, &errOut); code != exitFindings {
+		t.Fatalf("first run exited %d, want %d (stderr: %s)", code, exitFindings, errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code := run([]string{"scan", "-baseline", base, fixtures}, &out, &errOut)
+	if code != exitClean {
+		t.Fatalf("baseline run exited %d, want %d\nstderr: %s\nstdout: %s", code, exitClean, errOut.String(), out.String())
+	}
+	if !strings.Contains(out.String(), "suppressed: ") {
+		t.Fatalf("the summary line does not report the suppressed count: %q", out.String())
+	}
+
+	// A baseline that cannot be read is a usage error, not a clean run.
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"scan", "-baseline", filepath.Join(base, "nope.json"), fixtures}, &out, &errOut); code != exitUsage {
+		t.Fatalf("unreadable baseline exited %d, want %d", code, exitUsage)
+	}
+}
