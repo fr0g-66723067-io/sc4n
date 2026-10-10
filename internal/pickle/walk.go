@@ -97,6 +97,8 @@ func Walk(ctx *artifact.Ctx, s source.Source, opt Options) (*Stream, error) {
 		globals: map[string]*Global{},
 		structs: map[string]*structStat{},
 		once:    map[string]bool{},
+
+		memoOverwriteOff: -1,
 	}
 	w.run()
 	w.flush()
@@ -150,6 +152,10 @@ type walker struct {
 	firstSegmentDone bool
 	// windowStart is the offset the stream was located at (0 for a clean start).
 	windowStart int
+	// memoOverwriteOff is the offset of the first memo rebinding, or -1 when
+	// none was seen. flush emits the one SC4N-PICKLE-MEMO-ALIAS finding from it,
+	// so the evidence carries the final rebinding count.
+	memoOverwriteOff int64
 }
 
 const (
@@ -747,7 +753,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if overwrote {
-			w.emitMemoAlias(int64(off))
+			w.noteMemoOverwrite(int64(off))
 		}
 
 	case opMEMOIZE:
@@ -758,7 +764,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if overwrote, ok := w.mm.put(idx, top); ok && overwrote {
-			w.emitMemoAlias(int64(off))
+			w.noteMemoOverwrite(int64(off))
 		}
 
 	case opEXT1, opEXT2, opEXT4:
@@ -955,16 +961,26 @@ func looksLikeCode(s string) string {
 	return ""
 }
 
-// emitMemoAlias reports a memo rebinding or a name bound in several slots.
-func (w *walker) emitMemoAlias(off int64) {
-	w.emitOnce("memo-overwrite:"+strconv.Itoa(w.mm.overwrites), ruleMemoAlias, off,
-		fmt.Sprintf("memo slot written more than once (%d rebindings so far); allowlist-by-name scanners see one binding per name, and ShadowPickle uses a rebinding to present an allowlisted name while binding something else", w.mm.overwrites))
+// noteMemoOverwrite records that a memo slot was written twice. The finding is
+// emitted once, from flush, so the evidence carries the final count rather than
+// the count at the first rebinding — and so a stream of rebindings produces one
+// finding instead of one per rebinding. (The emit key used to embed
+// w.mm.overwrites, which made it unique per rebinding: a 400 KB stream of
+// BINPUT 0 produced 100000 findings and grew w.once by as many entries.)
+func (w *walker) noteMemoOverwrite(off int64) {
+	if w.memoOverwriteOff < 0 {
+		w.memoOverwriteOff = off
+	}
 }
 
 // flush emits the findings that are decisions about the whole stream.
 func (w *walker) flush() {
 	if w.silent {
 		return
+	}
+	if w.mm.overwrites > 0 {
+		w.sink.Emit(ruleMemoAlias, w.memoOverwriteOff,
+			fmt.Sprintf("memo slot written more than once (%d rebinding(s)); allowlist-by-name scanners see one binding per name, and ShadowPickle uses a rebinding to present an allowlisted name while binding something else", w.mm.overwrites))
 	}
 	// Names bound in more than one memo slot.
 	for name, slots := range w.mm.byGlobal {

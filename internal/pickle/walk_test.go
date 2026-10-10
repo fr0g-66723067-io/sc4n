@@ -769,6 +769,34 @@ func TestMemoAliasNeedsDistinctSlots(t *testing.T) {
 	}
 }
 
+// TestMemoOverwriteEmitsOncePerStream pins the bounded-emission fix: the emit key
+// used to embed the rebinding counter, which made it unique per rebinding, so a
+// 400 KB stream of BINPUT 0 produced 100000 findings (479 MB resident) instead of
+// one. The single finding must still carry the final count.
+func TestMemoOverwriteEmitsOncePerStream(t *testing.T) {
+	data := []byte{opPROTO, 2, opNONE}
+	for range 2000 {
+		data = append(data, opBINPUT, 0)
+	}
+	data = append(data, opSTOP)
+
+	_, fs := walk(t, data)
+	n := 0
+	var ev string
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-MEMO-ALIAS" {
+			n++
+			ev = f.Evidence
+		}
+	}
+	if n != 1 {
+		t.Fatalf("SC4N-PICKLE-MEMO-ALIAS emitted %d times, want 1", n)
+	}
+	if !strings.Contains(ev, "1999 rebinding(s)") {
+		t.Fatalf("evidence = %q, want the final rebinding count", ev)
+	}
+}
+
 // TestSharedEmitKeysKeepDistinctFindings pins the F18 fix: the four opcode pairs
 // that share a verb used to collapse into one finding, and a code string's key
 // omitted its offset.
