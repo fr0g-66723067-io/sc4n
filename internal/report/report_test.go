@@ -562,6 +562,62 @@ func TestCycloneDXIsWellFormedAndDeterministic(t *testing.T) {
 	}
 }
 
+// TestCycloneDXStatesSuppressionAndDrops is the regression for the one encoder
+// that could state neither: a baselined BOM whose vulnerabilities are simply
+// absent is indistinguishable from a clean scan, and CycloneDX had no
+// metadata.properties at all.
+func TestCycloneDXStatesSuppressionAndDrops(t *testing.T) {
+	decode := func(t *testing.T, buf *bytes.Buffer) map[string]string {
+		t.Helper()
+		var doc struct {
+			Metadata struct {
+				Properties []struct {
+					Name  string `json:"name"`
+					Value string `json:"value"`
+				} `json:"properties"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		for _, p := range doc.Metadata.Properties {
+			got[p.Name] = p.Value
+		}
+		return got
+	}
+
+	// One finding kept, one dropped by the cap, three suppressed by a baseline.
+	c := NewCollector(1)
+	s := c.For("x")
+	s.Emit(testRuleInfo, 0, "a")
+	s.Emit(testRuleInfo, 1, "b")
+	var buf bytes.Buffer
+	if err := Build(Tool{Name: "sc4n", Version: "t"}, "", nil, c, Limits{}, nil, 3).WriteCycloneDX(&buf); err != nil {
+		t.Fatal(err)
+	}
+	got := decode(t, &buf)
+	if got["sc4n:suppressed"] != "3" {
+		t.Fatalf("sc4n:suppressed = %q, want 3 (properties %v)", got["sc4n:suppressed"], got)
+	}
+	if got["sc4n:dropped"] != "1" {
+		t.Fatalf("sc4n:dropped = %q, want 1 (properties %v)", got["sc4n:dropped"], got)
+	}
+
+	// Both are stated even when zero, so a reader can tell "nothing was
+	// suppressed" from "this encoder does not say".
+	c2 := NewCollector(0)
+	c2.For("x").Emit(testRuleInfo, 0, "a")
+	var buf2 bytes.Buffer
+	if err := Build(Tool{Name: "sc4n", Version: "t"}, "", nil, c2, Limits{}, nil, 0).WriteCycloneDX(&buf2); err != nil {
+		t.Fatal(err)
+	}
+	got = decode(t, &buf2)
+	if got["sc4n:suppressed"] != "0" || got["sc4n:dropped"] != "0" {
+		t.Fatalf("zero suppression facts are not stated: %v", got)
+	}
+}
+
 // TestCycloneDXHashScopeIsNotAssumed: a CycloneDX hash is a claim about the whole
 // component, so only a digest whose scope says "full" may be published as one. An
 // absent scope means the producer did not say, and a whole-file claim must not be

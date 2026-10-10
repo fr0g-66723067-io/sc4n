@@ -124,6 +124,16 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 		bom.Metadata.Properties = append(bom.Metadata.Properties,
 			cdxProperty{Name: "sc4n:unreadablePaths", Value: strconv.Itoa(r.Unreadable)})
 	}
+	// Suppression and the finding cap have to be stated here for the same reason
+	// the SARIF run properties state them: a BOM whose vulnerabilities are simply
+	// absent is indistinguishable from a clean scan. CycloneDX was the only
+	// encoder that could not say either, so a baselined run silently lost its
+	// findings. Both are always present — the SARIF run properties carry them
+	// unconditionally too — so a reader can tell "nothing was suppressed" from
+	// "this encoder does not say".
+	bom.Metadata.Properties = append(bom.Metadata.Properties,
+		cdxProperty{Name: "sc4n:suppressed", Value: strconv.Itoa(r.Suppressed)},
+		cdxProperty{Name: "sc4n:dropped", Value: strconv.Itoa(r.Dropped)})
 
 	refs := make(map[string]string, len(r.Artifacts))
 	for _, a := range r.Artifacts {
