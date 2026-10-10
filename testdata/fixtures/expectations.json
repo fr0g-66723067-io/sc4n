@@ -7,9 +7,16 @@
         "SC4N-PICKLE-REDUCE"
       ],
       "forbid": [
-        "SC4N-PARSE-FAILED"
+        "SC4N-PARSE-FAILED",
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
       ],
-      "notes": "A zip carrying a zip64 end-of-central-directory record with non-saturated 32-bit fields (Python's zipfile and torch.save write this shape) and the HF Trainer member layout training_args/{data.pkl,byteorder}. The prefix base must come from the record that follows the directory, not from the EOCD, or the archive is reported unparseable and the members are never opened. Step 4 adds SC4N-FORMAT-EXTENSION-MISMATCH to Forbid once .bin accepts a zip."
+      "notes": "A zip carrying a zip64 end-of-central-directory record with non-saturated 32-bit fields (Python's zipfile and torch.save write this shape) and the HF Trainer member layout training_args/{data.pkl,byteorder}. The prefix base must come from the record that follows the directory, not from the EOCD, or the archive is reported unparseable and the members are never opened. Both the parse failure and the extension mismatch are forbidden: .bin accepts a zip because torch.load does."
+    },
+    "bin_gzip.bin": {
+      "expect": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "The boundary of the same row: a gzip stream named .bin is not something torch.load or any other .bin loader reads, so listing a zip for .bin must not excuse it."
     },
     "card_hidden/README.md": {
       "expect": [
@@ -921,6 +928,14 @@
         "SC4N-CODE-TAINT-SHELL"
       ],
       "notes": "TorchScript: code/model.py is Python stored as data and data.pkl is a pickle; both must reach their engines."
+    },
+    "torchzip/training_args.bin": {
+      "expect": null,
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH",
+        "SC4N-PARSE-FAILED"
+      ],
+      "notes": "The HF Trainer shape: a zip of training_args/{data.pkl,byteorder} named .bin. torch.load reads it and the archive reader opens its members, so the extension must not be reported as a mismatch. The member here is the benign state dict, so the fixture is about the container and nothing else."
     },
     "unsupported.zst": {
       "expect": [

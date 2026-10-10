@@ -26,6 +26,11 @@ func init() {
 			return torchExpectations(), torchBenignExpectations()
 		},
 	})
+	register(contributor{
+		name:         "bin-zip",
+		fixtures:     binZipFixtures,
+		expectations: func() (malicious, benign map[string]expectation) { return binZipExpectations(), nil },
+	})
 }
 
 func torchFixtures(f *fixtureSet) {
@@ -188,6 +193,38 @@ func torchBenignExpectations() map[string]expectation {
 		"benign/torch_clean.pt": {
 			Notes: "torch.save's own pickle for one F32 tensor plus a storage member. The false-positive " +
 				"gate for the whole torch path: the shape rule is info, so nothing high or critical fires.",
+		},
+	}
+}
+
+// binZipFixtures writes the .bin/.pth container fixtures.
+//
+// HF's Trainer writes training_args.bin as torch.save's zip, with the members
+// under a training_args/ prefix, and a torch-saved .pth dict of tensors is the
+// same container. Both extensions now list a zip, so the file is read rather than
+// reported as contradicting its name; the container the loader cannot read at all
+// (a gzip stream named .bin) must still be reported.
+func binZipFixtures(f *fixtureSet) {
+	f.add("torchzip/training_args.bin", arcZip([]arcZipSpec{
+		{name: "training_args/data.pkl", data: benignStateDict(), method: 0},
+		{name: "training_args/byteorder", data: []byte("little"), method: 0},
+	}))
+	f.add("bin_gzip.bin", arcGzip([]byte("plain training args\n")))
+}
+
+func binZipExpectations() map[string]expectation {
+	return map[string]expectation{
+		"torchzip/training_args.bin": {
+			Forbid: []string{"SC4N-FORMAT-EXTENSION-MISMATCH", "SC4N-PARSE-FAILED"},
+			Notes: "The HF Trainer shape: a zip of training_args/{data.pkl,byteorder} named .bin. " +
+				"torch.load reads it and the archive reader opens its members, so the extension " +
+				"must not be reported as a mismatch. The member here is the benign state dict, so " +
+				"the fixture is about the container and nothing else.",
+		},
+		"bin_gzip.bin": {
+			Expect: []string{"SC4N-FORMAT-EXTENSION-MISMATCH"},
+			Notes: "The boundary of the same row: a gzip stream named .bin is not something torch.load " +
+				"or any other .bin loader reads, so listing a zip for .bin must not excuse it.",
 		},
 	}
 }

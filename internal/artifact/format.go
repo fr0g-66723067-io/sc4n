@@ -302,20 +302,27 @@ func Sniff(s source.Source, l limits.Limits) (Format, string) {
 // The same does not hold for the pickle extensions: pickle.load does not
 // transparently decompress, so a .pkl that is a gzip stream really does contradict
 // its name and stays reported.
+//
+// ".bin" and ".pth" list a zip for the same reason .pt does: torch.save's own
+// serialisation is a zip, HF's Trainer writes training_args.bin as a zip of
+// training_args/{data.pkl,byteorder}, and a saved .pth dict of tensors is the same
+// container. The archive reader walks the members, so the members' own findings are
+// what matters; calling the file a mismatch for being what torch wrote was a false
+// positive on 33 files of the HF campaign.
 var extensions = map[string][]Format{
 	"pkl":         {FormatPickle, FormatJoblib, FormatZlibJoblibLegacy},
 	"pickle":      {FormatPickle, FormatJoblib, FormatZlibJoblibLegacy},
 	"pcl":         {FormatPickle},
 	"joblib":      {FormatJoblib, FormatZlibJoblibLegacy, FormatZlib, FormatGzip, FormatBzip2, FormatXz, FormatLzma, FormatLz4},
 	"pt":          {FormatTorchNew, FormatTorchLegacy, FormatTorchScript, FormatPT2, FormatPickle, FormatSevenZip, FormatZip, FormatNPZ},
-	"pth":         {FormatTorchNew, FormatTorchLegacy, FormatPickle, FormatPython},
+	"pth":         {FormatTorchNew, FormatTorchLegacy, FormatPickle, FormatZip, FormatPython},
 	"ptl":         {FormatTorchScript, FormatPTE, FormatPickle},
 	"pt2":         {FormatPT2, FormatZip},
 	"pte":         {FormatPTE},
 	"ckpt":        {FormatTorchNew, FormatTorchLegacy, FormatPickle, FormatZip, FormatTFCheckpoint},
 	"npy":         {FormatNPY},
 	"npz":         {FormatNPZ, FormatZip},
-	"bin":         {FormatSafetensors, FormatPickle, FormatNative, FormatText},
+	"bin":         {FormatSafetensors, FormatPickle, FormatTorchNew, FormatZip, FormatNative, FormatText},
 	"safetensors": {FormatSafetensors},
 	"gguf":        {FormatGGUF},
 	"onnx":        {FormatONNX},

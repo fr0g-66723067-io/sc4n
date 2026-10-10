@@ -462,14 +462,15 @@ func archiveExpectations() (map[string]expectation, map[string]expectation) {
 		},
 		"archive/training_args_zip64.bin": {
 			Expect: []string{"SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"},
-			Forbid: []string{"SC4N-PARSE-FAILED"},
+			Forbid: []string{"SC4N-PARSE-FAILED", "SC4N-FORMAT-EXTENSION-MISMATCH"},
 			Notes: "A zip carrying a zip64 end-of-central-directory record with " +
 				"non-saturated 32-bit fields (Python's zipfile and torch.save write " +
 				"this shape) and the HF Trainer member layout " +
 				"training_args/{data.pkl,byteorder}. The prefix base must come from the " +
 				"record that follows the directory, not from the EOCD, or the archive " +
-				"is reported unparseable and the members are never opened. Step 4 adds " +
-				"SC4N-FORMAT-EXTENSION-MISMATCH to Forbid once .bin accepts a zip.",
+				"is reported unparseable and the members are never opened. Both the " +
+				"parse failure and the extension mismatch are forbidden: .bin accepts a " +
+				"zip because torch.load does.",
 		},
 	}
 	benign := map[string]expectation{
