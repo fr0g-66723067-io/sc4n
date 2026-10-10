@@ -183,7 +183,8 @@ today, with the honest gaps marked.
 |---|---|---|---|
 | pickle walk, opcode-dense state_dict (4000 entries × 256 B) | ≥ 300 MB/s/core | **359 MB/s**, 14719 allocs/1.2 MB | per-opcode cost, not per-byte |
 | pickle walk, blob-dense (16 × 64 KiB constants) | — | **20 GB/s** | this is the shape a real torch storage pickle has |
-| byte histogram / entropy (full file) | ≥ 1 GB/s/core | **1.65 GB/s**, 0 allocs | the full-file pass |
+| entropy pass (256-bin count, full file) | ≥ 1 GB/s/core | **1.44 GB/s**, 0 allocs | the full-file pass, `bytescan.Entropy` |
+| byte-class histogram (tensor body / prose) | ≥ 1 GB/s/core | **0.10 / 0.53 GB/s**, 0 allocs | **not met**, and no detector calls it: the SIMD experiment's kernel, kept for the record |
 | indicator engine over prose + indicators | ≥ 1 GB/s/core | **131 MB/s** | **not met** — see below |
 | — of which: Aho–Corasick literals | — | 220 MB/s | one dependent load chain per byte |
 | — of which: Unicode anomaly walk | — | 550 MB/s | ASCII fast path, `utf8.DecodeRune` only for non-ASCII |
@@ -196,7 +197,7 @@ today, with the honest gaps marked.
 ### The one budget that is not met, and why
 
 The plan asked for a full-file string/entropy scan at ≥ 1 GB/s per core. The
-histogram meets it (1.65 GB/s). The indicator engine does not: a byte-at-a-time
+entropy pass meets it (1.44 GB/s). The indicator engine does not: a byte-at-a-time
 Aho–Corasick walk is a *dependent* chain — the transition for byte *i+1* cannot
 start until byte *i*'s table load has completed — and that chain costs about 4.5 ns
 per byte on this CPU regardless of how the table is laid out. The obvious encoding
@@ -209,9 +210,10 @@ scanners that were *slower* than the automaton.
 What is not on that path, and why the end-to-end number is what it is: the
 indicator engine runs over *text* — metadata values, config JSON, source, cards,
 templates — which is tens of megabytes in a real repository, while the tensor
-bodies that make up 99% of a checkpoint are handled by the histogram and by
-bounded header parses. That is why 13 GiB scans in 1.25 s even though the string
-engine is 8x off its per-core target. Closing the gap needs SIMD literal matching
+bodies that make up 99% of a checkpoint are only ever streamed for the digest:
+their headers are parsed and bounded, and a weight statistic is computed over a
+sample only when `-deep-stats` is passed. That is why 13 GiB scans in 1.25 s even
+though the string engine is 8x off its per-core target. Closing the gap needs SIMD literal matching
 (a Teddy/FDR-style nibble-shuffle engine), which is a project in itself and is
 recorded here rather than pretended away.
 
@@ -243,10 +245,13 @@ build tag with a pure-stdlib counterpart and each shipped only if `make bench`
 showed at least 1.5× on its own kernel. **Neither is shipped**, and the reasons are
 measurements rather than opinions:
 
-- **SIMD byte-class histogram** (`goexperiment.simd`, `simd/archsimd`): the pure-Go
-  histogram already runs at 1.13 GB/s, and the string engine's bottleneck is the
-  automaton's dependent load chain, which a histogram kernel does not touch. There
-  was no kernel for it to accelerate by 1.5×.
+- **SIMD byte-class histogram** (`goexperiment.simd`, `simd/archsimd`): the kernel
+  it would accelerate has no caller. No detector reads the byte-class histogram —
+  the entropy pass over the same bytes is `bytescan.Entropy`, whose 256-bin count
+  runs at 1.44 GB/s — and the string engine's bottleneck is the automaton's
+  dependent load chain, which a histogram kernel does not touch. Measured, the
+  histogram itself is 0.10 GB/s on tensor-body bytes and 0.53 GB/s on prose, so
+  there was no kernel for it to accelerate by 1.5× on the path that runs.
 - **`encoding/json/v2` header decoding** (`goexperiment.jsonv2`): the header decode
   is microseconds per artifact against a scan dominated by I/O and hashing, so no
   end-to-end win was measurable.

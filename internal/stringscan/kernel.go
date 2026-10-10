@@ -3,7 +3,10 @@ package stringscan
 // The byte kernel.
 //
 // A SIMD replacement for this histogram (goexperiment.simd, simd/archsimd) was
-// evaluated and not shipped: the pure-Go version already runs at 1.13 GB/s, and
+// evaluated and not shipped: the kernel it would accelerate has no caller. No
+// detector reads the byte-class histogram — the entropy pass over the same bytes
+// is bytescan.Entropy, whose 256-bin count runs at 1.44 GB/s, while this
+// histogram measures 0.10 GB/s on tensor-body bytes and 0.53 GB/s on prose — and
 // the string engine's real cost is the Aho-Corasick walk's dependent load chain,
 // which a byte-class histogram does not touch. See docs/architecture.md for the
 // measured numbers and the rule the decision followed (>= 1.5x on its own kernel

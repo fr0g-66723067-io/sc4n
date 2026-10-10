@@ -5,10 +5,12 @@
 # Two experiments were evaluated for the hot paths and neither is shipped, because
 # neither earned its place by the plan's own rule (>= 1.5x on its own kernel):
 #
-#   - a SIMD byte-class histogram (goexperiment.simd, simd/archsimd). The pure-Go
-#     histogram already runs at 1.13 GB/s, and the string engine's real bottleneck
-#     is the Aho-Corasick walk's dependent load chain, which a histogram kernel
-#     does not touch. Measured numbers are in docs/architecture.md.
+#   - a SIMD byte-class histogram (goexperiment.simd, simd/archsimd). The kernel it
+#     would accelerate has no caller: no detector reads the byte-class histogram
+#     (the entropy pass over the same bytes is bytescan.Entropy, whose 256-bin
+#     count runs at 1.44 GB/s), and the string engine's real bottleneck is the
+#     Aho-Corasick walk's dependent load chain, which a histogram kernel does not
+#     touch. Measured numbers are in docs/architecture.md.
 #   - encoding/json/v2 (goexperiment.jsonv2) for header decoding. The header
 #     decode is microseconds per artifact against a scan that is dominated by I/O
 #     and hashing; there was no measurable end-to-end win to show.
