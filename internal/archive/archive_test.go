@@ -611,3 +611,32 @@ func TestZipTrailingDataIsScannedAndReported(t *testing.T) {
 	prefixed := append([]byte("STUB"), clean...)
 	forbid(t, scanZip(t, "stub.zip", prefixed, limits.Default()), "SC4N-ARCHIVE-TRAILING-DATA")
 }
+
+// TestNestedParseFailureIsReported: every container caller discards
+// artifact.ScanMember's error, so the failure must be reported by ScanMember
+// itself. An outer archive whose member is a damaged container is the modelscan
+// #354 shape: without the finding the member is invisible and the report says
+// clean.
+func TestNestedParseFailureIsReported(t *testing.T) {
+	inner := buildZip(t, []zspec{{name: "payload.pkl", data: []byte("x")}}, false)
+	broken := inner[:len(inner)-10] // damage the end-of-central-directory record
+	outer := buildZip(t, []zspec{{name: "inner.zip", data: broken}}, false)
+
+	ctx, col := newCtx(t, "outer.zip", limits.Default())
+	ctx.Format = artifact.FormatZip
+	if err := archive.Scan(ctx, source.Mem("outer.zip", outer)); err != nil {
+		t.Fatalf("outer scan: %v", err)
+	}
+	found := false
+	for _, f := range col.Findings() {
+		if f.RuleID == artifact.RuleParseFailed.ID {
+			found = true
+			if f.Artifact != "outer.zip:inner.zip" {
+				t.Errorf("finding names %q, want outer.zip:inner.zip", f.Artifact)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("nested parse failure not reported: %v", ids(col.Findings()))
+	}
+}

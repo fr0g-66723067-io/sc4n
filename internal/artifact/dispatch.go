@@ -224,6 +224,14 @@ func RunUniversal(ctx *Ctx, s source.Source, f Format) {
 // point container parsers use, so that container nesting, naming and depth
 // accounting are implemented exactly once.
 //
+// A parser error is reported here as SC4N-PARSE-FAILED on the member's name, not
+// just returned: every container caller (archive, numpy, torch, msgpack, xgb)
+// discards the returned error, so an unreported failure leaves a nested member
+// invisible — an outer zip whose member inner.zip has a damaged directory yielded
+// no finding about inner.zip and never scanned its members, which is exactly the
+// fail-open shape the rule exists to prevent. The error is still returned for a
+// caller that wants it.
+//
 // It takes a Source rather than a byte slice because a member can be far larger
 // than memory: a stored member is a zero-copy Section over the parent's mapping,
 // and a compressed member is decompressed into a private temporary file that is
@@ -235,7 +243,11 @@ func ScanMember(parent *Ctx, name string, s source.Source) (Format, error) {
 		emitLimitDepth(parent, name)
 		return FormatUnknown, nil
 	}
-	return Scan(sub, s)
+	f, err := Scan(sub, s)
+	if err != nil {
+		parent.Sink.Named(name).EmitExtra(RuleParseFailed, 0, err.Error(), nil)
+	}
+	return f, err
 }
 
 // ScanMemberBytes is ScanMember for a member that is already in memory. The

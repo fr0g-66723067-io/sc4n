@@ -2,6 +2,27 @@ package artifact
 
 import "github.com/fr0g-66723067-io/sc4n/internal/report"
 
+// RuleParseFailed fires when a format parser returned an error, which means the
+// artifact's structures were not walked to the end. It lives here rather than in
+// internal/scan because the container walkers in internal/archive, internal/numpy
+// and internal/torch report a nested member's failure through it, and those
+// packages cannot import internal/scan (which imports them).
+var RuleParseFailed = report.DefineRule(report.Rule{
+	ID:         "SC4N-PARSE-FAILED",
+	Title:      "Format parser could not walk the artifact to the end",
+	Severity:   report.SeverityMedium,
+	Confidence: report.ConfidenceHigh,
+	CWE:        []string{"CWE-755"},
+	Class:      "structure",
+	Description: "The parser for this artifact's sniffed format returned an error part-way through, so " +
+		"whatever lies past that point was not analysed. This is reported as a finding rather than as a " +
+		"silent skip because a truncated walk is the classic way to make a scanner report CLEAN: modelscan " +
+		"issue #354 is an unreadable ZIP entry placed before archive/data.pkl. Read the evidence for the " +
+		"failing structure and treat the artifact as unscanned beyond that point.",
+	Refs: []string{"https://github.com/protectai/modelscan/issues/354"},
+	Tags: []string{"scanner-evasion"},
+})
+
 // RuleExtensionMismatch fires when the sniffed format contradicts the file's
 // extension.
 //

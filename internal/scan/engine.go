@@ -239,7 +239,7 @@ func scanStdin(sess *artifact.Session, cfg Config, l limits.Limits) report.Artif
 	if perr != nil {
 		// The same finding the file path emits: without it a -stdin run reports a
 		// clean row for an artifact whose parser failed.
-		sess.Collector.For(name).EmitExtra(ruleParseFailed, 0, perr.Error(), nil)
+		sess.Collector.For(name).EmitExtra(artifact.RuleParseFailed, 0, perr.Error(), nil)
 		sum.SubFormat = "parse-error: " + perr.Error()
 	}
 	return sum
@@ -318,7 +318,7 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	sum.SHA256Scope = scope
 	sum.Format = f.String()
 	if perr != nil {
-		sess.Collector.For(name).EmitExtra(ruleParseFailed, 0, perr.Error(), nil)
+		sess.Collector.For(name).EmitExtra(artifact.RuleParseFailed, 0, perr.Error(), nil)
 		sum.SubFormat = "parse-error: " + perr.Error()
 	}
 	if e.Digest != "" {

@@ -168,3 +168,4 @@ func FuzzSniffNeverPanics(f *testing.F) {
 		}
 	})
 }
+
