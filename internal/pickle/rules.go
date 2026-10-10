@@ -82,7 +82,8 @@ var (
 			"it with weights_only=True requires torch.serialization.add_safe_globals. That is a " +
 			"deliberate act by the user, and the names involved are reported individually; this finding " +
 			"exists so that a reader can see the artifact's loading requirement as a single fact rather " +
-			"than reconstructing it from the per-global findings.",
+			"than reconstructing it from the per-global findings. The ID is historical and reads like a " +
+			"clearance; it is not one — the Title is the statement.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/502.html"},
 	})
 
