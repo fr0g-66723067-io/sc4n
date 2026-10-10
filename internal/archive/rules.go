@@ -187,6 +187,27 @@ var (
 		Refs: []string{"https://cwe.mitre.org/data/definitions/78.html"},
 	})
 
+	// ruleArchiveMemberSkipped fires for a member the walker did not read: a
+	// typeflag it does not dispatch (a GNU sparse or contiguous member, or an
+	// unknown type) or an empty name. It is medium and structural: the member's
+	// bytes were not analysed, and a payload hidden in a sparse member's data
+	// fragments is exactly what the universal head/tail windows do not see.
+	ruleArchiveMemberSkipped = report.DefineRule(report.Rule{
+		ID:         "SC4N-ARCHIVE-MEMBER-SKIPPED",
+		Title:      "Archive member was not analysed",
+		Severity:   report.SeverityMedium,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-1059"},
+		Class:      "structure",
+		Description: "A member was not dispatched to any parser: its typeflag is not a regular file, " +
+			"directory, link, device or fifo (a GNU sparse or contiguous member, or a type sc4n does not " +
+			"know), or its name is empty. The member's bytes were therefore not scanned by anything but the " +
+			"universal head/tail windows, and a payload can sit in the parts of it those windows do not " +
+			"cover. The finding names the typeflag so the reader can see what the archive claimed.",
+		Refs: []string{"https://cwe.mitre.org/data/definitions/1059.html"},
+		Tags: []string{"scanner-evasion", "structure"},
+	})
+
 	// ruleArchiveTrailingData fires when bytes follow the zip's
 	// end-of-central-directory record. It is medium: appending to a zip is the
 	// standard polyglot trick (a file that is both a zip and something else), and

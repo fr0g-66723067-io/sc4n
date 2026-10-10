@@ -809,3 +809,55 @@ func TestSpillRefusalChargesCap(t *testing.T) {
 	want(t, got, "SC4N-LIMIT-DECOMPRESSED")
 	forbid(t, got, "SC4N-PICKLE-GLOBAL-CRITICAL")
 }
+
+// TestSkippedTarMembersAreReported: the tar walk dispatched only regular
+// members, so a GNU sparse or contiguous member and a member with an empty name
+// were skipped with no finding — and only the universal head/tail windows ever
+// saw the file, so a payload in the parts they do not cover was invisible. A
+// sparse member makes the gap concrete: a 4 MiB logical member lives in a 2 KB
+// archive.
+func TestSkippedTarMembersAreReported(t *testing.T) {
+	// A GNU-format sparse header: magic "ustar " + version " \x00", the old GNU
+	// sparse map at 386 (four offset/numbytes pairs), realSize at 483, and a
+	// single stored 512-byte chunk.
+	hdr := make([]byte, 512)
+	copy(hdr[0:100], "sparse.bin")
+	copy(hdr[100:108], "0000644\x00")
+	copy(hdr[108:116], "0000000\x00")
+	copy(hdr[116:124], "0000000\x00")
+	copy(hdr[124:136], "00000001000\x00") // stored bytes
+	copy(hdr[136:148], "00000000000\x00")
+	for i := 148; i < 156; i++ {
+		hdr[i] = ' '
+	}
+	hdr[156] = 'S'
+	copy(hdr[257:263], "ustar ")
+	copy(hdr[263:265], " \x00")
+	copy(hdr[386:398], "00000000000\x00")  // first chunk at offset 0
+	copy(hdr[398:410], "00000001000\x00")  // 512 bytes long
+	copy(hdr[483:495], "000004000000\x00") // 4 MiB logical
+	var sum int
+	for _, b := range hdr {
+		sum += int(b)
+	}
+	copy(hdr[148:156], fmt.Sprintf("%06o\x00 ", sum))
+
+	sparse := append([]byte(nil), hdr...)
+	sparse = append(sparse, make([]byte, 512)...) // the one stored chunk
+	sparse = append(sparse, make([]byte, 1024)...)
+	got := scanAs(t, "sparse.tar", sparse, artifact.FormatTar, limits.Default())
+	want(t, got, "SC4N-ARCHIVE-MEMBER-SKIPPED")
+
+	// A member with an empty name: the same rule, because the walk cannot report
+	// it against a path and its bytes are not dispatched.
+	empty := rawTarHeaderType("", 4, '0')
+	empty = append(empty, []byte("abcd")...)
+	empty = append(empty, make([]byte, 1024)...)
+	want(t, scanAs(t, "empty.tar", empty, artifact.FormatTar, limits.Default()), "SC4N-ARCHIVE-MEMBER-SKIPPED")
+
+	// A tar of regular members must not carry the rule.
+	plain := rawTarHeader("a.txt", 4)
+	plain = append(plain, []byte("abcd")...)
+	plain = append(plain, make([]byte, 1024)...)
+	forbid(t, scanAs(t, "plain.tar", plain, artifact.FormatTar, limits.Default()), "SC4N-ARCHIVE-MEMBER-SKIPPED")
+}

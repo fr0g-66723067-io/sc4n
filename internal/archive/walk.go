@@ -377,10 +377,28 @@ func scanTarMembers(ctx *artifact.Ctx, s source.Source) {
 		if i >= max {
 			return
 		}
-		if hdr.Typeflag != tarTypeReg && hdr.Typeflag != tarTypeRegA {
+		switch hdr.Typeflag {
+		case tarTypeReg, tarTypeRegA:
+			// Dispatched below.
+		case tar.TypeDir, tar.TypeSymlink, tar.TypeLink, tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
+			// collectTar records these and Members.Check reports them
+			// (SC4N-ARCHIVE-LINK for a link, device or fifo); they carry no data
+			// to dispatch, so skipping them here is not a skip of bytes.
+			continue
+		default:
+			// A typeflag the walker does not dispatch: a GNU sparse or
+			// contiguous member, or a type it does not know. The member's bytes
+			// are never analysed, and only the universal head/tail windows see
+			// the file at all, so this must be reported rather than skipped.
+			ctx.Sink.EmitExtra(ruleArchiveMemberSkipped, 0,
+				"member "+snippet(hdr.Name)+" has typeflag "+typeflagName(hdr.Typeflag)+", so its "+itoa64(hdr.Size)+" byte(s) were not analysed",
+				map[string]string{"member": hdr.Name, "typeflag": typeflagName(hdr.Typeflag), "size": itoa64(hdr.Size)})
 			continue
 		}
 		if hdr.Name == "" {
+			ctx.Sink.EmitExtra(ruleArchiveMemberSkipped, 0,
+				"a member has an empty name, so it cannot be reported against a path and its "+itoa64(hdr.Size)+" byte(s) were not analysed",
+				map[string]string{"typeflag": typeflagName(hdr.Typeflag), "size": itoa64(hdr.Size)})
 			continue
 		}
 		// The archive bytes still unread bound what this member can hold: a tar
@@ -762,3 +780,43 @@ func init() {
 		}
 	}
 }
+
+// typeflagName names a tar typeflag for evidence text. Go's tar package does not
+// export one, and the raw byte is not readable in a report.
+func typeflagName(t byte) string {
+	switch t {
+	case tarTypeReg:
+		return "regular"
+	case tarTypeRegA:
+		return "regular (old)"
+	case tar.TypeLink:
+		return "hardlink"
+	case tar.TypeSymlink:
+		return "symlink"
+	case tar.TypeChar:
+		return "character device"
+	case tar.TypeBlock:
+		return "block device"
+	case tar.TypeDir:
+		return "directory"
+	case tar.TypeFifo:
+		return "fifo"
+	case tar.TypeCont:
+		return "contiguous"
+	case tar.TypeGNUSparse:
+		return "GNU sparse"
+	case tar.TypeXHeader:
+		return "pax extended header"
+	case tar.TypeXGlobalHeader:
+		return "pax global header"
+	case tar.TypeGNULongName:
+		return "GNU long name"
+	case tar.TypeGNULongLink:
+		return "GNU long link"
+	default:
+		return "unknown (0x" + strconv.FormatUint(uint64(t), 16) + ")"
+	}
+}
+
+// itoa64 renders a byte count for evidence text.
+func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
