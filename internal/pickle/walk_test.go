@@ -646,3 +646,142 @@ func FuzzPickleWalk(f *testing.F) {
 		}
 	})
 }
+
+// binBytes builds a BINBYTES opcode (a 4-byte little-endian length + payload).
+func binBytes(b []byte) []byte {
+	out := []byte{opBINBYTES, 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(out[1:], uint32(len(b)))
+	return append(out, b...)
+}
+
+// TestLargeConstantIsScannedWhole pins the F15 fix: the scan used to stop at
+// maxRetainString (64 KiB) *before* the indicator engine ran, so an indicator past
+// that point of a large constant was never seen.
+//
+// The assertion is on the hook rather than on a rule ID because this package's
+// test binary has no indicator table (internal/stringscan installs the hook, and
+// importing it here would be an import cycle). What the defect was about is
+// exactly what the hook sees: how many bytes reach the engine.
+func TestLargeConstantIsScannedWhole(t *testing.T) {
+	body := make([]byte, 100_000)
+	for i := range body {
+		body[i] = 'A'
+	}
+	copy(body[70_000:], "https://discord.com/api/webhooks/123/abc")
+	data := append([]byte{opPROTO, 4}, binBytes(body)...)
+	data = append(data, opSTOP)
+
+	oldBytes, oldString := BytesScan, StringScan
+	defer func() { BytesScan, StringScan = oldBytes, oldString }()
+	var scanned int
+	note := func(n int) {
+		if n > scanned {
+			scanned = n
+		}
+	}
+	BytesScan = func(_ *report.Sink, _ int64, b []byte) { note(len(b)) }
+	StringScan = func(_ *report.Sink, _ int64, s string) { note(len(s)) }
+
+	_, fs := walk(t, data)
+	if scanned != len(body) {
+		t.Fatalf("the indicator engine saw %d of %d bytes; a constant larger than maxRetainString must be scanned whole", scanned, len(body))
+	}
+
+	// The same for a constant that is binary, which takes the in-place path.
+	binaryBody := make([]byte, 100_000)
+	copy(binaryBody, "\x00\x01\x02\x03")
+	copy(binaryBody[70_000:], "https://discord.com/api/webhooks/123/abc")
+	scanned = 0
+	data = append([]byte{opPROTO, 4}, binBytes(binaryBody)...)
+	data = append(data, opSTOP)
+	_, fs = walk(t, data)
+	if scanned != len(binaryBody) {
+		t.Fatalf("the indicator engine saw %d of %d bytes of a binary constant", scanned, len(binaryBody))
+	}
+	// The retention budget is a separate concern and still applies: the value's
+	// length is recorded, and what is kept is capped.
+	if !hasRule(fs, "SC4N-PICKLE-REQUIRES-UNSAFE-LOADER") {
+		t.Fatalf("unexpected findings: %v", ruleIDs(fs))
+	}
+}
+
+// TestCodeStringInBinaryConstantIsSeen pins the F16 fix: a REDUCE argument whose
+// head is binary leaves text empty on the no-decode path, which made the
+// code-string rule blind to the ShadowPickle shape with a padded payload.
+func TestCodeStringInBinaryConstantIsSeen(t *testing.T) {
+	payload := append(make([]byte, 4096), []byte("import os\nos.system('id')\n")...)
+
+	build := func(body []byte) []byte {
+		data := []byte{opPROTO, 4}
+		data = append(data, binUnicode("collections")...)
+		data = append(data, binUnicode("OrderedDict")...)
+		data = append(data, opSTACK_GLOBAL, opMARK)
+		data = append(data, binBytes(body)...)
+		data = append(data, opTUPLE, opREDUCE, opSTOP)
+		return data
+	}
+
+	_, fs := walk(t, build(payload))
+	mustHave(t, fs, "SC4N-PICKLE-CODE-STRING")
+
+	// The same payload without the binary head must be reported too: the fix must
+	// not have moved the detection to a different shape.
+	_, fs = walk(t, build([]byte("import os\nos.system('id')\n")))
+	mustHave(t, fs, "SC4N-PICKLE-CODE-STRING")
+}
+
+// TestMemoAliasNeedsDistinctSlots pins the F17 fix: a stream that binds a name
+// once and reads it per tensor is a benign state_dict, not a rebinding. The
+// 44-byte shape below is the minimal multi-tensor state_dict.
+func TestMemoAliasNeedsDistinctSlots(t *testing.T) {
+	global := func() []byte {
+		data := []byte{opPROTO, 2}
+		data = append(data, binUnicode("torch._utils")...)
+		data = append(data, binUnicode("_rebuild_tensor_v2")...)
+		return append(data, opSTACK_GLOBAL)
+	}
+
+	// One binding, two reads: no finding.
+	data := global()
+	data = append(data, opBINPUT, 0, opBINGET, 0, opBINGET, 0, opSTOP)
+	_, fs := walk(t, data)
+	mustNotHave(t, fs, "SC4N-PICKLE-MEMO-ALIAS")
+
+	// The same name in two distinct slots: the finding, with both slots named.
+	data = global()
+	data = append(data, opBINPUT, 0, opBINPUT, 1, opSTOP)
+	_, fs = walk(t, data)
+	mustHave(t, fs, "SC4N-PICKLE-MEMO-ALIAS")
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-MEMO-ALIAS" && !strings.Contains(f.Evidence, "[0 1]") {
+			t.Fatalf("evidence = %q, want the distinct slots [0 1]", f.Evidence)
+		}
+	}
+}
+
+// TestSharedEmitKeysKeepDistinctFindings pins the F18 fix: the four opcode pairs
+// that share a verb used to collapse into one finding, and a code string's key
+// omitted its offset.
+func TestSharedEmitKeysKeepDistinctFindings(t *testing.T) {
+	// SETITEM into a string, then SETITEMS into a list: two different target-type
+	// violations, two findings.
+	data := []byte{opPROTO, 2, opEMPTY_LIST}
+	data = append(data, binUnicode("key")...)
+	data = append(data, binUnicode("value")...)
+	data = append(data, opSETITEM)
+	data = append(data, opEMPTY_LIST, opMARK)
+	data = append(data, binUnicode("k")...)
+	data = append(data, binUnicode("v")...)
+	data = append(data, opSETITEMS, opSTOP)
+
+	_, fs := walk(t, data)
+	n := 0
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-SETITEM-TARGET" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("SETITEM + SETITEMS produced %d finding(s), want 2: %v", n, ruleIDs(fs))
+	}
+}

@@ -91,6 +91,12 @@ type Val struct {
 	// text is the decoded content of a str/bytes value (capped), the class name
 	// of an instance, or the "module.name" of a global.
 	text string
+	// raw is the constant's own bytes when it was scanned in place instead of
+	// being decoded (text is empty then). It is a view of the artifact, so it
+	// costs nothing to keep, and it is what lets the code-string rule read a
+	// constant whose head is binary without materialising it: the extraction
+	// happens at the REDUCE site, not here.
+	raw []byte
 	// global is set for kGlobal and for kInstance (the class it was built from).
 	global *Global
 	// elems are the retained elements of a container, newest retention first.
@@ -240,9 +246,13 @@ func (s *stack) peekMark() ([]Val, bool) {
 type memo struct {
 	slots []Val
 	set   []bool
-	// byGlobal records, for every qualified name, which memo slots held it. Two
-	// slots holding the same name is the ShadowPickle signal
-	// (SC4N-PICKLE-MEMO-ALIAS): a benign stream binds a name once.
+	// byGlobal records, for every qualified name, which *distinct* memo slots held
+	// it, in the order they were first seen. Two slots holding the same name is
+	// the ShadowPickle signal (SC4N-PICKLE-MEMO-ALIAS): a benign stream binds a
+	// name once. The slots are a set, not a log: a stream that binds a name in
+	// slot 0 and then BINGETs it once per tensor has one binding, and recording
+	// one entry per read made every real multi-tensor state_dict a high-severity
+	// finding whose evidence contradicted itself ("bound in 3 memo slots ([0 0 0])").
 	byGlobal map[string][]int
 	// overwrites counts slots written twice, which is the other half of the same
 	// signal.
@@ -283,13 +293,22 @@ func (m *memo) put(i int, v Val) (overwrote bool, ok bool) {
 	m.slots[i] = v
 	m.set[i] = true
 	if v.global != nil {
-		key := v.global.QualName()
-		m.byGlobal[key] = append(m.byGlobal[key], i)
+		m.noteGlobal(v.global.QualName(), i)
 	}
 	if overwrote {
 		m.overwrites++
 	}
 	return overwrote, true
+}
+
+// noteGlobal records that slot i holds the name, if no other slot already does.
+func (m *memo) noteGlobal(name string, i int) {
+	for _, existing := range m.byGlobal[name] {
+		if existing == i {
+			return
+		}
+	}
+	m.byGlobal[name] = append(m.byGlobal[name], i)
 }
 
 func (m *memo) next() int { return len(m.slots) }

@@ -327,7 +327,7 @@ func (w *walker) segment(start int) (int, bool) {
 		if info.name == "" {
 			w.structFinding("unknown-opcode",
 				fmt.Sprintf("0x%02x is not an opcode", code), int64(pos))
-			w.emitOnce("incomplete", ruleIncomplete, int64(pos),
+			w.emitOnce("incomplete:"+strconv.Itoa(pos), ruleIncomplete, int64(pos),
 				fmt.Sprintf("the walk could not decode the byte at this offset (0x%02x is not an opcode); scanning resumed at the next byte so that anything after it is still reported", code))
 			w.resyncRun++
 			if w.resyncRun > maxResyncRun {
@@ -342,7 +342,7 @@ func (w *walker) segment(start int) (int, bool) {
 		arg, next, err := w.decodeArg(info, pos)
 		if err != nil {
 			w.structFinding(errKind(err), err.Error(), int64(pos))
-			w.emitOnce("incomplete", ruleIncomplete, int64(pos), err.Error())
+			w.emitOnce("incomplete:"+strconv.Itoa(pos)+":"+err.Error(), ruleIncomplete, int64(pos), err.Error())
 			w.resyncRun++
 			if w.resyncRun > maxResyncRun {
 				w.structFinding("undecodable-region",
@@ -456,7 +456,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 
 	case opPERSID:
 		if s, ok := argString(arg); ok {
-			w.emitOnce("persid", rulePersID, int64(off),
+			w.emitOnce("persid:PERSID", rulePersID, int64(off),
 				"PERSID hands the loader's persistent_load hook the id "+quote(s)+", which is not the (\"storage\", …) shape the weights-only unpickler accepts")
 			w.st.push(Val{kind: kPersID, text: s})
 		}
@@ -468,7 +468,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if !isPersistentStorageID(pid) {
-			w.emitOnce("persid", rulePersID, int64(off),
+			w.emitOnce("persid:BINPERSID", rulePersID, int64(off),
 				"BINPERSID passes a "+pid.kind.String()+" to persistent_load; the weights-only unpickler accepts only a (\"storage\", …) tuple or an int")
 		}
 		w.st.push(Val{kind: kPersID})
@@ -540,7 +540,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if !isListLike(target) {
-			w.emitOnce("append", ruleAppendTarget, int64(off),
+			w.emitOnce("append:APPEND", ruleAppendTarget, int64(off),
 				"APPEND targets a "+target.kind.String()+"; the reference loader requires a list")
 		}
 		w.st.push(target.extend([]Val{val}))
@@ -557,7 +557,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if !isListLike(target) {
-			w.emitOnce("append", ruleAppendTarget, int64(off),
+			w.emitOnce("append:APPENDS", ruleAppendTarget, int64(off),
 				"APPENDS targets a "+target.kind.String()+"; the reference loader requires a list")
 		}
 		w.st.push(target.extend(items))
@@ -588,7 +588,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if !isDictLike(target) {
-			w.emitOnce("setitem", ruleSetItemTarget, int64(off),
+			w.emitOnce("setitem:SETITEM", ruleSetItemTarget, int64(off),
 				"SETITEM assigns into a "+target.kind.String()+" ("+describe(target)+"); the reference loader does not check the target type, which is the heap-corruption class of CVE-2026-24747 / GHSA-63cw-57p8-fm3p")
 		}
 		w.st.push(target.extend([]Val{key, val}))
@@ -605,7 +605,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if !isDictLike(target) {
-			w.emitOnce("setitem", ruleSetItemTarget, int64(off),
+			w.emitOnce("setitem:SETITEMS", ruleSetItemTarget, int64(off),
 				"SETITEMS assigns into a "+target.kind.String()+" ("+describe(target)+"); the reference loader does not check the target type, which is the heap-corruption class of CVE-2026-24747 / GHSA-63cw-57p8-fm3p")
 		}
 		w.st.push(target.extend(items))
@@ -733,7 +733,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 		if v.global != nil {
 			// A global reached through the memo is the same name; record the slot so
 			// that a rebinding shows up as a distinct binding.
-			w.mm.byGlobal[v.global.QualName()] = append(w.mm.byGlobal[v.global.QualName()], int(idx))
+			w.mm.noteGlobal(v.global.QualName(), int(idx))
 		}
 
 	case opPUT, opBINPUT, opLONG_BINPUT:
@@ -897,7 +897,7 @@ func (w *walker) checkCodeStrings(v Val, off int, where string, callable string)
 			return
 		}
 		if ind := looksLikeCode(text); ind != "" {
-			w.emitExtraOnce("code-string:"+ind+":"+text[:codeStringMinBytes], ruleCodeString, int64(off),
+			w.emitExtraOnce("code-string:"+ind+":"+strconv.Itoa(off)+":"+text[:codeStringMinBytes], ruleCodeString, int64(off),
 				fmt.Sprintf("%s carries a %d-byte string that looks like source (indicator %q): %s", where, len(text), ind, quote(text)),
 				map[string]string{"indicator": ind, "where": where, "length": strconv.Itoa(len(text))})
 		}
@@ -923,6 +923,15 @@ func walkStrings(v Val, depth int, visit func(string)) {
 	case kStr, kBytes, kByteArray:
 		if v.text != "" {
 			visit(v.text)
+			return
+		}
+		// A constant that was scanned in place rather than decoded: the code
+		// string is in its printable runs, which is how a REDUCE argument whose
+		// first bytes are padding was previously invisible to this rule.
+		if len(v.raw) > 0 {
+			if s := asciiPrefix(v.raw); len(s) >= codeStringMinBytes {
+				visit(s)
+			}
 		}
 	case kList, kTuple, kSet, kFrozenSet, kDict:
 		for _, e := range v.elems {
@@ -1095,14 +1104,41 @@ func (w *walker) emitExtraOnce(key string, r *report.Rule, off int64, ev string,
 }
 
 // stringValue builds a str value from a decoded argument.
+//
+// The scan sees the whole constant up to MaxStringBlob; only the *retained* copy
+// is limited to maxRetainString. Taking the 64 KiB slice before the scan — which
+// is what this did — meant an indicator past byte 65536 of a large constant was
+// never seen, which contradicts retain()'s own comment.
 func (w *walker) stringValue(arg any, off int) Val {
 	s, _ := argString(arg)
 	full := len(s)
+	scan := s
+	if cap := w.blobCap(); int64(len(scan)) > cap {
+		w.reportBlobCap(off, len(scan), cap, "str constant")
+		scan = scan[:cap]
+	}
+	w.scanString(scan, int64(off))
 	if full > maxRetainString {
 		s = s[:maxRetainString]
 	}
-	w.scanString(s, int64(off))
 	return Val{kind: kStr, text: w.retain(s), n: full}
+}
+
+// blobCap is how much of one constant the walk scans: MaxStringBlob, the same cap
+// every other parser materialises a value under.
+func (w *walker) blobCap() int64 {
+	if w.lim.MaxStringBlob > 0 {
+		return w.lim.MaxStringBlob
+	}
+	return limits.Default().MaxStringBlob
+}
+
+// reportBlobCap reports a constant that is larger than the scan budget, once, in
+// the shape limits.Emit produces.
+func (w *walker) reportBlobCap(off, full int, cap int64, what string) {
+	w.emitExtraOnce("limit-string-blob", limits.RuleString, int64(off),
+		"MaxStringBlob reached: "+strconv.Itoa(full)+" > "+strconv.FormatInt(cap, 10)+"; "+what+" scanned up to the cap",
+		map[string]string{"limit": "MaxStringBlob", "value": strconv.Itoa(full), "cap": strconv.FormatInt(cap, 10)})
 }
 
 // retain applies the walk's total retention budget. Indicator matching has already
@@ -1139,17 +1175,57 @@ const retainAfterBudget = 256
 func (w *walker) bytesValue(arg any, off int, kind valKind) Val {
 	b := argBytes(arg)
 	full := len(b)
-	if len(b) > maxRetainString {
-		b = b[:maxRetainString]
+	scan := b
+	if cap := w.blobCap(); int64(len(scan)) > cap {
+		w.reportBlobCap(off, len(scan), cap, "bytes constant")
+		scan = scan[:cap]
 	}
-	if !mostlyText(b) {
-		w.scanBytes(b, int64(off))
-		return Val{kind: kind, text: "", n: full}
+	if !mostlyText(scan) {
+		w.scanBytes(scan, int64(off))
+		// text stays empty (nothing was decoded) but the bytes are kept as a view
+		// of the artifact, so the code-string rule can read the constant later
+		// without this allocating anything.
+		return Val{kind: kind, text: "", raw: scan, n: full}
 	}
-	s := latin1String(b)
-	w.scanString(s, int64(off))
-	return Val{kind: kind, text: w.retain(s), n: full}
+	// One decode for the common case: a constant within the retention cap is
+	// decoded once and that string is both scanned and kept. Only a constant
+	// larger than the cap is decoded twice, which is the price of scanning the
+	// whole constant rather than its first 64 KiB.
+	if len(scan) <= maxRetainString {
+		s := latin1String(scan)
+		w.scanString(s, int64(off))
+		return Val{kind: kind, text: w.retain(s), n: full}
+	}
+	w.scanString(latin1String(scan), int64(off))
+	return Val{kind: kind, text: w.retain(latin1String(scan[:maxRetainString])), n: full}
 }
+
+// asciiPrefix extracts the printable runs from a binary constant, bounded by
+// maxRetainString, so that looksLikeCode can be applied to it. It is called at the
+// REDUCE site (see walkStrings), not when the constant is created: a state_dict
+// has thousands of tensor blobs and extracting a prefix for each of them at
+// creation time would spend the retention budget on values no rule reads.
+func asciiPrefix(b []byte) string {
+	var sb strings.Builder
+	for i := 0; i < len(b) && sb.Len() < maxRetainString; {
+		if !printableByte(b[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(b) && printableByte(b[j]) {
+			j++
+		}
+		if j-i >= 4 {
+			sb.Write(b[i:j])
+			sb.WriteByte('\n')
+		}
+		i = j
+	}
+	return sb.String()
+}
+
+func printableByte(c byte) bool { return c >= 0x20 && c < 0x7f }
 
 // scanBytes runs the indicator engine over a byte constant without decoding it.
 func (w *walker) scanBytes(b []byte, off int64) {
