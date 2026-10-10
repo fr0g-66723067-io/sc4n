@@ -64,7 +64,7 @@ go build -o sc4n ./cmd/sc4n
 | `-max-artifact`, `-max-depth`, `-max-decompress`, `-max-ratio` | override the resource caps in `docs/architecture.md` |
 | `-timeout DURATION` | bound the whole scan; a cancelled scan says so rather than presenting a partial result as complete |
 | `-root DIR` | containment root for path-shaped values (ONNX external data, SavedModel assets, symlinks) |
-| `-hf-cache` | scan a Hugging Face download cache instead of paths: `snapshots/` symlinks are resolved into `blobs/`, each blob is scanned once no matter how many revisions point at it, and `refs/` names the revision |
+| `-hf-cache` | scan a Hugging Face download cache instead of paths: `snapshots/` symlinks are resolved into `blobs/`, each blob is scanned once no matter how many revisions point at it, and each artifact row carries the `refs/` names it is reachable from in its `revision` field |
 | `-hf-cache-dir DIR` | the cache root for `-hf-cache` (default `$HF_HOME/hub`, else `~/.cache/huggingface/hub`) |
 | `-deep-stats` | enable the informational weight-statistics rules (NaN/Inf, duplicates, outliers, entropy) |
 | `-timings` | include per-phase timings in the report |
@@ -86,8 +86,13 @@ already contains:
 Suppression is by `(rule, artifact, hash of the evidence window)` — the byte
 offset is deliberately *not* part of the key, because inserting an unrelated byte
 shifts every later offset and a baseline that un-suppresses on such an edit is
-worse than none. The summary line always states how many findings were
-suppressed, so a baseline can never silently turn a new finding into a clean run.
+worse than none. A *redacted* finding (a secret value, whose evidence is a masking
+string rather than the value) is the exception: its offset is the only identity it
+has, so it is part of the key. Without that, two secrets baselined in one file
+suppressed a third secret added later. The summary line always states how many
+findings were suppressed, so a baseline can never silently turn a new finding into
+a clean run. `-max-findings` is applied *after* suppression for the same reason:
+baselined findings do not consume cap slots and cannot evict a new one.
 
 ## Digests
 
@@ -95,8 +100,10 @@ The scan computes a sha256 per artifact as an identity (for the report and for
 `-hf-cache` de-duplication). Because sha256 is CPU-bound (measured 0.35 GB/s on
 the reference host, which has AVX2 but no SHA-NI), the digest is capped at
 `MaxHashBytes` (256 MiB) by default and the report states the scope:
-`sha256Scope` is `full` or `prefix:<bytes>`. `sc4n hash <path>` computes a full
-sha256 (and sha1) when a real provenance digest is what you need.
+`sha256Scope` is `full` or `prefix:<bytes>`. A row whose digest could not be read
+says so in `subFormat` rather than carrying an empty digest and no reason. `sc4n
+hash <path>` computes a full sha256 (and sha1) when a real provenance digest is
+what you need.
 
 ## Exit codes
 
