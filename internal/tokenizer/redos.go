@@ -77,7 +77,7 @@ func AnalyzeJSON(sink *report.Sink, base int64, path string, data []byte) {
 		// same file does not produce two parse errors from two packages.
 		return
 	}
-	e := &emitter{sink: sink, base: base, path: path, data: data}
+	e := &emitter{sink: sink, base: base, path: path, offsets: buildOffsets(data)}
 	e.walk(doc)
 	if m, ok := doc.(map[string]any); ok {
 		e.specialTokens(m)
@@ -93,25 +93,98 @@ type emitter struct {
 	sink *report.Sink
 	base int64
 	path string
-	data []byte
+	// offsets maps a decoded string value to the file offset this emitter
+	// reports for it, built by buildOffsets in one pass over the document. The
+	// offset used to be found by probing the whole document for every reported
+	// value (bytes.Index plus a json.Marshal fallback on a miss), which is
+	// quadratic in the document: 50 000 added_tokens took 66 s.
+	offsets map[string]int64
 }
 
-// off resolves a decoded JSON string to a file offset when possible, falling
-// back to the start of the document. It tries the plain form and the
-// JSON-escaped form, because a regex is almost always escaped on the wire.
+// off resolves a decoded JSON string to a file offset. A value the index does
+// not describe resolves to the start of the document, which is what the old
+// whole-document probe returned when both of its searches missed.
 func (e *emitter) off(s string) int64 {
 	if s == "" {
 		return e.base
 	}
-	if i := bytes.Index(e.data, []byte(s)); i >= 0 {
-		return e.base + int64(i)
-	}
-	if q, err := json.Marshal(s); err == nil && len(q) > 2 {
-		if i := bytes.Index(e.data, q[1:len(q)-1]); i >= 0 {
-			return e.base + int64(i)
-		}
+	if off, ok := e.offsets[s]; ok {
+		return off
 	}
 	return e.base
+}
+
+// buildOffsets indexes every string key and value of the document against the
+// offset the emitter reports for it: the position of the value's own bytes
+// inside the token's raw text, or — when the token is escaped on the wire, as a
+// regex with backslashes is — the position of the value's escaped encoding. The
+// earliest such position in document order wins, so an identical earlier key or
+// an equal earlier value is reported at its first occurrence, which is what the
+// per-value whole-document probe returned.
+//
+// The one answer that differs from that probe: a value that also occurs as a
+// substring of an *earlier, longer* value is reported at its own token rather
+// than inside the longer one. The probe happened to find the substring; pointing
+// at the value's own token is the more useful location, and reproducing the
+// probe here would mean searching every earlier token for every value, which is
+// the quadratic behaviour this index exists to remove.
+//
+// One pass, so the cost is linear in the document.
+func buildOffsets(data []byte) map[string]int64 {
+	raw := map[string]int64{}     // first occurrence of the decoded bytes
+	escaped := map[string]int64{} // first occurrence of the escaped body
+	dec := json.NewDecoder(bytes.NewReader(data))
+	prev := int64(0)
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		cur := dec.InputOffset()
+		if s, ok := tok.(string); ok {
+			if q, body, ok := rawStringToken(data, prev, cur); ok {
+				if j := strings.Index(body, s); j >= 0 {
+					recordFirst(raw, s, q+1+int64(j))
+				} else if qb, err := json.Marshal(s); err == nil && len(qb) > 2 {
+					if j := strings.Index(body, string(qb[1:len(qb)-1])); j >= 0 {
+						recordFirst(escaped, s, q+1+int64(j))
+					}
+				}
+			}
+		}
+		prev = cur
+	}
+	for s, off := range escaped {
+		if _, ok := raw[s]; !ok {
+			raw[s] = off
+		}
+	}
+	return raw
+}
+
+// rawStringToken locates the raw text of a JSON string token whose decoded form
+// the decoder returned between prev and cur (two json.Decoder.InputOffset
+// readings). The span holds only punctuation and whitespace before the opening
+// quote, and any quote inside the value is escaped, so the first '"' in the
+// span opens the token and the byte before cur closes it.
+func rawStringToken(data []byte, prev, cur int64) (int64, string, bool) {
+	if prev < 0 || cur > int64(len(data)) || cur-prev < 2 {
+		return 0, "", false
+	}
+	span := data[prev:cur]
+	q := bytes.IndexByte(span, '"')
+	if q < 0 || q+2 > len(span) || span[len(span)-1] != '"' {
+		return 0, "", false
+	}
+	return prev + int64(q), string(span[q+1 : len(span)-1]), true
+}
+
+// recordFirst keeps the earliest offset recorded for a value, so the emission
+// order of the walk cannot change which occurrence a finding points at.
+func recordFirst(m map[string]int64, s string, off int64) {
+	if cur, ok := m[s]; !ok || off < cur {
+		m[s] = off
+	}
 }
 
 // walk visits every value and reports every string that is the value of a
@@ -386,7 +459,7 @@ func findRedos(re string) []redosHit {
 			prevWasGroup, prevGroupQuant = false, false
 
 		case '{':
-			end := strings.IndexByte(re[i:], '}')
+			end := indexByteWithin(re, i, '}', 32)
 			if end < 0 || !isQuantifierBody(re[i+1:i+end]) {
 				prevWasGroup, prevGroupQuant = false, false
 				continue
@@ -408,6 +481,25 @@ func findRedos(re string) []redosHit {
 		}
 	}
 	return hits
+}
+
+// indexByteWithin reports the offset, relative to i, of the first occurrence of
+// c within the first max bytes of s[i:], or -1. A regex repetition body is at
+// most a handful of bytes ({n}, {n,}, {n,m}), and the value is attacker-
+// controlled JSON: searching to the end of the value for a closing brace at
+// every '{' of a value that is all '{' is quadratic (1 MB of '{' cost 23 s),
+// while a 32-byte window is linear and cannot miss a real quantifier.
+func indexByteWithin(s string, i int, c byte, max int) int {
+	hi := i + max
+	if hi > len(s) {
+		hi = len(s)
+	}
+	for j := i; j < hi; j++ {
+		if s[j] == c {
+			return j - i
+		}
+	}
+	return -1
 }
 
 // isQuantifierBody reports whether a `{...}` body is a repetition count
