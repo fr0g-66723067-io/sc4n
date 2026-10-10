@@ -1,0 +1,2 @@
+52788bf01bf59457c3aec96e1183f0321234567890abcdef  model.safetensors
+0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  pytorch_model.bin

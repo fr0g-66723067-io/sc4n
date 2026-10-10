@@ -1077,6 +1077,24 @@
       ],
       "notes": "A protocol-2 joblib array wrapped in zlib — the shape joblib.dump(compress=3) writes, and the shape joblib.load reads back. The content is dispatched as zlib, unwrapped, and the member is parsed by the joblib/pickle engine, so the correct output is no finding at all: the extension check must treat joblib's own compressors as plausible for .joblib, exactly as it treats the pre-0.10 ZF frame. The pickle family is forbidden as well, so a regression in the unwrap/mask path is caught by the benign gate rather than by the mismatch alone."
     },
+    "benign/json_sniffer/one_value.json": {
+      "expect": null,
+      "notes": "The negative control: one complete JSON value named .json is JSON, so requiring a complete value did not stop real JSON from being claimed."
+    },
+    "benign/json_sniffer/sums_like.txt": {
+      "expect": null,
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A SHA256SUMS listing: the first byte is a digit, which one JSON token accepts as a number. Same requirement, same reason."
+    },
+    "benign/json_sniffer/vocab_like.txt": {
+      "expect": null,
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A wordpiece vocabulary: the first byte is '[', which one JSON token accepts as an array opener. The sniff requires a complete value, so the file stays text and no mismatch is reported for a .txt that was never JSON."
+    },
     "benign/keras_sequential.keras": {
       "expect": null,
       "forbid": [

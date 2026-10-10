@@ -435,26 +435,26 @@ func sniffText(s source.Source, l limits.Limits) (Format, bool) {
 	return FormatText, true
 }
 
-// looksLikeJSON reads just enough of the stream to see a valid first JSON token.
+// looksLikeJSON reports whether the stream holds exactly one complete JSON value.
 // It deliberately does not validate the whole document: a config.json inside a
 // multi-gigabyte repository is classified by extension and structure in the repo
 // walker, and validating 100 MB of JSON here would cost more than the sniff is
 // worth. The bounded reader keeps a single pathological token (a gigabyte string)
-// from being buffered.
+// from being buffered, and a value that does not complete inside the window is
+// simply not claimed as JSON.
 func looksLikeJSON(s source.Source) bool {
-	r := io.LimitReader(s.Reader(0), 64<<10)
-	dec := json.NewDecoder(r)
-	tok, err := dec.Token()
-	if err != nil {
+	return decodesOneJSONValue(json.NewDecoder(io.LimitReader(s.Reader(0), 64<<10)))
+}
+
+// decodesOneJSONValue reports whether the decoder holds exactly one complete JSON
+// value: the first Decode succeeds and the next one reaches EOF. One token is not
+// enough — a text file whose first byte is '[' or a digit is not JSON.
+func decodesOneJSONValue(dec *json.Decoder) bool {
+	var v, rest json.RawMessage
+	if err := dec.Decode(&v); err != nil {
 		return false
 	}
-	switch d := tok.(type) {
-	case json.Delim:
-		return d == '{' || d == '['
-	case string, float64, bool, nil:
-		return true
-	}
-	return false
+	return dec.Decode(&rest) == io.EOF
 }
 
 func min64(a, b int64) int64 {

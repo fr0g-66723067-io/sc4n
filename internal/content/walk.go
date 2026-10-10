@@ -29,6 +29,7 @@ package content
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -278,23 +279,27 @@ func firstInvalidUTF8(b []byte) int {
 	return len(b)
 }
 
-// looksLikeJSON reads one JSON token, which is enough to tell a JSON document
-// from prose that happens to start with a brace. It cannot tell a JSON document
-// from a Jinja template that begins with "{{" — the token reader accepts the
-// opening brace — which is why looksLikeJinjaHead is tested first.
+// looksLikeJSON reports whether the buffer holds exactly one complete JSON value.
+// One token is not enough: a text file whose first byte is '[' (BERT's
+// vocab.txt starts with "[PAD]") or a digit (a SHA256SUMS line) yields a token
+// without being JSON, and claiming it produced a format/extension mismatch for a
+// file that was never anything but text.
+//
+// A value that does not complete inside the buffer is not claimed: a .json-named
+// file is claimed by name first (isJSONName above) and is unaffected, and a large
+// unnamed JSON document still reaches the indicator engine through the text path.
 func looksLikeJSON(b []byte) bool {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	tok, err := dec.Token()
-	if err != nil {
+	return decodesOneJSONValue(json.NewDecoder(bytes.NewReader(b)))
+}
+
+// decodesOneJSONValue reports whether the decoder holds exactly one complete JSON
+// value: the first Decode succeeds and the next one reaches EOF.
+func decodesOneJSONValue(dec *json.Decoder) bool {
+	var v, rest json.RawMessage
+	if err := dec.Decode(&v); err != nil {
 		return false
 	}
-	switch d := tok.(type) {
-	case json.Delim:
-		return d == '{' || d == '['
-	case string, float64, bool, nil:
-		return true
-	}
-	return false
+	return dec.Decode(&rest) == io.EOF
 }
 
 // looksLikeJinjaHead reports whether the first non-space byte begins a Jinja

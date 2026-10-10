@@ -72,6 +72,21 @@ func init() {
 					Notes: "An ordinary BERT config: a known architecture, no auto_map, no " +
 						"trust_remote_code and no chat_template, so no content rule may fire.",
 				},
+				"benign/json_sniffer/vocab_like.txt": {
+					Forbid: []string{"SC4N-FORMAT-EXTENSION-MISMATCH"},
+					Notes: "A wordpiece vocabulary: the first byte is '[', which one JSON token " +
+						"accepts as an array opener. The sniff requires a complete value, so the " +
+						"file stays text and no mismatch is reported for a .txt that was never JSON.",
+				},
+				"benign/json_sniffer/sums_like.txt": {
+					Forbid: []string{"SC4N-FORMAT-EXTENSION-MISMATCH"},
+					Notes: "A SHA256SUMS listing: the first byte is a digit, which one JSON token " +
+						"accepts as a number. Same requirement, same reason.",
+				},
+				"benign/json_sniffer/one_value.json": {
+					Notes: "The negative control: one complete JSON value named .json is JSON, so " +
+						"requiring a complete value did not stop real JSON from being claimed.",
+				},
 			}
 		},
 	})
@@ -143,4 +158,17 @@ func contentFixtures(f *fixtureSet) {
 			"  \"num_hidden_layers\": 12,\n"+
 			"  \"vocab_size\": 30522\n"+
 			"}\n")
+
+	// --- the JSON sniff must not accept a text file's first token -----------------
+	// BERT's vocab.txt begins with "[PAD]" and a SHA256SUMS line begins with a
+	// digit: both yield a valid first JSON token, and accepting one token was
+	// enough to dispatch the file as JSON and report a format/extension mismatch
+	// for a file that is nothing but text. The sniff now requires one complete
+	// JSON value, so both stay text.
+	f.addText("benign/json_sniffer/vocab_like.txt",
+		"[PAD]\n[unused0]\n[CLS]\n[SEP]\n")
+	f.addText("benign/json_sniffer/sums_like.txt",
+		"52788bf01bf59457c3aec96e1183f0321234567890abcdef  model.safetensors\n"+
+			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  pytorch_model.bin\n")
+	f.addText("benign/json_sniffer/one_value.json", "{\"a\":1}\n")
 }
