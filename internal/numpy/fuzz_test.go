@@ -1,6 +1,7 @@
 package numpy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -17,6 +18,12 @@ func FuzzParseNPY(f *testing.F) {
 	f.Add(npyV2("{'descr': '|O', 'fortran_order': True, 'shape': (1,)}", []byte{0x80, 0x05, 0x2e}))
 	f.Add([]byte{0x93, 'N', 'U', 'M', 'P', 'Y'})
 	f.Add([]byte("not an npy file at all"))
+	// A descr nested far past maxLitDepth. The literal reader recursed once per
+	// level with no bound until round 3, and the resulting stack overflow was a
+	// fatal error rather than a panic — uncatchable, so the process died with no
+	// report. The seed keeps the depth axis in front of the fuzzer.
+	f.Add(npyV1("{'descr': "+strings.Repeat("[", 512)+"'<f8'"+strings.Repeat("]", 512)+
+		", 'fortran_order': False, 'shape': (1,)}", make([]byte, 8)))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		c := report.NewCollector(0)

@@ -581,6 +581,86 @@
       ],
       "notes": "base64.b64decode source flows into exec"
     },
+    "round3/h5_json_cap.h5": {
+      "expect": [
+        "SC4N-KERAS-LAMBDA"
+      ],
+      "forbid": [
+        "SC4N-HDF5-STRUCT"
+      ],
+      "notes": "model_config behind 4096 empty JSON objects. The shallow JSON recovery stopped at a fixed object cap and returned the truncated set as complete, so decoys in front of a Lambda hid a critical finding (Keras ignores safe_mode for H5, GHSA-36rr-ww3j-vrjv)."
+    },
+    "round3/joblib_inline.joblib": {
+      "expect": null,
+      "forbid": [
+        "SC4N-PICKLE-REQUIRES-UNSAFE-LOADER",
+        "SC4N-JOBLIB-WRAPPER-MISMATCH"
+      ],
+      "notes": "A protocol-2 joblib stream in joblib's own inline layout: the array bytes sit between the wrapper's BUILD and the outer STOP. The payload mask used POP, which is outside the weights-only opcode set, so masking a file whose own opcodes were all accepted made sc4n report SC4N-PICKLE-REQUIRES-UNSAFE-LOADER against its own mask. The same bytes with the payload after the STOP were clean, which is why the defect was layout-dependent."
+    },
+    "round3/msgpack_nan.msgpack": {
+      "expect": [
+        "SC4N-MSGPACK-NAN-PAYLOAD"
+      ],
+      "notes": "A one-entry map whose blob is six NaN-shaped float pairs. The finding's offset must be the blob's offset in the artifact (5), not its index inside the blob (0), which is what every other finding in the parser reports. TestRound3FixtureCounts asserts the offset."
+    },
+    "round3/npy_deep_descr.npy": {
+      "expect": [
+        "SC4N-NUMPY-STRUCT"
+      ],
+      "forbid": [
+        "SC4N-NUMPY-OBJECT-ARRAY"
+      ],
+      "notes": "A .npy whose descr nests 200 levels around a valid field. The literal reader recursed once per level with no bound, so a deep enough descr produced an uncatchable fatal stack overflow (exit 2, no report) rather than a structural finding. 200 levels is past the documented maxLitDepth of 64: an unbounded reader accepts this descriptor, the bounded one refuses it as not a dtype, which is the deliberate trade the bound makes."
+    },
+    "round3/npy_struct_object.npy": {
+      "expect": [
+        "SC4N-NUMPY-OBJECT-ARRAY",
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-REDUCE"
+      ],
+      "forbid": [
+        "SC4N-NUMPY-STRUCT"
+      ],
+      "notes": "A structured dtype — descr as a list of (name, format) pairs — whose one field is an object. Only the scalar descr form was recognised, so this shape reached neither SC4N-NUMPY-OBJECT-ARRAY nor the pickle engine while numpy.load(allow_pickle=True) executed it exactly as it does the scalar form."
+    },
+    "round3/pickle_rebind.pkl": {
+      "expect": [
+        "SC4N-PICKLE-MEMO-ALIAS"
+      ],
+      "notes": "Two memo rebindings (slot 0 and slot 1), no name bound in two slots. The finding is emitted once per stream from flush, so the evidence carries the final rebinding count; the emit key used to embed the count, which made it unique per rebinding and let a 400 KB stream produce 100000 findings and grow the dedup map without bound. TestRound3FixtureCounts asserts the count is exactly one."
+    },
+    "round3/pysrc_nested_calls.py": {
+      "expect": [
+        "SC4N-LIMIT-ENTRIES"
+      ],
+      "notes": "One statement of 4000 nested exec( calls. The call analysis scans from each '(' to the end of the statement, so the cost is quadratic in the nesting; the call-token budget bounds it and the truncation is reported as SC4N-LIMIT-ENTRIES/MaxCallTokens. 60000 nested calls measured over 120 s before the bound."
+    },
+    "round3/template_txt.txt": {
+      "expect": [
+        "SC4N-JINJA-PY-OBJECT"
+      ],
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A Jinja template saved as .txt. The JSON guess accepted the leading '{' of '{{', so the file was claimed as JSON, never reached the template analyser, and the misclassification was reported as a name/content mismatch. .txt lists Jinja in the extension table, so the correct classification is not a contradiction."
+    },
+    "round3/two_docs/config.json": {
+      "expect": [
+        "SC4N-STRING-C2"
+      ],
+      "notes": "config.json holding two JSON values, the second with a webhook. The metadata layer decoded one value and ignored the rest, so the second document was neither decoded nor scanned — while the same bytes in a plain .json produced SC4N-STRING-C2."
+    },
+    "round3/zip_data_descriptor.zip": {
+      "expect": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL"
+      ],
+      "forbid": [
+        "SC4N-ARCHIVE-NAME-MISMATCH",
+        "SC4N-ARCHIVE-MEMBER-ERROR"
+      ],
+      "notes": "A conformant zip from Go's archive/zip: bit 3 is set and the local crc/sizes are zero, with the real values in the data descriptor after the data. Comparing the local header against the central directory without honouring the flag reported every such archive as a name mismatch, including committed benign fixtures."
+    },
     "safetensors_badoffsets.safetensors": {
       "expect": [
         "SC4N-SAFETENSORS-STRUCT"

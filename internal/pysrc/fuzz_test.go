@@ -1,6 +1,9 @@
 package pysrc
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // FuzzPythonLex asserts the lexer and the statement splicer never panic on
 // arbitrary bytes. The lexer is the one parser in the tree that keeps state
@@ -14,6 +17,11 @@ func FuzzPythonLex(f *testing.F) {
 	f.Add([]byte("if x:\n\tpass\n"))
 	f.Add([]byte("\x00\x01\x02"))
 	f.Add([]byte(""))
+	// One statement of deeply nested calls. The call analysis scans from each '('
+	// to the end of the statement, so the cost is quadratic in the nesting; the
+	// call-token budget bounds it (round 3), and the seed keeps the nesting axis in
+	// front of the fuzzer.
+	f.Add([]byte("exec(" + strings.Repeat("exec(", 400) + "1" + strings.Repeat(")", 401) + "\n"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > 1<<20 {

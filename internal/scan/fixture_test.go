@@ -154,6 +154,51 @@ func TestFixtureExpectations(t *testing.T) {
 // with — rather than by raising the bar for everything.
 var benignAllowlist = map[string]string{}
 
+// TestRound3FixtureCounts pins the two round-3 properties the set-based gate cannot
+// express. A contract of rule IDs says "this rule fires"; it cannot say "and only
+// once", nor "at this offset", and both are the point of the fixtures below: the
+// memo-alias finding is emitted once per stream rather than once per rebinding, and
+// the msgpack NaN finding is located at the blob's offset in the artifact rather
+// than at its index inside the blob.
+func TestRound3FixtureCounts(t *testing.T) {
+	t.Run("memo alias is emitted once", func(t *testing.T) {
+		fs := scanPaths(t, filepath.Join(fixtureRoot, "round3", "pickle_rebind.pkl"))
+		var aliases []report.Finding
+		for _, f := range fs {
+			if f.RuleID == "SC4N-PICKLE-MEMO-ALIAS" {
+				aliases = append(aliases, f)
+			}
+		}
+		if len(aliases) != 1 {
+			t.Fatalf("two rebindings produced %d SC4N-PICKLE-MEMO-ALIAS finding(s), want 1: %v", len(aliases), aliases)
+		}
+		// The one finding must carry the final count, not the count at the first
+		// rebinding, or a reader cannot tell a single rebinding from a stream of them.
+		if !strings.Contains(aliases[0].Evidence, "2 rebinding(s)") {
+			t.Fatalf("the finding does not carry the final rebinding count: %q", aliases[0].Evidence)
+		}
+	})
+
+	t.Run("msgpack NaN offset is the blob's offset", func(t *testing.T) {
+		fs := scanPaths(t, filepath.Join(fixtureRoot, "round3", "msgpack_nan.msgpack"))
+		var found bool
+		for _, f := range fs {
+			if f.RuleID != "SC4N-MSGPACK-NAN-PAYLOAD" {
+				continue
+			}
+			found = true
+			// The map header is 3 bytes, the bin8 header is 2, so the blob starts
+			// at 5; the NaN bytes are the first two bytes of that blob.
+			if f.Offset != 5 {
+				t.Fatalf("SC4N-MSGPACK-NAN-PAYLOAD offset = %d, want 5 (the blob's offset in the artifact)", f.Offset)
+			}
+		}
+		if !found {
+			t.Fatal("the NaN payload was not reported at all")
+		}
+	})
+}
+
 // TestBenignFixturesAreClean is the false-positive gate. A scanner that fires on a
 // real-structure torch state dict is not usable as a CI gate, so this is an
 // assertion about the whole benign set at once rather than per file.
