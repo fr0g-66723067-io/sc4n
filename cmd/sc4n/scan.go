@@ -54,7 +54,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&f.maxDepth, "max-depth", 4, "container nesting cap")
 	fs.StringVar(&f.maxDecomp, "max-decompress", "8GiB", "cumulative decompression cap per archive")
 	fs.Int64Var(&f.maxRatio, "max-ratio", 200, "decompression ratio cap")
-	fs.IntVar(&f.maxFindings, "max-findings", 100000, "finding cap")
+	fs.IntVar(&f.maxFindings, "max-findings", 100000, "finding cap, applied after -baseline suppression")
 	fs.DurationVar(&f.timeout, "timeout", 0, "bound the whole scan (e.g. 10m; 0 = unbounded)")
 	fs.StringVar(&f.root, "root", "", "containment root for path-shaped values")
 	fs.StringVar(&f.baseline, "baseline", "", "suppress findings already present in a previous JSON report")
@@ -93,6 +93,13 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "sc4n: scan needs at least one path (or -stdin -name NAME, or -hf-cache)")
 		return exitUsage
 	}
+	// The format is validated before anything else touches the filesystem: an
+	// invalid -format used to be caught by render() *after* os.Create had already
+	// truncated the previous report to zero bytes.
+	if !validFormat(f.format) {
+		fmt.Fprintf(stderr, "sc4n: unknown -format %q (want text, json, sarif or cyclonedx)\n", f.format)
+		return exitUsage
+	}
 	if _, err := report.ParseSeverity(f.failOn); err != nil {
 		fmt.Fprintf(stderr, "sc4n: %v\n", err)
 		return exitUsage
@@ -110,6 +117,18 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
+	// The baseline is loaded before the scan because it changes how the finding
+	// cap is applied: with a baseline the scan runs uncapped and the cap applies
+	// to what survives suppression.
+	var baseline map[string]bool
+	if f.baseline != "" {
+		base, err := policy.LoadBaseline(f.baseline)
+		if err != nil {
+			fmt.Fprintf(stderr, "sc4n: -baseline: %v\n", err)
+			return exitUsage
+		}
+		baseline = base
+	}
 	cfg := scan.Config{
 		Paths:       paths,
 		Limits:      l,
@@ -119,6 +138,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		DeepStats:   f.deepStats,
 		Timeout:     f.timeout,
 		MaxFindings: f.maxFindings,
+		Baseline:    baseline,
 	}
 	switch {
 	case f.stdin:
@@ -133,7 +153,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		// The expander runs before the walk and reports its own structural
 		// findings (an escaping symlink, a missing blob), so it needs the
 		// collector the report will be built from.
-		collector := report.NewCollector(l.MaxFindings)
+		collector := report.NewCollector(collectorLimit(f.maxFindings, l.MaxFindings, baseline))
 		entries, err := hfcache.Expand(dir, collector)
 		if err != nil {
 			fmt.Fprintf(stderr, "sc4n: -hf-cache: %v\n", err)
@@ -159,21 +179,11 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	suppressed := 0
-	if f.baseline != "" {
-		base, err := policy.LoadBaseline(f.baseline)
-		if err != nil {
-			fmt.Fprintf(stderr, "sc4n: -baseline: %v\n", err)
-			return exitUsage
-		}
-		suppressed = res.Collector.Suppress(base)
-	}
-
 	var timings map[string]int64
 	if f.timings {
 		timings = res.Timings
 	}
-	rep := report.Build(report.Tool{Name: "sc4n", Version: version}, f.root, res.Artifacts, res.Collector, reportLimits(l), timings, suppressed)
+	rep := report.Build(report.Tool{Name: "sc4n", Version: version}, f.root, res.Artifacts, res.Collector, reportLimits(l), timings, res.Suppressed)
 	rep.Unreadable = res.Unreadable
 	rep.Cancelled = res.Cancelled
 
@@ -264,6 +274,27 @@ func reportLimits(l limits.Limits) report.Limits {
 }
 
 // render writes rep in the requested format.
+// collectorLimit is the finding cap the collector is created with. With a baseline
+// it is unlimited, because suppression has to run before the cap.
+func collectorLimit(maxFindings, limitsDefault int, baseline map[string]bool) int {
+	if len(baseline) > 0 {
+		return 0
+	}
+	if maxFindings > 0 {
+		return maxFindings
+	}
+	return limitsDefault
+}
+
+// validFormat reports whether a -format value names an encoder.
+func validFormat(format string) bool {
+	switch format {
+	case "text", "json", "sarif", "cyclonedx":
+		return true
+	}
+	return false
+}
+
 func render(rep *report.Report, f scanFlags, w io.Writer) error {
 	switch f.format {
 	case "text":

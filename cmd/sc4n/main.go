@@ -87,7 +87,8 @@ scan flags:
   -max-depth N                 container nesting cap (default 4)
   -max-decompress BYTES        cumulative decompression cap per archive (default 8GiB)
   -max-ratio N                 decompression ratio cap (default 200)
-  -max-findings N              finding cap (default 100000)
+  -max-findings N              finding cap, applied after -baseline suppression
+                               (default 100000)
   -timeout DURATION            bound the whole scan (e.g. 10m)
   -root DIR                    containment root for path-shaped values
   -baseline FILE               suppress findings already present in a JSON report

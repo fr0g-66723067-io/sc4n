@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -435,5 +437,37 @@ func TestDuplicatePathsAreScannedOnce(t *testing.T) {
 			t.Fatalf("duplicate bom-ref %q", c.BOMRef)
 		}
 		seen[c.BOMRef] = true
+	}
+}
+
+// failingSource is a Source whose sequential reader fails after the first byte,
+// which is what a digest read hits when the underlying file goes away mid-scan.
+type failingSource struct{ name string }
+
+func (f failingSource) Name() string { return f.name }
+func (f failingSource) Size() int64  { return 64 }
+func (f failingSource) ReadAt(p []byte, off int64) (int, error) {
+	return 0, errFailingSource
+}
+func (f failingSource) Bytes(off, n int64) ([]byte, error) { return nil, errFailingSource }
+func (f failingSource) Reader(off int64) io.Reader         { return errReader{} }
+func (f failingSource) Close() error                       { return nil }
+
+var errFailingSource = errors.New("source: read failed")
+
+type errReader struct{}
+
+func (errReader) Read(p []byte) (int, error) { return 0, errFailingSource }
+
+// TestDigestFailureIsReported: a digest read that fails used to return an empty
+// digest and an empty scope with no error, so the row showed a size and no digest
+// and nothing said why.
+func TestDigestFailureIsReported(t *testing.T) {
+	digest, scope, err := digestSource(failingSource{name: "gone.bin"}, 1<<20)
+	if err == nil {
+		t.Fatal("a failing digest read returned no error")
+	}
+	if digest != "" || scope != "" {
+		t.Fatalf("digest=%q scope=%q on failure, want both empty", digest, scope)
 	}
 }

@@ -231,6 +231,28 @@ func (c *Collector) Suppress(fp map[string]bool) int {
 	return n
 }
 
+// Cap truncates the finding list to limit and returns the number discarded. It
+// exists so the cap can be applied *after* baseline suppression: when a baseline
+// is in play the scan runs uncapped, because a baselined finding must not consume
+// a cap slot and evict a genuinely new finding.
+func (c *Collector) Cap(limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.findings) <= limit {
+		return 0
+	}
+	n := len(c.findings) - limit
+	if c.dropped == 0 {
+		c.firstDropped = c.findings[limit].Artifact
+	}
+	c.dropped += n
+	c.findings = c.findings[:limit]
+	return n
+}
+
 // Sink is a Collector bound to one artifact name. Parsers hold a Sink, never the
 // Collector, so a container parser that recurses into a member re-binds the
 // artifact name for its inner findings.

@@ -74,6 +74,10 @@ type Config struct {
 	Timeout time.Duration
 	// MaxFindings is the finding cap; zero means the limits default.
 	MaxFindings int
+	// Baseline, when non-empty, is the fingerprint set a previous report stands
+	// for. Suppression runs here, before the finding cap, so a baselined finding
+	// cannot consume a cap slot and evict a new one.
+	Baseline map[string]bool
 	// Collector, when non-nil, receives every finding instead of a fresh
 	// collector. It exists for the hf-cache expander, which runs *before* the
 	// walk and has its own structural findings (a symlink that escapes the
@@ -91,6 +95,10 @@ type Result struct {
 	// Cancelled is true when the deadline stopped the walk early, so a partial
 	// result is never presented as a complete one.
 	Cancelled bool
+	// Suppressed is the number of findings -baseline removed. It is reported here
+	// rather than by the caller because suppression must run before the finding
+	// cap for the cap to mean what it says.
+	Suppressed int
 }
 
 const (
@@ -124,9 +132,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		maxFindings = l.MaxFindings
 	}
 
+	// With a baseline the scan runs uncapped and the cap is applied after
+	// suppression: a baselined finding must not consume a cap slot, or a new
+	// finding is evicted by an old one and the reported suppressed count is
+	// whatever happened to fit.
+	limit := maxFindings
+	if len(cfg.Baseline) > 0 {
+		limit = 0
+	}
 	collector := cfg.Collector
 	if collector == nil {
-		collector = report.NewCollector(maxFindings)
+		collector = report.NewCollector(limit)
 	}
 	sess := artifact.NewSession(collector, cfg.Root, l)
 	sess.DeepStats = cfg.DeepStats
@@ -149,6 +165,10 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		res.Artifacts = []report.ArtifactSummary{sum}
 		if sum.Error != "" {
 			res.Unreadable = 1
+		}
+		if len(cfg.Baseline) > 0 {
+			res.Suppressed = collector.Suppress(cfg.Baseline)
+			collector.Cap(maxFindings)
 		}
 		noteFindingsCap(collector, l)
 		res.Timings["total_ms"] = report.Millis(time.Since(start))
@@ -196,6 +216,10 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			}
 		}
 		res.Cancelled = cancelled.Load()
+	}
+	if len(cfg.Baseline) > 0 {
+		res.Suppressed = collector.Suppress(cfg.Baseline)
+		collector.Cap(maxFindings)
 	}
 	noteFindingsCap(collector, l)
 	res.Timings["total_ms"] = report.Millis(time.Since(start))
@@ -268,7 +292,11 @@ func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits
 	// The same digestSource the file path uses, so a -stdin run past MaxHashBytes
 	// reports sha256Scope="prefix" instead of claiming a full digest it did not
 	// compute.
-	sum.SHA256, sum.SHA256Scope = digestSource(src, l.MaxHashBytes)
+	var derr error
+	sum.SHA256, sum.SHA256Scope, derr = digestSource(src, l.MaxHashBytes)
+	if derr != nil {
+		sum.SubFormat = "digest unavailable: " + derr.Error()
+	}
 	f, perr := scanGuarded(sess, src, name, l)
 	sum.Format = f.String()
 	if perr != nil {
@@ -434,12 +462,13 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	// bandwidth, not resident memory, and it hides behind the parse.
 	var (
 		digest, scope string
+		digestErr     error
 		hashWG        sync.WaitGroup
 	)
 	hashWG.Add(1)
 	go func() {
 		defer hashWG.Done()
-		digest, scope = digestSource(src, l.MaxHashBytes)
+		digest, scope, digestErr = digestSource(src, l.MaxHashBytes)
 	}()
 
 	f, perr := scanGuarded(sess, src, name, l)
@@ -451,6 +480,10 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	if perr != nil {
 		sess.Collector.For(name).EmitExtra(artifact.RuleParseFailed, 0, perr.Error(), nil)
 		sum.SubFormat = "parse-error: " + perr.Error()
+	} else if digestErr != nil {
+		// The artifact was read and parsed but could not be hashed, so the row
+		// must say why it carries no digest.
+		sum.SubFormat = "digest unavailable: " + digestErr.Error()
 	}
 	if e.Digest != "" {
 		// The dedup key is the digest *and* its scope, so a prefix digest of a
@@ -561,7 +594,11 @@ var digestBufPool = sync.Pool{New: func() any { b := make([]byte, 4<<20); return
 // max caps the bytes hashed (Limits.MaxHashBytes). A capped digest is not a
 // lesser *finding*, it is a lesser *identity*, so the scope travels with it in
 // the report rather than being implied.
-func digestSource(s source.Source, max int64) (string, string) {
+// digestSource hashes the artifact, up to max bytes. It returns an error rather
+// than an empty digest so a caller can say *why* a scanned artifact has no
+// digest: silently returning "" left a row with a size, no digest and no error,
+// which reads as an artifact that simply has no digest.
+func digestSource(s source.Source, max int64) (string, string, error) {
 	size := s.Size()
 	if max <= 0 || max > size {
 		max = size
@@ -570,7 +607,7 @@ func digestSource(s source.Source, max int64) (string, string) {
 	if max == 0 {
 		// An empty artifact. io.CopyBuffer panics on a zero-length buffer, and
 		// there are no bytes to copy in any case.
-		return hex.EncodeToString(h.Sum(nil)), "full"
+		return hex.EncodeToString(h.Sum(nil)), "full", nil
 	}
 	bufp := digestBufPool.Get().(*[]byte)
 	defer digestBufPool.Put(bufp)
@@ -578,13 +615,13 @@ func digestSource(s source.Source, max int64) (string, string) {
 	// zero cap with a non-zero size.
 	buf := (*bufp)[:min(int64(len(*bufp)), max)]
 	if _, err := io.CopyBuffer(h, io.LimitReader(s.Reader(0), max), buf); err != nil {
-		return "", ""
+		return "", "", err
 	}
 	scope := "full"
 	if max < size {
 		scope = "prefix:" + strconv.FormatInt(max, 10)
 	}
-	return hex.EncodeToString(h.Sum(nil)), scope
+	return hex.EncodeToString(h.Sum(nil)), scope, nil
 }
 
 func digestBytes(b []byte) string {
