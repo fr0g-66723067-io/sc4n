@@ -7,7 +7,8 @@
 //     space-padded literal dict with exactly the keys descr, fortran_order and
 //     shape, then the array bytes. The dict is decoded with a literal reader —
 //     never eval — so a crafted header cannot run while being scanned. When
-//     descr names the object kind 'O' the data section is a pickle stream and is
+//     descr names the object kind 'O' — as a '|O' string or as an object field
+//     inside a dtype.descr list — the data section is a pickle stream and is
 //     dispatched to the pickle engine (the allow_pickle=True RCE path).
 //   - .npz: a zip whose members are .npy files. The container rules come from
 //     internal/archive and each member is dispatched through artifact.ScanMember,
@@ -52,8 +53,12 @@ type npyHeader struct {
 	// structured records that descr was written as a list rather than a string,
 	// which numpy does whenever the dtype has fields (dtype.descr is a list).
 	// Such a dtype has no single element size, so dtype is left empty and the
-	// declared length is not verified.
+	// declared length is not verified. fields holds the type descriptor of every
+	// field the list named, including nested structured fields; an 'O' in any of
+	// them means the data section is a pickle stream, exactly as for a bare '|O'
+	// string descr.
 	structured bool
+	fields     []string
 	// unknown lists top-level keys that are not one of descr, fortran_order,
 	// shape. numpy never writes any, so their presence is a structural finding.
 	unknown []string
@@ -68,10 +73,11 @@ func init() {
 		Magic:  "\\x93NUMPY",
 		Depth:  artifact.DepthDeep,
 		Notes: "the v1.0/v2.0/v3.0 header is decoded with a literal dict reader (never eval) and the " +
-			"declared shape is checked against the bytes remaining; a descr naming the object kind 'O' " +
-			"means the data section is a pickle stream, which is dispatched to the pickle engine (the " +
-			"numpy.load(allow_pickle=True) path). Structured/comma dtypes have no single element size, " +
-			"so their declared length is not verified.",
+			"declared shape is checked against the bytes remaining; a descr naming the object kind 'O' — " +
+			"as a string or as an object field inside a dtype.descr list — means the data section is a " +
+			"pickle stream, which is dispatched to the pickle engine (the numpy.load(allow_pickle=True) " +
+			"path). Structured/comma dtypes have no single element size, so their declared length is not " +
+			"verified.",
 	})
 	artifact.RegisterParser(artifact.FormatNPY, npyParser{})
 }
@@ -151,12 +157,22 @@ func parseNPY(ctx *artifact.Ctx, s source.Source) error {
 	dataLen := size - dataOff
 
 	// Object dtype: the data section is a pickle stream. Dispatch it rather than
-	// pretending it is an array of pointers.
-	if isObjectDtype(h.dtype) {
+	// pretending it is an array of pointers. A dtype with fields is written as
+	// dtype.descr (a list), so the object kind is looked for in the field
+	// descriptors too; numpy's own loader unpickles the data section whenever
+	// dtype.hasobject, and hasobject is true when any field names the object kind.
+	objField := objectField(h.fields)
+	if isObjectDtype(h.dtype) || objField != "" {
+		desc := h.dtype
+		detail := "descr " + strconv.Quote(desc)
+		if desc == "" {
+			desc = objField
+			detail = "dtype.descr field " + strconv.Quote(objField)
+		}
 		ctx.Sink.EmitExtra(RuleObjectArray, dataOff,
-			"descr "+strconv.Quote(h.dtype)+" is an object array; the data section is a pickle stream that "+
+			detail+" is an object array; the data section is a pickle stream that "+
 				"numpy.load reaches only with allow_pickle=True",
-			map[string]string{"dtype": h.dtype, "operation": "pickle-load"})
+			map[string]string{"dtype": desc, "operation": "pickle-load"})
 		if dataLen > 0 {
 			data, berr := s.Bytes(dataOff, dataLen)
 			if berr != nil && int64(len(data)) == 0 {
@@ -260,6 +276,9 @@ func parseNPYHeader(b []byte) (npyHeader, error) {
 			// shapes are accepted; a list is consumed without being interpreted.
 			if s, ok := p.str(); ok {
 				h.dtype = s
+			} else if fields, ok := p.descrFields(); ok {
+				h.structured = true
+				h.fields = fields
 			} else if p.list() {
 				h.structured = true
 			} else {
@@ -508,11 +527,103 @@ func (p *litParser) skipScalar() bool {
 	return false
 }
 
+// descrFields reads a descr written as dtype.descr — a bracketed list of field
+// tuples such as [('a', '<i4'), ('b', '<f8')] or [('a', '<i4', (2,))] — and
+// returns the type descriptor of every field, including the fields of a nested
+// structured dtype. It is the list counterpart of the string form: numpy writes
+// dtype.descr whenever the dtype has fields, and its loader unpickles the data
+// section whenever dtype.hasobject, which is true when any field names the object
+// kind, so an 'O' field anywhere in the list is the same RCE path as a bare '|O'.
+//
+// On failure the position is left unchanged, so the caller can fall back to the
+// plain group() consumption for a list shape this reader does not model.
+func (p *litParser) descrFields() ([]string, bool) {
+	start := p.i
+	fields, ok := p.descrFieldsAt()
+	if !ok {
+		p.i = start
+		return nil, false
+	}
+	return fields, true
+}
+
+func (p *litParser) descrFieldsAt() ([]string, bool) {
+	if p.i >= len(p.b) || p.b[p.i] != '[' {
+		return nil, false
+	}
+	p.i++
+	var out []string
+	for {
+		p.ws()
+		if p.eat(']') {
+			return out, true
+		}
+		if p.i >= len(p.b) || p.b[p.i] != '(' {
+			return nil, false
+		}
+		p.i++
+		p.ws()
+		// The first element is the field name; a titled field writes it as a
+		// ('title', 'name') tuple instead of a bare string.
+		if _, ok := p.str(); !ok {
+			if p.i >= len(p.b) || p.b[p.i] != '(' || !p.group() {
+				return nil, false
+			}
+		}
+		p.ws()
+		if !p.eat(',') {
+			return nil, false
+		}
+		p.ws()
+		// The second element is the field's dtype: a string, or a nested
+		// dtype.descr list for a nested structured field.
+		if s, ok := p.str(); ok {
+			out = append(out, s)
+		} else if nested, ok := p.descrFieldsAt(); ok {
+			out = append(out, nested...)
+		} else {
+			return nil, false
+		}
+		// An optional third element is the sub-array shape, e.g. ('a', '<i4', (2,)).
+		p.ws()
+		if p.eat(',') {
+			p.ws()
+			if !p.skipValue() {
+				return nil, false
+			}
+			p.ws()
+		}
+		if !p.eat(')') {
+			return nil, false
+		}
+		p.ws()
+		if p.eat(',') {
+			continue
+		}
+		if p.eat(']') {
+			return out, true
+		}
+		return nil, false
+	}
+}
+
 // isObjectDtype reports whether a descriptor names the object kind. numpy writes
 // '|O' for object arrays; the check is a substring so the endianness prefix and
 // the optional size digit do not matter.
 func isObjectDtype(dtype string) bool {
 	return strings.ContainsRune(dtype, 'O')
+}
+
+// objectField returns the first field descriptor in a dtype.descr list that names
+// the object kind, or "". It is how an object field inside a structured dtype is
+// found: the list form has no single dtype string for isObjectDtype to inspect.
+func objectField(fields []string) string {
+	for _, f := range fields {
+		if isObjectDtype(f) {
+			return f
+		}
+	}
+	return ""
 }
 
 // dtypeSize returns the byte size of one element of a simple numpy descriptor,
