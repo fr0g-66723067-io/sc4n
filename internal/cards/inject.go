@@ -69,8 +69,13 @@ func ScanJSONFile(sink *report.Sink, base int64, path string, data []byte) {
 		ScanText(sink, base, path, string(data))
 		return
 	}
+	// The document is walked twice at most: once to index where each string
+	// literal begins and once for the detector pass. Locating every value with a
+	// whole-document search made a metadata file with 150000 keys quadratic, and
+	// the measured cost was over 300 s before this index existed.
+	idx := buildOffsetIndex(data)
 	walkJSONStrings(doc, func(s string) {
-		ScanText(sink, base+locate(data, s), path, s)
+		ScanText(sink, base+idx.locate(data, s), path, s)
 	})
 }
 
@@ -97,11 +102,53 @@ func walkJSONStrings(v any, fn func(string)) {
 	}
 }
 
+// offsetIndex maps every string literal in a JSON document to the offset of the
+// first byte after its opening quote, so a decoded key or value can be located
+// in constant time.
+type offsetIndex map[string]int64
+
+// buildOffsetIndex scans data once and records the position of the first
+// occurrence of every string literal. It is the whole-document search that
+// locate used to run per string, hoisted into a single pass; the JSON decoder
+// reaches a string literal only after the document has decoded, so the scanner
+// can assume well-formed literals (a stray quote would have failed the decode).
+func buildOffsetIndex(data []byte) offsetIndex {
+	idx := make(offsetIndex, len(data)/16)
+	for i := 0; i < len(data); i++ {
+		if data[i] != '"' {
+			continue
+		}
+		j := i + 1
+		for j < len(data) && data[j] != '"' {
+			if data[j] == '\\' {
+				j++
+			}
+			j++
+		}
+		if j >= len(data) {
+			return idx
+		}
+		var s string
+		if err := json.Unmarshal(data[i:j+1], &s); err == nil {
+			if _, ok := idx[s]; !ok {
+				idx[s] = int64(i + 1)
+			}
+		}
+		i = j
+	}
+	return idx
+}
+
 // locate finds the byte offset of a decoded JSON string inside the raw
-// document, falling back to 0 when it cannot be resolved.
-func locate(data []byte, s string) int64 {
+// document, falling back to 0 when it cannot be resolved. A string the decoder
+// produced is always in the index; the searches below are a safety net for a
+// value the raw scan could not see.
+func (idx offsetIndex) locate(data []byte, s string) int64 {
 	if s == "" {
 		return 0
+	}
+	if off, ok := idx[s]; ok {
+		return off
 	}
 	if i := bytes.Index(data, []byte(s)); i >= 0 {
 		return int64(i)

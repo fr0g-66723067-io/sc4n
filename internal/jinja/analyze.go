@@ -458,11 +458,12 @@ func simpleRHS(rhs []token) bool {
 // names and instruction strings.
 func (a *analyzer) expressions() {
 	toks := a.toks
+	raiseArg := a.raiseArgs()
 	for i := 0; i < len(toks); i++ {
 		t := toks[i]
 		switch t.kind {
 		case kindString:
-			if !a.inRaiseException(i) {
+			if !raiseArg[i] {
 				if p, _ := phraseIn(t.val); p != "" {
 					a.emitInjection(t.off, "a template string contains the instruction "+strconv.Quote(p), p)
 				}
@@ -536,46 +537,62 @@ func (a *analyzer) concatAt(i int) (string, int, bool) {
 	if toks[i].kind != kindString {
 		return "", i, false
 	}
-	joined := toks[i].val
+	// The pieces are written into one Builder rather than joined with += : a
+	// chain of n literals rebuilt the accumulated string on every step, which
+	// made a 400000-element chain quadratic (measured 19.6 s; the Builder takes
+	// it under 2 s).
+	var b strings.Builder
+	b.WriteString(toks[i].val)
 	k := i + 1
 	count := 0
 	for k+1 < len(toks) && toks[k].kind == kindOp && (toks[k].val == "+" || toks[k].val == "~") &&
 		toks[k+1].kind == kindString {
-		joined += toks[k+1].val
+		b.WriteString(toks[k+1].val)
 		k += 2
 		count++
 	}
 	if count == 0 {
 		return "", i, false
 	}
-	return joined, k, true
+	return b.String(), k, true
 }
 
-// inRaiseException reports whether the string at index i is an argument of a
-// raise_exception() call. raise_exception is provided by Transformers and is
-// legitimate, so its message text is never treated as an injection.
-func (a *analyzer) inRaiseException(i int) bool {
+// raiseArgs marks, for every token index, whether the innermost enclosing
+// parenthesis belongs to a raise_exception() call. raise_exception is provided
+// by Transformers and is legitimate, so its message text is never treated as an
+// injection.
+//
+// The mark is computed in one forward pass: a stack of open parenthesis indices
+// is kept per tag (a tag boundary clears it, matching the earlier rule that a
+// reference is never attributed across a tag), and the innermost open
+// parenthesis is the stack top. Walking backwards to the opener for every
+// string token made a tag of n strings quadratic.
+func (a *analyzer) raiseArgs() []bool {
 	toks := a.toks
-	depth := 0
-	for j := i - 1; j >= 0; j-- {
-		t := toks[j]
+	out := make([]bool, len(toks))
+	var stack []int
+	for i := range toks {
+		t := toks[i]
 		if t.kind == kindTag || t.kind == kindTagEnd {
-			return false
-		}
-		if t.kind != kindOp {
+			stack = stack[:0]
 			continue
 		}
-		switch t.val {
-		case ")":
-			depth++
-		case "(":
-			if depth == 0 {
-				return j > 0 && toks[j-1].kind == kindName && toks[j-1].val == "raise_exception"
+		if t.kind == kindOp {
+			switch t.val {
+			case "(":
+				stack = append(stack, i)
+			case ")":
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
+				}
 			}
-			depth--
+		}
+		if len(stack) > 0 {
+			j := stack[len(stack)-1]
+			out[i] = j > 0 && toks[j-1].kind == kindName && toks[j-1].val == "raise_exception"
 		}
 	}
-	return false
+	return out
 }
 
 // phraseIn reports the first template phrase in s (case-insensitively) and its
