@@ -132,7 +132,6 @@ func (savedModelParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 			w.walkNode(o, n)
 		}
 	}
-	w.finish()
 	return nil
 }
 
@@ -141,16 +140,12 @@ type graphWalker struct {
 	ctx   *artifact.Ctx
 	s     source.Source
 	nodes int
-	trunc bool
+	// nodeCapReported guards the one limit finding the node cap emits.
+	nodeCapReported bool
 }
 
 func (w *graphWalker) structAt(off int64, msg string) {
-	w.trunc = true
 	w.ctx.Sink.Emit(ruleTFStruct, off, msg)
-}
-
-func (w *graphWalker) finish() {
-	// The structure finding is emitted where it happened; nothing else to do here.
 }
 
 // walkMetaGraph walks a MetaGraphDef, returning true when it found a graph_def.
@@ -298,10 +293,25 @@ func (w *graphWalker) walkAssetDef(o, n int64) {
 	}
 }
 
+// maxGraphNodes bounds how many NodeDefs one GraphDef may contribute to the walk.
+// It is a memory bound rather than a configured limit: a GraphDef is walked by
+// streaming its records, and a file declaring more nodes than this is not a model
+// anyone runs.
+const maxGraphNodes = 1_000_000
+
 // walkNode walks one NodeDef. name is field 1, op is field 2, and the attributes
 // are field 5 (a map<string, AttrValue>).
 func (w *graphWalker) walkNode(o, n int64) {
-	if w.nodes++; w.nodes > 1_000_000 {
+	if w.nodes++; w.nodes > maxGraphNodes {
+		// A GraphDef with more than a million nodes is a few MB of declared
+		// length, and everything past the cap would otherwise be unscanned in
+		// silence: report that the walk stopped rather than letting the absence
+		// of findings read as a clean file.
+		if !w.nodeCapReported {
+			w.nodeCapReported = true
+			limits.Emit(w.ctx.Sink, limits.RuleEntries, "MaxGraphNodes", int64(w.nodes), maxGraphNodes,
+				"the GraphDef declares more nodes than the walk reads, so the remaining nodes were not analysed")
+		}
 		return
 	}
 	r := newPBReader(w.s, o, o+n)
@@ -416,7 +426,14 @@ func (w *graphWalker) collectAttrStrings(o, n int64, depth int) []string {
 // --- probes -------------------------------------------------------------
 
 func probeMetaGraph(s source.Source, o, n int64) bool {
-	r := newPBReader(s, o, o+min64(n, probeNodeBytes*4))
+	// The reader spans the whole declared body, clamped to the source, rather than
+	// a fixed probe window: bytesValue refuses a nested length that exceeds the
+	// reader's end, so a window smaller than a MetaGraphDef's graph_def (which is
+	// every real SavedModel — tens of KB to MBs) made the probe fail and the file
+	// was dispatched as text. The cost stays bounded because the loop reads at most
+	// 16 field *headers*; a body is only descended into by probeGraph/probeNode,
+	// whose own readers are windowed.
+	r := newPBProbe(s, o, n)
 	for range 16 {
 		num, typ, _, ok := r.next()
 		if !ok {
@@ -440,7 +457,9 @@ func probeMetaGraph(s source.Source, o, n int64) bool {
 }
 
 func probeGraph(s source.Source, o, n int64) bool {
-	r := newPBReader(s, o, o+min64(n, probeNodeBytes*8))
+	// Same reason as probeMetaGraph: a GraphDef whose node records exceed a fixed
+	// window must still be recognised, or a real SavedModel is not parsed at all.
+	r := newPBProbe(s, o, n)
 	for range 16 {
 		num, typ, _, ok := r.next()
 		if !ok {
