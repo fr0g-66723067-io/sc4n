@@ -769,6 +769,32 @@ func TestMemoAliasNeedsDistinctSlots(t *testing.T) {
 	}
 }
 
+// TestMemoAliasIgnoresInstanceBindings is the regression for counting every value
+// that *carries* a name rather than every name. Val.global is set on kInstance too
+// (the class an object was built from), so an ordinary protocol-4/5 class +
+// instance pair — pickle.dumps(Evil(), 4), and every real numpy or joblib stream —
+// reported SC4N-PICKLE-MEMO-ALIAS "bound in 2 memo slots" for a name the stream
+// binds exactly once. A name-based allowlist scanner sees one STACK_GLOBAL, so
+// there was no evasion to report.
+func TestMemoAliasIgnoresInstanceBindings(t *testing.T) {
+	// PROTO 4, STACK_GLOBAL os/system, ('id',), REDUCE, MEMOIZE, STOP: one name
+	// and one instance built from it, each in its own memo slot.
+	data := []byte{opPROTO, 4}
+	data = append(data, binUnicode("os")...)
+	data = append(data, binUnicode("system")...)
+	data = append(data, opSTACK_GLOBAL)
+	data = append(data, binUnicode("id")...)
+	data = append(data, opTUPLE1)
+	data = append(data, opREDUCE)
+	data = append(data, opMEMOIZE)
+	data = append(data, opSTOP)
+
+	_, fs := walk(t, data)
+	mustNotHave(t, fs, "SC4N-PICKLE-MEMO-ALIAS")
+	// The call itself is still reported; the fix must not silence the stream.
+	mustHave(t, fs, "SC4N-PICKLE-GLOBAL-CRITICAL")
+}
+
 // TestMemoOverwriteEmitsOncePerStream pins the bounded-emission fix: the emit key
 // used to embed the rebinding counter, which made it unique per rebinding, so a
 // 400 KB stream of BINPUT 0 produced 100000 findings (479 MB resident) instead of

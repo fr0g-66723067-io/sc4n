@@ -259,7 +259,8 @@ var (
 			"name. The reference unpickler's counterpart, torch's get_globals_in_pkl, scans a stream for " +
 			"names and therefore sees exactly one binding per name; a stream that binds an allowlisted " +
 			"name in two places, or rebinds a slot, is the ShadowPickle shape (arXiv 2607.17503) that " +
-			"defeats allowlist-by-name. A benign weights-only file binds each name once.",
+			"defeats allowlist-by-name. A benign stream binds each *name* once — the class an object was " +
+			"built from is a different value in a different slot, and is not a second binding.",
 		Refs: []string{"https://arxiv.org/abs/2607.17503"},
 	})
 

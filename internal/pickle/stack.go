@@ -318,7 +318,13 @@ func (m *memo) put(i int, v Val) (overwrote bool, ok bool) {
 		m.slots[i] = v
 		m.set[i] = true
 	}
-	if v.global != nil {
+	// Only a value that *is* a name records a binding. Val.global is also set on
+	// kInstance (the class an object was built from), so counting every value that
+	// merely carries a name recorded the class *and* each instance built from it:
+	// every protocol-4/5 class+instance pair then reported SC4N-PICKLE-MEMO-ALIAS
+	// ("bound in 2 memo slots"), on an ordinary numpy or joblib stream, where the
+	// name is bound once and the instance is a different value.
+	if v.kind == kGlobal && v.global != nil {
 		m.noteGlobal(v.global.QualName(), i)
 	}
 	if overwrote {
