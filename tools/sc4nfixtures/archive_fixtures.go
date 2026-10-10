@@ -116,6 +116,18 @@ func archiveFixtures(f *fixtureSet) {
 		data:   []byte("sc4n benign archive fixture\nthe quick brown fox\n"),
 		method: 8,
 	}}))
+
+	// --- zip64 end-of-central-directory record, non-saturated 32-bit fields ------
+	// Python's zipfile (and therefore torch.save and HF's Trainer) writes a zip64
+	// end-of-central-directory record and its locator even when every value fits
+	// in 32 bits. Deriving the prefix base from the EOCD instead of from the
+	// record that follows the directory put the directory start inside the
+	// directory itself, so the whole archive was reported unparseable and the
+	// members — the only place the payload lives — were never opened.
+	f.add("archive/training_args_zip64.bin", arcZipWithZip64([]arcZipSpec{
+		{name: "training_args/data.pkl", data: arcGadgetPickle(), method: 0},
+		{name: "training_args/byteorder", data: []byte("little"), method: 0},
+	}))
 }
 
 // arcSafetensorsTrailing returns a safetensors stream whose single U8 tensor
@@ -329,6 +341,62 @@ func arcWriteEOCD(buf *bytes.Buffer, entries int, cdSize, cdOff uint32) {
 	buf.Write(b[:])
 }
 
+// arcZipWithZip64 writes the layout Python's zipfile emits for an archive it
+// decided to write with a zip64 record: local records, the central directory, a
+// zip64 end-of-central-directory record, its locator, and an EOCD whose 32-bit
+// fields still carry the real (non-saturated) values. Only the extra record
+// before the EOCD distinguishes it from arcZip.
+func arcZipWithZip64(specs []arcZipSpec) []byte {
+	var buf bytes.Buffer
+	type rec struct {
+		name              string
+		method            uint16
+		crc, comp, uncomp uint32
+		off               uint32
+	}
+	recs := make([]rec, len(specs))
+	for i, sp := range specs {
+		payload := sp.data
+		if sp.method == 8 {
+			payload = arcDeflate(sp.data)
+		}
+		crc := crc32.ChecksumIEEE(sp.data)
+		off := uint32(buf.Len())
+		arcWriteLocal(&buf, sp.method, crc, uint32(len(payload)), uint32(len(sp.data)), sp.name)
+		buf.Write(payload)
+		recs[i] = rec{name: sp.name, method: sp.method, crc: crc,
+			comp: uint32(len(payload)), uncomp: uint32(len(sp.data)), off: off}
+	}
+	cdOff := uint32(buf.Len())
+	for _, r := range recs {
+		arcWriteCentral(&buf, r.name, r.method, r.crc, r.comp, r.uncomp, 0, r.off)
+	}
+	cdSize := uint32(buf.Len()) - cdOff
+
+	// zip64 EOCD record: 56 bytes total, 44 after the size field. Entries and
+	// directory fields are 64-bit; the record offset is what the reader needs.
+	var z [56]byte
+	binary.LittleEndian.PutUint32(z[0:], 0x06064b50)
+	binary.LittleEndian.PutUint64(z[4:], 44)
+	binary.LittleEndian.PutUint16(z[12:], 45) // version made by
+	binary.LittleEndian.PutUint16(z[14:], 45) // version needed
+	binary.LittleEndian.PutUint64(z[24:], uint64(len(recs)))
+	binary.LittleEndian.PutUint64(z[32:], uint64(len(recs)))
+	binary.LittleEndian.PutUint64(z[40:], uint64(cdSize))
+	binary.LittleEndian.PutUint64(z[48:], uint64(cdOff))
+	z64Off := uint32(buf.Len())
+	buf.Write(z[:])
+
+	var loc [20]byte
+	binary.LittleEndian.PutUint32(loc[0:], 0x07064b50)
+	binary.LittleEndian.PutUint64(loc[8:], uint64(z64Off))
+	binary.LittleEndian.PutUint32(loc[16:], 1)
+	buf.Write(loc[:])
+
+	arcWriteEOCD(&buf, len(recs), cdSize, cdOff)
+	return buf.Bytes()
+}
+
 // archiveExpectations is the rule contract for the container fixtures. The
 // "forbid" half is deliberately sparse here: the point of these fixtures is that
 // a member rule fires and the walk continues, so a missing rule is the failure
@@ -391,6 +459,17 @@ func archiveExpectations() (map[string]expectation, map[string]expectation) {
 				"MaxStringBlob — holding a valid safetensors with 16 trailing bytes. " +
 				"It proves the member's *content* was parsed (zero-copy Section, no " +
 				"buffer, no temp file), not merely listed.",
+		},
+		"archive/training_args_zip64.bin": {
+			Expect: []string{"SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"},
+			Forbid: []string{"SC4N-PARSE-FAILED"},
+			Notes: "A zip carrying a zip64 end-of-central-directory record with " +
+				"non-saturated 32-bit fields (Python's zipfile and torch.save write " +
+				"this shape) and the HF Trainer member layout " +
+				"training_args/{data.pkl,byteorder}. The prefix base must come from the " +
+				"record that follows the directory, not from the EOCD, or the archive " +
+				"is reported unparseable and the members are never opened. Step 4 adds " +
+				"SC4N-FORMAT-EXTENSION-MISMATCH to Forbid once .bin accepts a zip.",
 		},
 	}
 	benign := map[string]expectation{

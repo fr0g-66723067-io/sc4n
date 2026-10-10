@@ -1,6 +1,16 @@
 {
   "version": 1,
   "fixtures": {
+    "archive/training_args_zip64.bin": {
+      "expect": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-REDUCE"
+      ],
+      "forbid": [
+        "SC4N-PARSE-FAILED"
+      ],
+      "notes": "A zip carrying a zip64 end-of-central-directory record with non-saturated 32-bit fields (Python's zipfile and torch.save write this shape) and the HF Trainer member layout training_args/{data.pkl,byteorder}. The prefix base must come from the record that follows the directory, not from the EOCD, or the archive is reported unparseable and the members are never opened. Step 4 adds SC4N-FORMAT-EXTENSION-MISMATCH to Forbid once .bin accepts a zip."
+    },
     "card_hidden/README.md": {
       "expect": [
         "SC4N-CARD-HIDDEN",

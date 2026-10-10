@@ -46,6 +46,17 @@ func le64(b []byte) uint64 {
 	return uint64(le32(b)) | uint64(le32(b[4:]))<<32
 }
 
+// isCentralAt reports whether the four bytes at off are a central-directory
+// signature. It is how the reader decides that the recorded directory offset
+// needs no prefix base.
+func isCentralAt(s source.Source, off int64) bool {
+	if off < 0 || off+4 > s.Size() {
+		return false
+	}
+	b, _ := s.Bytes(off, 4)
+	return len(b) == 4 && le32(b) == sigCentral
+}
+
 // looksZip recognises a zip by its leading magic or, when the file has a
 // prefix, by a valid end-of-central-directory record.
 func looksZip(s source.Source, l limits.Limits) bool {
@@ -137,25 +148,35 @@ func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, zipDirInfo,
 	cdSize := int64(le32(end[12:]))
 	cdOff := int64(le32(end[16:]))
 
+	// Try the zip64 record whether or not the 32-bit fields are saturated.
+	// Python's zipfile and torch write a zip64 end-of-central-directory record
+	// *and* its locator even when every value fits in 32 bits, so gating on the
+	// saturated sentinels left z64Pos at -1 and the prefix base below wrong by
+	// the length of the whole central directory. readZip64 only reads and
+	// validates, so attempting it always is safe: a zip without a locator or
+	// without the record signature returns an error and changes nothing.
 	z64Pos := int64(-1)
-	if entriesTotal == 0xffff || cdSize == 0xffffffff || cdOff == 0xffffffff {
-		z64EOCD, z64Size, z64Off, z64Entries, zerr := readZip64(s, eocdPos)
-		if zerr == nil {
-			entriesTotal, cdSize, cdOff = z64Entries, z64Size, z64Off
-			z64Pos = z64EOCD
-		}
+	if z64EOCD, z64Size, z64Off, z64Entries, zerr := readZip64(s, eocdPos); zerr == nil {
+		entriesTotal, cdSize, cdOff = z64Entries, z64Size, z64Off
+		z64Pos = z64EOCD
 	}
 
 	// A zip may be prefixed with arbitrary bytes (a self-extracting stub, or
 	// torch's "prefixed archive"): every directory offset is then relative to a
-	// non-zero base. Derive it the way the reference readers do.
-	anchor := eocdPos
-	if z64Pos >= 0 {
-		anchor = z64Pos
-	}
-	base := anchor - cdSize - cdOff
-	if base < 0 {
-		base = 0
+	// non-zero base. Two rules, in order: the literal offset wins when it
+	// already holds a central-directory signature; otherwise the base is the
+	// distance from the directory to the record that follows it — the zip64
+	// end-of-central-directory record when present, else the EOCD.
+	base := int64(0)
+	if !isCentralAt(s, cdOff) {
+		anchor := eocdPos
+		if z64Pos >= 0 {
+			anchor = z64Pos
+		}
+		base = anchor - cdSize - cdOff
+		if base < 0 {
+			base = 0
+		}
 	}
 	cdStart := base + cdOff
 	if cdStart < 0 || cdStart+cdSize > s.Size() {
