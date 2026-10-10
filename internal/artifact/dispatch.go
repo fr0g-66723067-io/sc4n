@@ -334,7 +334,7 @@ func init() {
 	RegisterFormat(Info{Format: FormatRar, Magic: "Rar!\\x1a\\x07", Depth: DepthNone, Container: false,
 		Notes: "NOT DECOMPRESSED (no stdlib rar decoder). Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION."})
 	RegisterFormat(Info{Format: FormatZlibJoblibLegacy, Magic: "ZF", Depth: DepthNone, Container: false,
-		Notes: "joblib's pre-0.10 legacy format is a 2-byte magic followed by a zlib stream, so it is not directly decompressible; reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION rather than guessed at."})
+		Notes: "joblib's pre-0.10 z-file framing: a 21-byte header — \"ZF\" plus the uncompressed length as a space-padded 0x-prefixed hex string — followed by a stdlib zlib stream. sc4n recognises the frame (both the header shape and the zlib stream must be plausible) but does not unwrap it, so the payload is not scanned; reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION naming the framing."})
 	RegisterFormat(Info{Format: FormatNative, Magic: "\\x7fELF | MZ | Mach-O | OLE | !<arch>", Depth: DepthShallow,
 		Notes: "header validity is checked with debug/elf, debug/macho and debug/pe; a bare magic match without a valid header is reported at info only. A valid executable inside a model artifact is SC4N-POLYGLOT-NATIVE."})
 

@@ -717,8 +717,14 @@ func emitUnsupportedFormat(ctx *artifact.Ctx, s source.Source, f artifact.Format
 	if alg == "none" {
 		alg = f.String()
 	}
-	ctx.Sink.EmitExtra(ruleArchiveUnsupportedCompression, 0,
-		alg+" at offset 0; NOT DECOMPRESSED (no standard-library decoder)",
+	ev := alg + " at offset 0; not unwrapped (no decoder for this framing)"
+	if f == artifact.FormatZlibJoblibLegacy {
+		// The payload here *is* a stdlib zlib stream; what sc4n does not implement
+		// is the pre-0.10 joblib framing around it, so "no standard-library
+		// decoder" would name the wrong reason.
+		ev += ": \"ZF\" plus a space-padded 0x-prefixed hex length, then a stdlib zlib stream"
+	}
+	ctx.Sink.EmitExtra(ruleArchiveUnsupportedCompression, 0, ev,
 		map[string]string{"algorithm": alg, "format": f.String(), "offset": "0"})
 }
 

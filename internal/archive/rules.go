@@ -139,7 +139,7 @@ var (
 		CWE:        []string{"CWE-693"},
 		Class:      "archive",
 		Description: "The bytes are wrapped in a compression algorithm for which the Go standard library has " +
-			"no decoder (xz, lzma, lz4, zstd, 7z, rar, or joblib's legacy 'ZF'). sc4n does not shell out to a " +
+			"no decoder (xz, lzma, lz4, zstd, 7z, rar). sc4n does not shell out to a " +
 			"decompressor, so the payload inside was NOT scanned. The algorithm and the offset are named in " +
 			"the evidence. A 7z file named .pt is the February 2025 Hugging Face campaign: the loader still " +
 			"deserialised it while every extension-driven scanner saw \"not a zip\".",
