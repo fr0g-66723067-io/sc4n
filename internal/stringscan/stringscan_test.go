@@ -175,6 +175,19 @@ func TestSecretValueIsRedacted(t *testing.T) {
 			if strings.Contains(f.Evidence, "wJalrXUtnFEMI") {
 				t.Fatalf("the secret value leaked into the evidence: %q", f.Evidence)
 			}
+			// The sentence names the *shape* that matched, not the rule's title:
+			// interpolating the title produced "a value that matches the Data
+			// string contains what looks like a hard-coded secret shape is
+			// present and has been masked".
+			if !strings.Contains(f.Evidence, "AWS_SECRET_ACCESS_KEY=") {
+				t.Fatalf("the evidence does not name the matched shape: %q", f.Evidence)
+			}
+			if strings.Contains(f.Evidence, f.Title) {
+				t.Fatalf("the evidence interpolates the rule title: %q", f.Evidence)
+			}
+			if f.Extra["shape"] != "AWS_SECRET_ACCESS_KEY=" {
+				t.Fatalf("shape extra = %q", f.Extra["shape"])
+			}
 		}
 	}
 	if !found {
