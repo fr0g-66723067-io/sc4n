@@ -1,0 +1,15 @@
+# `make build` / `go build ./cmd/sc4n` drops the CLI in either of these places.
+/sc4n
+/cmd/sc4n/sc4n
+/bin/
+
+# Generated big fixtures are written to $TMPDIR by the -tags=bigfixtures
+# benchmarks and must never enter git. Small, deterministic fixtures under
+# testdata/ ARE committed (the expectation gate diffs them).
+/testdata/big/
+*.safetensors.tmp
+
+# Editor and OS droppings.
+.DS_Store
+*~
+*.swp

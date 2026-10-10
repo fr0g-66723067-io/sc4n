@@ -1,0 +1,18 @@
+sc4n
+Copyright 2026 fr0g <fr0g@66723067.io>
+
+sc4n's pickle opcode table (internal/pickle/opcodes.go) is a transcription of
+the opcode descriptors published in CPython's Lib/pickletools.py, which is
+distributed under the Python Software Foundation License Version 2. The
+transcription records the upstream name, wire code, argument kind and protocol
+for each opcode; no CPython source text is copied verbatim.
+
+sc4n's pickle allowlist (internal/pickle/allowlist.go) mirrors the static and
+dynamically derived entries of PyTorch's torch/_weights_only_unpickler.py,
+which is distributed under the BSD-3-Clause licence, Copyright (c) 2016-     Meta
+Platforms, Inc. and contributors. Only the qualified names of the allowlisted
+callables are reproduced.
+
+sc4n's GGML type table (internal/gguf/types.go) records the type identifiers and
+block sizes of ggml.h from the ggml-org/ggml project, distributed under the MIT
+licence, Copyright (c) 2023-2026 The ggml authors.

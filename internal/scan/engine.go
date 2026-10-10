@@ -1,0 +1,470 @@
+// Package scan drives a scan: it expands the paths it was given into a
+// deterministic work list, runs one artifact per worker, and merges the results
+// in a fixed order.
+//
+// The two properties that make sc4n usable as a CI gate are implemented here:
+//
+//   - determinism: the work list is sorted, each artifact is handled by exactly
+//     one worker (no intra-artifact fan-out, which would interleave finding
+//     order), and the report sorts what it emits. Two runs over the same bytes
+//     produce byte-identical JSON.
+//   - bounded memory: a size-weighted budget admits large artifacts, with a
+//     stricter cap on how many multi-gigabyte files are mapped at once, and a file
+//     large enough to matter is memory-mapped rather than read.
+package scan
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
+	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
+	"github.com/fr0g-66723067-io/sc4n/internal/source"
+)
+
+// Entry is one artifact to scan.
+type Entry struct {
+	// Path is where the bytes are read from.
+	Path string
+	// Display is the name used in findings. It defaults to Path.
+	Display string
+	// Digest, when set, is a content key: an entry whose digest was already
+	// scanned is recorded as a duplicate. The hf-cache walker sets it from the
+	// blob file name so that one blob referenced from twenty revisions is
+	// scanned once and labelled afterwards.
+	Digest string
+}
+
+// Config is the scan request.
+type Config struct {
+	// Paths are files or directories to scan.
+	Paths []string
+	// Entries, when non-empty, replaces Paths (used by the hf-cache walker and
+	// by tests).
+	Entries []Entry
+	// StdinName, when non-empty, reads exactly one artifact from Stdin under that
+	// name, which is what -stdin -name does.
+	StdinName string
+	// Stdin is the reader for StdinName.
+	Stdin io.Reader
+
+	Limits limits.Limits
+	// Jobs is the worker count; zero means runtime.NumCPU().
+	Jobs int
+	// MemBudget caps the total size of artifacts mapped at once.
+	MemBudget int64
+	// Root is the containment root for path-shaped values.
+	Root string
+	// DeepStats enables the informational weight-statistics rules.
+	DeepStats bool
+	// Timeout, when non-zero, bounds the whole scan.
+	Timeout time.Duration
+	// MaxFindings is the finding cap; zero means the limits default.
+	MaxFindings int
+}
+
+// Result is the outcome of a scan.
+type Result struct {
+	Collector  *report.Collector
+	Artifacts  []report.ArtifactSummary
+	Unreadable int
+	Timings    map[string]int64
+	// Cancelled is true when the deadline stopped the walk early, so a partial
+	// result is never presented as a complete one.
+	Cancelled bool
+}
+
+const (
+	// defaultMemBudget is the total size of artifacts admitted concurrently.
+	defaultMemBudget = 1 << 30
+	// largeArtifact is the size at which the stricter concurrency cap applies.
+	largeArtifact = 1 << 30
+	// maxConcurrentLarge is how many >= 1 GiB artifacts may be in flight.
+	maxConcurrentLarge = 2
+)
+
+// Run performs the scan. It never returns a nil Result once the walk started:
+// individual unreadable paths are recorded on their ArtifactSummary and counted
+// in Unreadable, because a directory containing one unreadable file is still
+// worth scanning. The returned error is only the first path-expansion error.
+func Run(ctx context.Context, cfg Config) (*Result, error) {
+	l, err := cfg.Limits.Normalize()
+	if err != nil {
+		return nil, err
+	}
+	jobs := cfg.Jobs
+	if jobs <= 0 {
+		jobs = runtime.NumCPU()
+	}
+	budget := cfg.MemBudget
+	if budget <= 0 {
+		budget = defaultMemBudget
+	}
+	maxFindings := cfg.MaxFindings
+	if maxFindings == 0 {
+		maxFindings = l.MaxFindings
+	}
+
+	collector := report.NewCollector(maxFindings)
+	sess := artifact.NewSession(collector, cfg.Root, l)
+	sess.DeepStats = cfg.DeepStats
+
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
+
+	start := time.Now()
+	res := &Result{Collector: collector, Timings: map[string]int64{}}
+
+	if cfg.StdinName != "" {
+		sum := scanStdin(sess, cfg, l)
+		res.Artifacts = []report.ArtifactSummary{sum}
+		if sum.Error != "" {
+			res.Unreadable = 1
+		}
+		res.Timings["total_ms"] = report.Millis(time.Since(start))
+		return res, nil
+	}
+
+	expandStart := time.Now()
+	entries, walkErr := expand(cfg)
+	res.Timings["expand_ms"] = report.Millis(time.Since(expandStart))
+
+	if len(entries) > 0 {
+		b := newMemBudget(budget)
+		var next atomic.Int64
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		cancelled := atomic.Bool{}
+
+		workers := min(jobs, len(entries))
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					if ctx.Err() != nil {
+						cancelled.Store(true)
+						return
+					}
+					i := int(next.Add(1)) - 1
+					if i >= len(entries) {
+						return
+					}
+					sum := scanOne(ctx, sess, entries[i], l, b)
+					mu.Lock()
+					res.Artifacts = append(res.Artifacts, sum)
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+
+		sort.SliceStable(res.Artifacts, func(i, j int) bool { return res.Artifacts[i].Path < res.Artifacts[j].Path })
+		for _, a := range res.Artifacts {
+			if a.Error != "" {
+				res.Unreadable++
+			}
+		}
+		res.Cancelled = cancelled.Load()
+	}
+	res.Timings["total_ms"] = report.Millis(time.Since(start))
+	return res, walkErr
+}
+
+// scanStdin reads one artifact from the configured reader.
+func scanStdin(sess *artifact.Session, cfg Config, l limits.Limits) report.ArtifactSummary {
+	name := cfg.StdinName
+	sum := report.ArtifactSummary{Path: name, Format: artifact.FormatUnknown.String()}
+	data, err := readAllCapped(cfg.Stdin, l.MaxArtifactBytes)
+	if err != nil {
+		sum.Error = err.Error()
+		return sum
+	}
+	src := source.Mem(name, data)
+	defer src.Close()
+	sum.Size = int64(len(data))
+	sum.SHA256 = digestBytes(data)
+	f, perr := scanGuarded(sess, src, name, l)
+	sum.Format = f.String()
+	if perr != nil {
+		sum.SubFormat = "parse-error: " + perr.Error()
+	}
+	return sum
+}
+
+// scanOne opens, hashes and scans one entry, releasing its budget when done.
+func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limits, b *memBudget) report.ArtifactSummary {
+	name := e.Display
+	if name == "" {
+		name = e.Path
+	}
+	sum := report.ArtifactSummary{Path: name, Format: artifact.FormatUnknown.String()}
+
+	fi, err := os.Lstat(e.Path)
+	if err != nil {
+		sum.Error = err.Error()
+		return sum
+	}
+	// A symlink is followed (the hf-cache layout is built out of relative
+	// symlinks); the containment check happens in the hf-cache expander, which
+	// resolves through os.Root before yielding the path.
+	size := fi.Size()
+	if fi.Mode()&os.ModeSymlink != 0 {
+		if st, serr := os.Stat(e.Path); serr == nil {
+			size = st.Size()
+		} else {
+			sum.Error = serr.Error()
+			return sum
+		}
+	}
+	sum.Size = size
+
+	// The large-artifact slot is acquired before the byte budget: a task holding
+	// a large slot and waiting for bytes cannot starve a task that holds bytes,
+	// because byte holders are already running and will release.
+	if size >= largeArtifact {
+		if !b.acquireLarge(ctx) {
+			sum.Error = "scan deadline exceeded while waiting for a large-artifact slot"
+			return sum
+		}
+		defer b.releaseLarge()
+	}
+	if !b.acquire(ctx, size) {
+		sum.Error = "scan deadline exceeded while waiting for the memory budget"
+		return sum
+	}
+	defer b.release(size)
+
+	src, err := source.Open(e.Path, l)
+	if err != nil {
+		if errors.Is(err, source.ErrTooLarge) {
+			limits.Emit(sess.Collector.For(name), limits.RuleArtifact, "MaxArtifactBytes", size, l.MaxArtifactBytes, e.Path)
+		}
+		sum.Error = err.Error()
+		return sum
+	}
+	defer src.Close()
+
+	// The digest is computed concurrently with the parse. On an mmap-backed
+	// source it is a second sequential pass over the mapping: page-cache
+	// bandwidth, not resident memory, and it hides behind the parse.
+	var (
+		digest string
+		hashWG sync.WaitGroup
+	)
+	hashWG.Add(1)
+	go func() {
+		defer hashWG.Done()
+		digest = digestSource(src)
+	}()
+
+	f, perr := scanGuarded(sess, src, name, l)
+	hashWG.Wait()
+
+	sum.SHA256 = digest
+	sum.Format = f.String()
+	if perr != nil {
+		sess.Collector.For(name).EmitExtra(ruleParseFailed, 0, perr.Error(), nil)
+		sum.SubFormat = "parse-error: " + perr.Error()
+	}
+	if e.Digest != "" {
+		if prev, first := sess.MarkSeen(e.Digest, name); !first {
+			sum.SubFormat = "duplicate of " + prev
+		}
+	}
+	return sum
+}
+
+// scanGuarded runs the dispatch and parser for one artifact, converting a parser
+// panic into a finding. A parser bug must not take down a scan of an untrusted
+// tree: the one thing sc4n must never do is crash on crafted input.
+func scanGuarded(sess *artifact.Session, src source.Source, name string, l limits.Limits) (f artifact.Format, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			sess.Collector.For(name).EmitExtra(ruleInternalPanic, 0,
+				fmt.Sprintf("internal panic while parsing: %v", r), nil)
+			f = artifact.FormatUnknown
+			err = fmt.Errorf("internal panic: %v", r)
+		}
+	}()
+	return artifact.Scan(sess.NewCtx(name, l), src)
+}
+
+// memBudget is size-weighted admission control. It exists so that a directory
+// containing twenty 5 GiB files cannot map 100 GiB of address space on a 14 GiB
+// host: each worker acquires its artifact's size before opening it.
+type memBudget struct {
+	total int64
+	mu    sync.Mutex
+	cond  *sync.Cond
+	used  int64
+	large chan struct{}
+}
+
+func newMemBudget(total int64) *memBudget {
+	b := &memBudget{total: total, large: make(chan struct{}, maxConcurrentLarge)}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *memBudget) acquire(ctx context.Context, n int64) bool {
+	if n > b.total {
+		// A single artifact larger than the whole budget is admitted alone;
+		// refusing it would make -mem-budget a way to silently skip files.
+		n = b.total
+	}
+	stop := context.AfterFunc(ctx, func() {
+		b.mu.Lock()
+		b.cond.Broadcast()
+		b.mu.Unlock()
+	})
+	defer stop()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for b.used+n > b.total {
+		if ctx.Err() != nil {
+			return false
+		}
+		b.cond.Wait()
+	}
+	b.used += n
+	return true
+}
+
+func (b *memBudget) release(n int64) {
+	if n > b.total {
+		n = b.total
+	}
+	b.mu.Lock()
+	b.used -= n
+	b.mu.Unlock()
+	b.cond.Broadcast()
+}
+
+func (b *memBudget) acquireLarge(ctx context.Context) bool {
+	select {
+	case b.large <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case b.large <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (b *memBudget) releaseLarge() { <-b.large }
+
+// digestSource hashes the whole source. It reads through the section reader
+// rather than ReadAt so that a large mapping is read with the kernel's sequential
+// readahead instead of a stream of independent pread calls.
+func digestSource(s source.Source) string {
+	h := sha256.New()
+	if _, err := io.Copy(h, s.Reader(0)); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func digestBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func readAllCapped(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return io.ReadAll(r)
+	}
+	buf := make([]byte, 0, 1<<20)
+	tmp := make([]byte, 1<<20)
+	for {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			if int64(len(buf))+int64(n) > max {
+				return nil, fmt.Errorf("%w: stdin exceeds %d bytes", source.ErrTooLarge, max)
+			}
+			buf = append(buf, tmp[:n]...)
+		}
+		if err == io.EOF {
+			return buf, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// skipDirs are directory names that never hold scan targets. Everything else is
+// walked, including dotfiles, because .pth and .start files (the site-packages
+// startup vectors) are dot-prefixed.
+var skipDirs = map[string]bool{
+	".git":         true,
+	"node_modules": true,
+	"__pycache__":  true,
+}
+
+// expand turns the configuration into a sorted work list. The first path-expansion
+// error is returned alongside the list so the CLI can exit 3 for a path the user
+// named and could not be opened, while still scanning everything else.
+func expand(cfg Config) ([]Entry, error) {
+	if len(cfg.Entries) > 0 {
+		out := append([]Entry(nil), cfg.Entries...)
+		sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+		return out, nil
+	}
+	var out []Entry
+	var firstErr error
+	for _, p := range cfg.Paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", p, err)
+			}
+			// Record the path so the report names the one that was unreadable.
+			out = append(out, Entry{Path: p, Display: p})
+			continue
+		}
+		if !fi.IsDir() {
+			out = append(out, Entry{Path: p, Display: p})
+			continue
+		}
+		walkErr := filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				// An unreadable directory does not abort the walk; it becomes a
+				// recorded entry so the summary counts it.
+				out = append(out, Entry{Path: path, Display: path})
+				return nil
+			}
+			if d.IsDir() {
+				if path != p && skipDirs[d.Name()] {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			out = append(out, Entry{Path: path, Display: path})
+			return nil
+		})
+		if walkErr != nil && firstErr == nil {
+			firstErr = walkErr
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, firstErr
+}
