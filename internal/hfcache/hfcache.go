@@ -130,7 +130,13 @@ func Expand(dir string, c *report.Collector) ([]Entry, error) {
 				if !ok {
 					return nil
 				}
-				key := path.Base(blobRel)
+				// The resolved blob path, not its basename, is the identity. In
+				// a symlinked hub cache the basename is the blob's digest, but a
+				// cache copied or extracted without symlinks resolves to the
+				// snapshot file itself, whose basename is just "config.json" —
+				// keying on that silently dropped every repository after the
+				// first, findings and all.
+				key := blobRel
 				if seen[key] {
 					return nil
 				}
@@ -140,7 +146,7 @@ func Expand(dir string, c *report.Collector) ([]Entry, error) {
 				out = append(out, Entry{
 					Path:     filepath.Join(dir, filepath.FromSlash(blobRel)),
 					Display:  display,
-					Digest:   key,
+					Digest:   digestOf(blobRel),
 					Revision: strings.Join(refs[commit], ","),
 				})
 				return nil
@@ -152,6 +158,32 @@ func Expand(dir string, c *report.Collector) ([]Entry, error) {
 
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Display < out[j].Display })
 	return out, nil
+}
+
+// digestOf returns the content key of a resolved blob path: in the hub layout the
+// blob file is named by its digest, so its basename is the digest; a cache without
+// symlinks resolves to the snapshot file instead, and there the path is the only
+// stable identifier (the basename would be "config.json" for every repository).
+func digestOf(blobRel string) string {
+	if base := path.Base(blobRel); isHexDigest(base) {
+		return base
+	}
+	return blobRel
+}
+
+// isHexDigest reports whether s looks like a blob digest (40 hex for sha1, 64 for
+// sha256), which is how the hub names files under blobs/.
+func isHexDigest(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveEntry turns a snapshot-relative path into the blob it points at. It

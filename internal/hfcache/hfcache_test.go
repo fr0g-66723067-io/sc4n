@@ -160,3 +160,43 @@ func ids(fs []report.Finding) []string {
 	}
 	return out
 }
+
+// TestCopiedCacheWithoutSymlinksKeepsEveryRepo: a hub cache copied or extracted
+// without symlinks has a regular file under each snapshots/<commit>/ directory.
+// De-duplicating on the file's basename collapsed every repository's config.json
+// into one entry, so every repository after the first was never scanned and its
+// findings never appeared.
+func TestCopiedCacheWithoutSymlinksKeepsEveryRepo(t *testing.T) {
+	dir := t.TempDir()
+	commits := []string{strings.Repeat("1", 40), strings.Repeat("2", 40)}
+	repos := []string{"models--org--one", "models--org--two"}
+	for i, repo := range repos {
+		snap := filepath.Join(dir, repo, "snapshots", commits[i])
+		if err := os.MkdirAll(snap, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"index": ` + string(rune('0'+i)) + `}`
+		if err := os.WriteFile(filepath.Join(snap, "config.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := Expand(dir, nil)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected one entry per repository, got %d: %+v", len(entries), entries)
+	}
+	// Both entries name a distinct file, and their content keys differ.
+	if entries[0].Path == entries[1].Path {
+		t.Fatalf("both entries point at %q", entries[0].Path)
+	}
+	if entries[0].Digest == entries[1].Digest {
+		t.Fatalf("both entries share the content key %q", entries[0].Digest)
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Path, "config.json") {
+			t.Errorf("entry path = %q, want a config.json", e.Path)
+		}
+	}
+}
