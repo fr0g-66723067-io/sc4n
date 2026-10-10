@@ -41,6 +41,9 @@ var (
 			"strings to strings, every other top-level key is a tensor entry of {dtype, shape, data_offsets} " +
 			"with no duplicate keys, shapes are integers, END >= BEGIN, offsets tile the byte buffer with no " +
 			"overlap and no hole, and product(shape)*bitsize/8 equals the declared span and is byte-aligned. " +
+			"The reference sorts the tensor list by data_offsets before checking contiguity, so document order " +
+			"is not itself an invariant: a header that lists a later tensor first is accepted. A negative " +
+			"data_offsets element is rejected because the reference types the pair as (usize, usize). " +
 			"safetensors has no published advisories and the reference loader fails closed on every one of " +
 			"these, so the finding means the file is malformed for the reference loader -- the shape that " +
 			"matters when something other than the reference loader reads it.",

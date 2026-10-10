@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/bits"
+	"sort"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
@@ -109,40 +110,55 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		validateEntry(ctx, &h.entries[i], bufferLen)
 	}
 
-	// Contiguity and coverage. Document order is used because the reference
-	// writes tensors and assigns offsets in the same order, so the running end
-	// tracks a well-formed file; a gap, an overlap or uncovered trailing bytes
-	// is a violation either way.
-	var expected int64
-	for i := range h.entries {
+	// Contiguity and coverage. The reference sorts the tensor list by
+	// data_offsets before validating, so a header that lists a later tensor
+	// first is accepted; validate a begin-ordered copy to match that, not the
+	// document order. A tensor whose data_offsets are absent (both sentinels) is
+	// skipped -- the missing-offsets violation was already reported -- and one
+	// with a negative begin (reported separately by the decoder) can neither
+	// open nor close a gap, because its begin is unusable. Its declared END still
+	// contributes to the claimed extent so a malformed file is not reported with
+	// trailing data for bytes a tensor actually claims.
+	order := make([]int, len(h.entries))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return h.entries[order[a]].begin < h.entries[order[b]].begin })
+	var expected, claimed int64
+	for _, i := range order {
 		e := &h.entries[i]
-		if e.begin < 0 || e.end < e.begin {
+		if e.begin < 0 && e.end < 0 {
 			continue
 		}
-		switch {
-		case e.begin > expected:
-			ctx.Sink.Emit(RuleStruct, 8+e.off,
-				fmt.Sprintf("tensor %q begins at %d, leaving a gap after %d", e.name, e.begin, expected))
-		case e.begin < expected:
-			ctx.Sink.Emit(RuleStruct, 8+e.off,
-				fmt.Sprintf("tensor %q begins at %d, overlapping the previous tensor ending at %d", e.name, e.begin, expected))
+		if e.begin >= 0 {
+			switch {
+			case e.begin > expected:
+				ctx.Sink.Emit(RuleStruct, 8+e.off,
+					fmt.Sprintf("tensor %q begins at %d, leaving a gap after %d", e.name, e.begin, expected))
+			case e.begin < expected:
+				ctx.Sink.Emit(RuleStruct, 8+e.off,
+					fmt.Sprintf("tensor %q begins at %d, overlapping the previous tensor ending at %d", e.name, e.begin, expected))
+			}
+			if e.end > expected {
+				expected = e.end
+			}
 		}
-		if e.end > expected {
-			expected = e.end
+		if e.end > claimed {
+			claimed = e.end
 		}
 	}
 	switch {
-	case expected < bufferLen:
-		extra := map[string]string{"trailing_bytes": fmt.Sprintf("%d", bufferLen-expected)}
-		if region, err := s.Bytes(dataBase+expected, bufferLen-expected); err == nil && len(region) > 0 {
+	case claimed < bufferLen:
+		extra := map[string]string{"trailing_bytes": fmt.Sprintf("%d", bufferLen-claimed)}
+		if region, err := s.Bytes(dataBase+claimed, bufferLen-claimed); err == nil && len(region) > 0 {
 			extra["entropy"] = fmt.Sprintf("%.2f", bytescan.Entropy(sampleForEntropy(region)))
-			scanNativeRegion(ctx, dataBase+expected, region)
+			scanNativeRegion(ctx, dataBase+claimed, region)
 		}
-		ctx.Sink.EmitExtra(RuleTrailingData, dataBase+expected,
-			fmt.Sprintf("%d bytes follow the last declared tensor", bufferLen-expected), extra)
-	case expected > bufferLen:
+		ctx.Sink.EmitExtra(RuleTrailingData, dataBase+claimed,
+			fmt.Sprintf("%d bytes follow the last declared tensor", bufferLen-claimed), extra)
+	case claimed > bufferLen:
 		ctx.Sink.Emit(RuleTruncated, dataBase+bufferLen,
-			fmt.Sprintf("last tensor ends at %d but the byte buffer is only %d bytes", expected, bufferLen))
+			fmt.Sprintf("last tensor ends at %d but the byte buffer is only %d bytes", claimed, bufferLen))
 	}
 
 	// Content rules over the header strings.
@@ -181,8 +197,8 @@ func scanHeaderString(ctx *artifact.Ctx, base int64, what, s string) {
 // validateEntry checks the per-tensor invariants: END >= BEGIN, a known dtype,
 // and the product(shape)*bitsize/8 size equation with its byte-alignment half.
 func validateEntry(ctx *artifact.Ctx, e *entry, bufferLen int64) {
-	if e.begin < 0 || e.end < 0 {
-		return // already reported as missing data_offsets
+	if e.begin < 0 && e.end < 0 {
+		return // data_offsets genuinely absent; the missing-offsets violation was already reported
 	}
 	if e.end < e.begin {
 		ctx.Sink.Emit(RuleStruct, 8+e.off,

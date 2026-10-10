@@ -250,7 +250,7 @@ func decodeEntry(dec *json.Decoder, h *header, name string, keyOff int64, viol *
 			e.dtype = s
 			haveDtype = true
 		case "shape":
-			shape, ok := decodeIntArray(dec)
+			shape, ok := decodeIntArray(dec, viol, fmt.Sprintf("tensor %q: shape", name))
 			if !ok {
 				*viol = append(*viol, fmt.Sprintf("tensor %q: shape is not an array of integers", name))
 				continue
@@ -258,7 +258,7 @@ func decodeEntry(dec *json.Decoder, h *header, name string, keyOff int64, viol *
 			e.shape = shape
 			haveShape = true
 		case "data_offsets":
-			offs, ok := decodeIntArray(dec)
+			offs, ok := decodeIntArray(dec, viol, fmt.Sprintf("tensor %q: data_offsets", name))
 			if !ok || len(offs) != 2 {
 				*viol = append(*viol, fmt.Sprintf("tensor %q: data_offsets must be an array of exactly 2 integers", name))
 				continue
@@ -283,8 +283,12 @@ func decodeEntry(dec *json.Decoder, h *header, name string, keyOff int64, viol *
 	h.entries = append(h.entries, e)
 }
 
-// decodeIntArray reads one JSON array whose elements MUST all be integers.
-func decodeIntArray(dec *json.Decoder) ([]int64, bool) {
+// decodeIntArray reads one JSON array whose elements MUST all be integers. A
+// negative element is recorded through viol (naming the value) and still
+// returned: the reference loader deserialises data_offsets as (usize, usize), so
+// a negative is rejected at deserialisation and is a structural violation, not a
+// value to clamp. The bool reports only whether every element was an integer.
+func decodeIntArray(dec *json.Decoder, viol *[]string, what string) ([]int64, bool) {
 	tok, err := dec.Token()
 	if err != nil {
 		return nil, false
@@ -315,6 +319,9 @@ func decodeIntArray(dec *json.Decoder) ([]int64, bool) {
 		if err != nil {
 			good = false
 			continue
+		}
+		if v < 0 {
+			*viol = append(*viol, fmt.Sprintf("%s value %d is negative", what, v))
 		}
 		out = append(out, v)
 	}

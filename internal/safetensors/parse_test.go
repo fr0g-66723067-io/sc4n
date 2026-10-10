@@ -255,6 +255,51 @@ func TestHeaderEvidences(t *testing.T) {
 	}
 }
 
+// TestNegativeAndOutOfOrderOffsets pins the two offset defects the reference
+// loader's behaviour defines: data_offsets is deserialised as (usize, usize) so a
+// negative value is a structural violation (and must not manufacture a trailing
+// data finding for bytes the tensor claims), and the reference sorts the tensor
+// list by data_offsets before validating, so a header that lists a later tensor
+// first is accepted and must not be reported as a gap plus an overlap.
+func TestNegativeAndOutOfOrderOffsets(t *testing.T) {
+	// (1) One tensor declares a negative begin: [-1,7] spans the 8 bytes an I8
+	// shape[8] tensor occupies, and the file carries exactly those 7 bytes, so
+	// the whole data region is claimed by a tensor.
+	neg := st(`{"a":{"dtype":"I8","shape":[4],"data_offsets":[0,4]},`+
+		`"b":{"dtype":"I8","shape":[8],"data_offsets":[-1,7]}}`, make([]byte, 7))
+	got := scan(t, neg)
+	for _, f := range got {
+		t.Logf("negative: %s %s %q", f.Severity, f.RuleID, f.Evidence)
+	}
+	wantRules(t, got, []string{"SC4N-SAFETENSORS-STRUCT"},
+		[]string{"SC4N-SAFETENSORS-TRAILING-DATA", "SC4N-SAFETENSORS-TRUNCATED"})
+	if !evidenceContains(got, "SC4N-SAFETENSORS-STRUCT", "-1") {
+		t.Errorf("negative-offset STRUCT evidence does not name the value: %v", got)
+	}
+
+	// (2) A header that lists the second tile before the first. The spans tile
+	// [0,16) exactly, so the file is well formed for the reference loader.
+	ooo := st(`{"b":{"dtype":"F32","shape":[2],"data_offsets":[8,16]},`+
+		`"a":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}}`, make([]byte, 16))
+	got = scan(t, ooo)
+	for _, f := range got {
+		t.Logf("out-of-order: %s %s %q", f.Severity, f.RuleID, f.Evidence)
+	}
+	wantRules(t, got, nil,
+		[]string{"SC4N-SAFETENSORS-STRUCT", "SC4N-SAFETENSORS-TRAILING-DATA", "SC4N-SAFETENSORS-TRUNCATED"})
+}
+
+// evidenceContains reports whether a finding with the given rule ID carries sub
+// in its evidence.
+func evidenceContains(fs []report.Finding, rule, sub string) bool {
+	for _, f := range fs {
+		if f.RuleID == rule && strings.Contains(f.Evidence, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSniffer(t *testing.T) {
 	good := st(`{"a":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}}`, make([]byte, 8))
 	src := source.Mem("m.safetensors", good)
