@@ -36,6 +36,12 @@ const (
 	// tfliteEntropyThreshold is where a buffer stops looking like quantised
 	// weights and starts looking compressed or random.
 	tfliteEntropyThreshold = 7.9
+	// tfliteMaxItems bounds the flatbuffer items one walk may visit, and
+	// tfliteMaxScanBytes the buffer bytes it may scan. They are named so the
+	// SC4N-LIMIT-ENTRIES finding that a spent budget produces can state the real
+	// numbers instead of "reached: 0 > 0".
+	tfliteMaxItems     = 1 << 20
+	tfliteMaxScanBytes = 64 << 20
 )
 
 // tfliteParser is the registered parser for FormatTFLite.
@@ -272,7 +278,7 @@ func (tfliteParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		ctx.Sink.Emit(ruleTFLiteStruct, 4, "identifier is not 'TFL3' at offset 4")
 		return nil
 	}
-	w := &tfliteWalk{ctx: ctx, itemsLeft: 1 << 20, scanBytesLeft: 64 << 20}
+	w := &tfliteWalk{ctx: ctx, itemsLeft: tfliteMaxItems, scanBytesLeft: tfliteMaxScanBytes}
 	f := fb{s: s, size: s.Size(), w: w}
 	root, ok := f.u32(0)
 	if !ok || root == 0 || int64(root) >= f.size {
@@ -330,7 +336,7 @@ func (w *tfliteWalk) budget(rule *report.Rule, limit string, reached, cap int64,
 
 func (w *tfliteWalk) take() bool {
 	if w.itemsLeft <= 0 {
-		w.budget(limits.RuleEntries, "MaxArrayElements", 0, 0,
+		w.budget(limits.RuleEntries, "MaxArrayElements", tfliteMaxItems, tfliteMaxItems,
 			"TFLite walk item budget exhausted, so the remaining tables were not walked")
 		return false
 	}
@@ -435,7 +441,7 @@ func (w *tfliteWalk) parseBuffers(model fbTable) {
 	}
 	for i := range n {
 		if w.scanBytesLeft <= 0 {
-			w.budget(limits.RuleEntries, "MaxArrayElements", 0, 0,
+			w.budget(limits.RuleEntries, "MaxArrayElements", tfliteMaxScanBytes, tfliteMaxScanBytes,
 				"TFLite buffer scan byte budget exhausted, so the remaining buffers were not scanned")
 			return
 		}

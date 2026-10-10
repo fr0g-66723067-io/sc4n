@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -413,5 +414,41 @@ func TestTFLiteBrokenReferenceIsReported(t *testing.T) {
 	binary.LittleEndian.PutUint32(ok[24:], 12)
 	if ids(parseBytes(t, tfliteParser{}, "ok.tflite", ok))["SC4N-TFLITE-STRUCT"] {
 		t.Fatalf("an absent field was reported as broken: %v", ids(parseBytes(t, tfliteParser{}, "ok.tflite", ok)))
+	}
+}
+
+// TestTFLiteBudgetEvidenceCarriesTheRealNumbers: the SC4N-LIMIT-ENTRIES finding a
+// spent budget produces read "MaxArrayElements reached: 0 > 0" — it named neither
+// the item budget nor the byte budget, so a reader could not tell which bound
+// stopped the walk, or how far it had got, from the finding that is supposed to
+// say exactly that.
+func TestTFLiteBudgetEvidenceCarriesTheRealNumbers(t *testing.T) {
+	ctx, c := newTestCtx()
+
+	items := &tfliteWalk{ctx: ctx, itemsLeft: 0, scanBytesLeft: tfliteMaxScanBytes}
+	if items.take() {
+		t.Fatal("take() succeeded with an exhausted item budget")
+	}
+	bytesWalk := &tfliteWalk{ctx: ctx, itemsLeft: tfliteMaxItems, scanBytesLeft: 0}
+	bytesWalk.budget(limits.RuleEntries, "MaxArrayElements", tfliteMaxScanBytes, tfliteMaxScanBytes,
+		"TFLite buffer scan byte budget exhausted, so the remaining buffers were not scanned")
+
+	var ev []string
+	for _, f := range c.Findings() {
+		if f.RuleID == "SC4N-LIMIT-ENTRIES" {
+			ev = append(ev, f.Evidence)
+		}
+	}
+	if len(ev) != 2 {
+		t.Fatalf("got %d budget findings, want 2: %v", len(ev), ev)
+	}
+	for _, e := range ev {
+		if strings.Contains(e, "0 > 0") {
+			t.Fatalf("budget evidence carries no numbers: %q", e)
+		}
+		if !strings.Contains(e, strconv.FormatInt(tfliteMaxItems, 10)) &&
+			!strings.Contains(e, strconv.FormatInt(tfliteMaxScanBytes, 10)) {
+			t.Fatalf("budget evidence names neither budget: %q", e)
+		}
 	}
 }
