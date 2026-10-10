@@ -233,41 +233,91 @@ type memo struct {
 	// overwrites counts slots written twice, which is the other half of the same
 	// signal.
 	overwrites int
+	// limit is the dense ceiling: indices below it live in slots, the rest in
+	// high. count is how many distinct slots hold a value — the number the
+	// loader's dict would have, which is what MEMOIZE's implicit index is.
+	limit int
+	count int
+	// high holds the indices the dense table will not: the loader's memo is a
+	// dict, so a large index is a key rather than a reason to reject the stream.
+	high map[int]Val
 }
 
-func newMemo() *memo { return &memo{byGlobal: map[string][]int{}} }
+// newMemo returns a memo whose dense table is bounded by streamLen, the length of
+// the bytes the walk is looking at. Indices beyond that are held in a map.
+func newMemo(streamLen int) *memo {
+	limit := streamLen
+	if limit > maxMemoSlots {
+		limit = maxMemoSlots
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	return &memo{byGlobal: map[string][]int{}, limit: limit}
+}
 
 func (m *memo) get(i int) (Val, bool) {
-	if i < 0 || i >= len(m.slots) || !m.set[i] {
+	if i < 0 {
+		return Val{}, false
+	}
+	if i >= m.limit {
+		v, ok := m.high[i]
+		return v, ok
+	}
+	if i >= len(m.slots) || !m.set[i] {
 		return Val{}, false
 	}
 	return m.slots[i], true
 }
 
-// maxMemoSlots caps the memo table. BINPUT/LONG_BINPUT carry an attacker-chosen
-// index, and a stream that writes slot 0xFFFFFFFF must not make the walker
-// allocate a table for it: the loader's own memo is a dict, so a huge index is
-// simply a key, while a slice would be four billion slots.
+// maxMemoSlots caps the memo table in two ways, because BINPUT/LONG_BINPUT carry
+// an attacker-chosen index:
+//
+//   - the dense slice holds indices below the stream length (newMemo's limit):
+//     a slot can only exist if an earlier byte of the stream wrote it, since every
+//     write costs at least one opcode byte, so a nine-byte stream cannot justify a
+//     megabyte of address space;
+//   - indices above that go to a map, which is what the loader's memo is, so a
+//     stream that writes slot 999 stays loadable instead of being called
+//     malformed. The map is capped at maxMemoSlots entries, which is where a
+//     refusal — reported as a structural violation — can still happen.
 const maxMemoSlots = 1 << 20
 
 // put stores v at slot i and reports whether the slot already held a value. ok is
-// false when the index is beyond maxMemoSlots, which the caller reports as a
-// structural violation.
+// false only when the sparse map is at its entry cap, which the caller reports as
+// a structural violation.
 func (m *memo) put(i int, v Val) (overwrote bool, ok bool) {
-	if i < 0 || i >= maxMemoSlots {
+	if i < 0 {
 		return false, false
 	}
-	if i >= len(m.slots) {
-		grow := i + 1 - len(m.slots)
-		if grow < 16 {
-			grow = 16
+	if i >= m.limit {
+		if m.high == nil {
+			m.high = map[int]Val{}
 		}
-		m.slots = append(m.slots, make([]Val, grow)...)
-		m.set = append(m.set, make([]bool, grow)...)
+		_, overwrote = m.high[i]
+		if !overwrote {
+			if len(m.high) >= maxMemoSlots {
+				return false, false
+			}
+			m.count++
+		}
+		m.high[i] = v
+	} else {
+		if i >= len(m.slots) {
+			grow := i + 1 - len(m.slots)
+			if grow < 16 {
+				grow = 16
+			}
+			m.slots = append(m.slots, make([]Val, grow)...)
+			m.set = append(m.set, make([]bool, grow)...)
+		}
+		overwrote = m.set[i]
+		if !overwrote {
+			m.count++
+		}
+		m.slots[i] = v
+		m.set[i] = true
 	}
-	overwrote = m.set[i]
-	m.slots[i] = v
-	m.set[i] = true
 	if v.global != nil {
 		m.noteGlobal(v.global.QualName(), i)
 	}
@@ -287,4 +337,7 @@ func (m *memo) noteGlobal(name string, i int) {
 	m.byGlobal[name] = append(m.byGlobal[name], i)
 }
 
-func (m *memo) next() int { return len(m.slots) }
+// next is the index MEMOIZE uses: the number of entries the loader's dict holds,
+// which counts distinct slots rather than the slice's length (a BINPUT to a high
+// index pre-grows the slice, so the two disagree).
+func (m *memo) next() int { return m.count }

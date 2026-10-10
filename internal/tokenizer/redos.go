@@ -83,7 +83,7 @@ func AnalyzeJSON(sink *report.Sink, base int64, path string, data []byte) {
 		e.specialTokens(m)
 		if s, ok := m["tokenizer_class"].(string); ok && !knownTokenizerClasses[s] {
 			sink.EmitExtra(ruleUnknownClass, e.off(s),
-				"tokenizer_class "+strconv.Quote(truncate(s, 120))+" is not a class Transformers ships",
+				"tokenizer_class "+strconv.Quote(report.TruncateEvidence(s, 120))+" is not a class Transformers ships",
 				map[string]string{"tokenizer_class": s})
 		}
 	}
@@ -227,8 +227,8 @@ func (e *emitter) walk(v any) {
 func (e *emitter) regex(re string) {
 	for _, h := range findRedos(re) {
 		e.sink.EmitExtra(ruleRedos, e.off(re)+int64(h.off),
-			"regex uses a "+h.construct+" ("+h.detail+"): "+strconv.Quote(truncate(re, 120)),
-			map[string]string{"construct": h.construct, "pattern": truncate(re, 256)})
+			"regex uses a "+h.construct+" ("+h.detail+"): "+strconv.Quote(report.TruncateEvidence(re, 120)),
+			map[string]string{"construct": h.construct, "pattern": report.TruncateEvidence(re, 256)})
 	}
 }
 
@@ -514,11 +514,4 @@ func isQuantifierBody(s string) bool {
 		}
 	}
 	return true
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

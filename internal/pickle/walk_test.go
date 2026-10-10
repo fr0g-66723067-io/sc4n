@@ -3,7 +3,9 @@ package pickle
 import (
 	"encoding/binary"
 	"math"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -159,7 +161,7 @@ func TestDecodeArgCoversEveryKind(t *testing.T) {
 		// decodeArg is called with pos pointing at the opcode byte, so the data
 		// carries a filler opcode byte in front of the argument.
 		data := append([]byte{info.name[0]}, arg...)
-		w := &walker{data: data, lim: limits.Default(), mm: newMemo(), once: map[string]bool{}, structs: map[string]*structStat{}}
+		w := &walker{data: data, lim: limits.Default(), mm: newMemo(len(data)), once: map[string]bool{}, structs: map[string]*structStat{}}
 		got, next, err := w.decodeArg(info, 0)
 		if err != nil {
 			t.Errorf("argKind %d (%s) failed to decode: %v", info.arg, info.name, err)
@@ -185,7 +187,7 @@ func TestBINFLOATIsBigEndian(t *testing.T) {
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], math.Float64bits(1.5))
 	data := append([]byte{opBINFLOAT}, b[:]...)
-	w := &walker{data: data, lim: limits.Default(), mm: newMemo(), once: map[string]bool{}, structs: map[string]*structStat{}}
+	w := &walker{data: data, lim: limits.Default(), mm: newMemo(len(data)), once: map[string]bool{}, structs: map[string]*structStat{}}
 	got, next, err := w.decodeArg(opTable[opBINFLOAT], 0)
 	if err != nil {
 		t.Fatal(err)
@@ -791,5 +793,118 @@ func TestSharedEmitKeysKeepDistinctFindings(t *testing.T) {
 	}
 	if n != 2 {
 		t.Fatalf("SETITEM + SETITEMS produced %d finding(s), want 2: %v", n, ruleIDs(fs))
+	}
+}
+
+// TestCountedLongMatchesTheLoader: CPython's _decode_long folds the bytes and then
+// subtracts 1 << (8*len(data)) when the top bit is set, so a one-byte 0xff is -1.
+// The walker computed -(v & MaxInt64), which reported -255 for the same bytes.
+func TestCountedLongMatchesTheLoader(t *testing.T) {
+	for _, tc := range []struct {
+		raw  []byte
+		want int64
+	}{
+		{[]byte{0xff}, -1},
+		{[]byte{0x00}, 0},
+		{[]byte{0x7f}, 127},
+		{[]byte{0x80}, -128},
+		{[]byte{0xff, 0xff}, -1},
+		{[]byte{0x00, 0x01}, 256},
+		{[]byte{0xff, 0xfe}, -257},
+		{[]byte{0x00, 0x00, 0x01}, 65536},
+	} {
+		data := append([]byte{opLONG1, byte(len(tc.raw))}, tc.raw...)
+		data = append(data, opSTOP)
+		_, fs := walk(t, data)
+		want := strconv.FormatInt(tc.want, 10)
+		found := false
+		for _, f := range fs {
+			if strings.Contains(f.Evidence, want) || strings.Contains(f.Extra["value"], want) {
+				found = true
+			}
+		}
+		// The stack value reaches a finding only when it is consumed, so assert on
+		// the decoded value directly as well.
+		w := &walker{data: data, lim: limits.Default(), mm: newMemo(len(data)), once: map[string]bool{}, structs: map[string]*structStat{}}
+		got, _, err := w.decodeArg(opTable[opLONG1], 0)
+		if err != nil {
+			t.Fatalf("LONG1 % x: %v", tc.raw, err)
+		}
+		if n, ok := got.(int64); !ok || n != tc.want {
+			t.Errorf("LONG1 % x decoded to %v, want %d (finding match: %v)", tc.raw, got, tc.want, found)
+		}
+	}
+}
+
+// TestMemoizeIndexCountsDistinctSlots: MEMOIZE stores at len(memo), the loader's
+// dict size, which counts distinct slots. The walker used len(slots), and a
+// BINPUT to a high index pre-grows the slice, so the two disagreed and the
+// MEMOIZE'd value landed in a slot nothing could read.
+func TestMemoizeIndexCountsDistinctSlots(t *testing.T) {
+	// PROTO 2, NONE, LONG_BINPUT 999 (pre-grows the slice), NONE, MEMOIZE, then
+	// BINGET of the slot MEMOIZE must have used. One distinct slot is set by the
+	// LONG_BINPUT, so the loader's memo has one entry and MEMOIZE writes slot 1
+	// (CPython: pickle.loads(b'\x80\x02Nr\xe7\x03\x00\x00N\x94h\x01.') is None
+	// while BINGET 2 raises "Memo value not found at index 2").
+	data := []byte{opPROTO, 2, opNONE, opLONG_BINPUT, 0xe7, 0x03, 0, 0, opNONE, opMEMOIZE, opBINGET, 1, opSTOP}
+	_, fs := walk(t, data)
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-STRUCT" && strings.Contains(f.Evidence, "memo-hole") {
+			t.Fatalf("BINGET of the MEMOIZE slot did not resolve: %s", f.Evidence)
+		}
+	}
+	// A BINGET of the index len(slots) would have produced (1001) is a hole, which
+	// is what the fix removes from a correctly-encoded stream.
+	data = []byte{opPROTO, 2, opNONE, opLONG_BINPUT, 0xe7, 0x03, 0, 0, opNONE, opMEMOIZE, opLONG_BINGET, 0xe9, 0x03, 0, 0, opSTOP}
+	_, fs = walk(t, data)
+	hole := false
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-STRUCT" && strings.Contains(f.Evidence, "memo-hole") {
+			hole = true
+		}
+	}
+	if !hole {
+		t.Fatal("a BINGET of a slot no write reached was not reported")
+	}
+}
+
+// TestQuoteDoesNotReserveForTheWholeInput: quote truncates to 160 runes, so it must
+// not reserve space for a 1 MiB argument. TotalAlloc is the observable: a Grow of
+// the input length would show up as a megabyte of allocation.
+func TestQuoteDoesNotReserveForTheWholeInput(t *testing.T) {
+	big := strings.Repeat("A", 1<<20)
+	var got string
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got = quote(big)
+	runtime.ReadMemStats(&after)
+	if len(got) > 200 {
+		t.Fatalf("quote returned %d bytes for a truncated value", len(got))
+	}
+	if grown := after.TotalAlloc - before.TotalAlloc; grown > 1<<16 {
+		t.Fatalf("quote allocated %d bytes for a 1 MiB input", grown)
+	}
+}
+
+// TestLargeMemoIndexDoesNotAllocateTheTable: LONG_BINPUT carries an
+// attacker-chosen index, and a stream of a dozen bytes must not make the walker
+// allocate the dense memo table for it. TotalAlloc is the observable: growing the
+// slice to the index would show up as tens of megabytes.
+func TestLargeMemoIndexDoesNotAllocateTheTable(t *testing.T) {
+	// PROTO 2, NONE, LONG_BINPUT 0x000FFFFF, STOP.
+	data := []byte{opPROTO, 2, opNONE, opLONG_BINPUT, 0xff, 0xff, 0x0f, 0x00, opSTOP}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, fs := walk(t, data)
+	runtime.ReadMemStats(&after)
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-STRUCT" {
+			t.Fatalf("a legal high memo index was reported: %s", f.Evidence)
+		}
+	}
+	if grown := after.TotalAlloc - before.TotalAlloc; grown > 4<<20 {
+		t.Fatalf("a %d-byte stream allocated %d bytes for its memo table", len(data), grown)
 	}
 }

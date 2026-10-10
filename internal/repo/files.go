@@ -2,6 +2,7 @@ package repo
 
 import (
 	"bytes"
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"os"
 	"strings"
 
@@ -160,7 +161,7 @@ func pthRule(ctx *artifact.Ctx, data []byte) {
 	for _, ln := range lines(data) {
 		t := strings.TrimLeft(string(ln.text), " \t")
 		if strings.HasPrefix(t, "import ") || strings.HasPrefix(t, "import\t") || strings.HasPrefix(t, "exec ") || t == "exec" {
-			ctx.Sink.Emit(rulePth, ln.off, "line executes at interpreter start: "+truncate(t))
+			ctx.Sink.Emit(rulePth, ln.off, "line executes at interpreter start: "+report.TruncateEvidence(t, 120))
 		}
 	}
 }
@@ -173,7 +174,7 @@ func startRule(ctx *artifact.Ctx, data []byte) {
 			continue
 		}
 		if looksLikeEntryPoint(t) {
-			ctx.Sink.Emit(ruleStart, ln.off, "startup entry point: "+truncate(t))
+			ctx.Sink.Emit(ruleStart, ln.off, "startup entry point: "+report.TruncateEvidence(t, 120))
 		}
 	}
 }
@@ -237,7 +238,7 @@ func setupHookRule(ctx *artifact.Ctx, data []byte) {
 		for _, sink := range []string{"os.system", "os.popen", "subprocess.", "urllib.request", "requests.",
 			"socket.", "shutil.rmtree", "exec(", "eval(", "__import__(", "compile("} {
 			if strings.HasPrefix(t, sink) {
-				ctx.Sink.Emit(ruleSetupHook, ln.off, "module-scope call runs during install: "+truncate(t))
+				ctx.Sink.Emit(ruleSetupHook, ln.off, "module-scope call runs during install: "+report.TruncateEvidence(t, 120))
 			}
 		}
 	}
@@ -254,7 +255,7 @@ func buildBackendRule(ctx *artifact.Ctx, data []byte) {
 	if allowedBackends[value] {
 		return
 	}
-	ctx.Sink.EmitExtra(ruleBuildBackend, int64(off), "build-backend = "+truncate(value),
+	ctx.Sink.EmitExtra(ruleBuildBackend, int64(off), "build-backend = "+report.TruncateEvidence(value, 120),
 		map[string]string{"build-backend": value})
 }
 
@@ -383,12 +384,4 @@ func indexFrom(data []byte, needle string, from int) int {
 		return -1
 	}
 	return from + i
-}
-
-func truncate(s string) string {
-	const max = 120
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
 }

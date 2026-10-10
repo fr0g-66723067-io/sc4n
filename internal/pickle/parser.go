@@ -69,7 +69,7 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		lim:     l,
 		data:    data,
 		limit:   budget,
-		mm:      newMemo(),
+		mm:      newMemo(len(data)),
 		globals: map[string]*Global{},
 		structs: map[string]*structStat{},
 		once:    map[string]bool{},

@@ -172,20 +172,13 @@ func HasSecretHit(s string) bool {
 func emit(sink *report.Sink, base int64, h Hit) {
 	ev := h.Match
 	if h.Rule.Class == "metadata" || h.Rule.Class == "content" {
-		ev = "indicator " + strconv.Quote(truncate(h.Match, 120)) + " in a data string"
+		ev = "indicator " + strconv.Quote(report.TruncateEvidence(h.Match, 120)) + " in a data string"
 	}
 	if h.Redacted {
 		sink.EmitRedacted(h.Rule, base+h.Off, "a value that matches the "+h.Rule.Title+" shape is present and has been masked", h.Extra)
 		return
 	}
 	sink.EmitExtra(h.Rule, base+h.Off, ev, h.Extra)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // sortedHits orders hits deterministically.

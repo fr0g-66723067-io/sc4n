@@ -1,6 +1,7 @@
 package pysrc
 
 import (
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -236,7 +237,7 @@ func notebookMagic(ctx *artifact.Ctx, cell notebookCell) {
 		}
 		if what != "" {
 			ctx.Sink.EmitAt(ruleNotebookMagic, origLine, col,
-				what+": "+truncateEvidence(trimmed))
+				what+": "+report.TruncateEvidence(trimmed, 160))
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	// Registers every format parser with internal/artifact.
 	_ "github.com/fr0g-66723067-io/sc4n/internal/formats"
@@ -216,6 +217,28 @@ func TestEveryFindingNamesARegisteredRule(t *testing.T) {
 		}
 		if f.Severity.String() == "unknown" {
 			t.Errorf("finding %s has no severity", f.RuleID)
+		}
+	}
+}
+
+// TestFixtureEvidenceIsValidUTF8: every evidence string and extra value in a
+// report over the whole fixture corpus must be valid UTF-8. The truncate helpers
+// cut at a byte offset, which splits a multi-byte rune and leaves a dangling
+// sequence in the report; the helpers now back off to a rune boundary, and this
+// holds that.
+func TestFixtureEvidenceIsValidUTF8(t *testing.T) {
+	findings := scanPaths(t, fixtureRoot)
+	if len(findings) == 0 {
+		t.Fatal("the fixture corpus produced no findings, so this proves nothing")
+	}
+	for _, f := range findings {
+		if !utf8.ValidString(f.Evidence) {
+			t.Errorf("%s on %s has invalid UTF-8 evidence: %q", f.RuleID, f.Artifact, f.Evidence)
+		}
+		for k, v := range f.Extra {
+			if !utf8.ValidString(v) {
+				t.Errorf("%s on %s has invalid UTF-8 in extra[%s]: %q", f.RuleID, f.Artifact, k, v)
+			}
 		}
 	}
 }

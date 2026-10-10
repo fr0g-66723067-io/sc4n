@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 var (
@@ -783,5 +784,32 @@ func TestParseSeverityAcceptsTheEmptyString(t *testing.T) {
 	}
 	if sev != SeverityInfo {
 		t.Fatalf(`ParseSeverity("") = %v, want info`, sev)
+	}
+}
+
+// TestTruncateEvidenceKeepsRunesWhole: a byte-offset cut splits a multi-byte rune,
+// and the report then carries a dangling sequence where the stream had a valid
+// one. The cut backs off to the next rune start.
+func TestTruncateEvidenceKeepsRunesWhole(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"ascii and more", 5, "ascii…"},
+		{"éééééééééé", 5, "éé…"},
+		{"éééééééééé", 4, "éé…"},
+		{"日本語のテキスト", 7, "日本…"},
+		{"short", 20, "short"},
+		{"", 4, ""},
+		{"é", 1, "…"},
+	} {
+		got := TruncateEvidence(tc.in, tc.n)
+		if got != tc.want {
+			t.Errorf("TruncateEvidence(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("TruncateEvidence(%q, %d) = %q, which is not valid UTF-8", tc.in, tc.n, got)
+		}
 	}
 }

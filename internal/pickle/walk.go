@@ -93,7 +93,7 @@ func Walk(ctx *artifact.Ctx, s source.Source, opt Options) (*Stream, error) {
 		lim:     ctx.Limits,
 		data:    data,
 		opt:     opt,
-		mm:      newMemo(),
+		mm:      newMemo(len(data)),
 		globals: map[string]*Global{},
 		structs: map[string]*structStat{},
 		once:    map[string]bool{},
@@ -282,7 +282,7 @@ func (w *walker) probePickle(off int) bool {
 		lim:     w.lim,
 		data:    w.data,
 		limit:   budget,
-		mm:      newMemo(),
+		mm:      newMemo(budget),
 		globals: map[string]*Global{},
 		structs: map[string]*structStat{},
 		once:    map[string]bool{},
@@ -742,8 +742,8 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 		}
 		overwrote, ok := w.mm.put(int(idx), top)
 		if !ok {
-			w.structFinding("memo-index-out-of-range",
-				fmt.Sprintf("%s writes memo slot %d, which is beyond the %d-slot budget; the loader's memo is a dict and accepts it", info.name, idx, maxMemoSlots), int64(off))
+			w.structFinding("memo-table-full",
+				fmt.Sprintf("%s writes memo slot %d and the sparse table already holds %d entries, the budget for indices beyond the %d a stream of these bytes can justify", info.name, idx, maxMemoSlots, w.mm.limit), int64(off))
 			break
 		}
 		if overwrote {
@@ -1255,7 +1255,14 @@ func describe(v Val) string {
 func quote(s string) string {
 	const max = 160
 	var b strings.Builder
-	b.Grow(len(s) + 2)
+	// Grow is bounded by the truncation: a 1 MiB PERSID argument must not make the
+	// builder reserve 1 MiB to emit at most max runes (each escaping to at most
+	// six bytes) plus the quotes and the ellipsis.
+	grow := len(s) + 2
+	if grow > max*6+8 {
+		grow = max*6 + 8
+	}
+	b.Grow(grow)
 	b.WriteByte('"')
 	n := 0
 	for _, r := range s {
@@ -1567,9 +1574,12 @@ func (w *walker) countedBytes(info opcodeInfo, start int, n int64) (any, int, er
 	return w.data[start : start+int(n)], start + int(n), nil
 }
 
-// countedLong decodes a little-endian two's-complement big integer. The value is
-// not materialised as a big.Int: the walker only needs a scalar for the stack, and
-// an attacker-controlled thousand-digit integer must not cost an allocation.
+// countedLong decodes a little-endian two's-complement big integer, the way
+// CPython's _decode_long does: fold the bytes, then subtract 1 << (8*len) when the
+// top bit is set. The value is not materialised as a big.Int: the walker only needs
+// a scalar for the stack, and an attacker-controlled thousand-digit integer must
+// not cost an allocation, so a value wider than eight bytes keeps its low 64 bits
+// and is clamped when negative.
 func (w *walker) countedLong(info opcodeInfo, start int, n int64) (any, int, error) {
 	if n < 0 {
 		return nil, start, argErr("negative-length", fmt.Sprintf("%s declares a negative length %d", info.name, n))
@@ -1590,8 +1600,23 @@ func (w *walker) countedLong(info opcodeInfo, start int, n int64) (any, int, err
 		v = v<<8 | int64(raw[i])
 	}
 	negative := raw[len(raw)-1]&0x80 != 0
-	if negative {
-		v = -(v & math.MaxInt64)
+	switch {
+	case len(raw) < 8:
+		if negative {
+			// CPython's _decode_long subtracts 1 << (8*len(data)) rather than
+			// masking the sign bit, so one byte 0xff is -1 and not -255.
+			v -= int64(1) << (8 * uint(len(raw)))
+		}
+	case len(raw) == 8:
+		// The fold already produced the two's-complement value.
+	default:
+		// More than 64 bits: the exact value does not fit an int64, so only the
+		// low eight bytes are kept and the magnitude is a floor. A negative value
+		// is clamped rather than reported as a positive number the stream does
+		// not contain.
+		if negative {
+			v = math.MinInt64
+		}
 	}
 	return v, start + int(n), nil
 }

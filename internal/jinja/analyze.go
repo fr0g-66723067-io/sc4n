@@ -471,7 +471,7 @@ func (a *analyzer) expressions() {
 			joined, next, ok := a.concatAt(i)
 			if ok {
 				if strings.Contains(joined, "__") {
-					a.emit(ruleDynamicName, t.off, "string concatenation builds "+strconv.Quote(truncate(joined, 80))+
+					a.emit(ruleDynamicName, t.off, "string concatenation builds "+strconv.Quote(report.TruncateEvidence(joined, 80))+
 						", which hides a dunder name from a literal scanner")
 				}
 				i = next - 1
@@ -605,11 +605,4 @@ func phraseIn(s string) (string, int) {
 		}
 	}
 	return "", 0
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

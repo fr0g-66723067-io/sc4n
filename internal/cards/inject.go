@@ -178,10 +178,10 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 			body = rest[:k]
 		}
 		sink.Emit(ruleCardHidden, base+int64(start),
-			"HTML comment in "+what+", hidden from every Markdown renderer: "+strconv.Quote(truncateEvidence(body, 120)))
+			"HTML comment in "+what+", hidden from every Markdown renderer: "+strconv.Quote(report.TruncateEvidence(body, 120)))
 		if hits := stringscan.ScanString(body); len(hits) > 0 {
 			sink.Emit(ruleCardInjection, base+int64(start),
-				"instruction-like content hidden in an HTML comment in "+what+": "+strconv.Quote(truncateEvidence(body, 120)))
+				"instruction-like content hidden in an HTML comment in "+what+": "+strconv.Quote(report.TruncateEvidence(body, 120)))
 		}
 		if k < 0 {
 			break
@@ -318,11 +318,4 @@ func invisible(r rune) bool {
 		return true
 	}
 	return r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069
-}
-
-func truncateEvidence(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 )
 
 // TextOptions controls the human renderer.
@@ -248,8 +249,25 @@ func oneLine(s string, width int) string {
 		}
 		return r
 	}, s)
-	if len(s) > width {
-		s = s[:width] + "…"
+	return TruncateEvidence(s, width)
+}
+
+// TruncateEvidence cuts s to at most n bytes for a one-line finding and appends an
+// ellipsis when anything was cut. The cut backs off to a rune boundary, so the
+// evidence never ends with a dangling UTF-8 sequence: cutting at a byte offset
+// splits a multi-byte rune and the report then carries a replacement character
+// where the stream had a valid one. n is a byte budget, not a rune count, because
+// it exists to bound the report.
+func TruncateEvidence(s string, n int) string {
+	if n <= 0 {
+		return ""
 	}
-	return s
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

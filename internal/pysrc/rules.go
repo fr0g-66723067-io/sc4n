@@ -450,7 +450,7 @@ func (a *analyzer) at(off int32) (int, int) {
 
 func (a *analyzer) emitAt(r *report.Rule, off int32, ev string) {
 	line, col := a.at(off)
-	a.ctx.Sink.EmitAt(r, line, col, truncateEvidence(ev))
+	a.ctx.Sink.EmitAt(r, line, col, report.TruncateEvidence(ev, 160))
 }
 
 func (a *analyzer) stmt(st []Token) {
@@ -708,7 +708,7 @@ func (a *analyzer) taintRules(st []Token, calls []Call, stmtText string) {
 			extra["shell"] = "True"
 		}
 		line, col := a.at(c.Off)
-		a.ctx.Sink.EmitAtExtra(r, line, col, truncateEvidence(callEvidence(a.src, c)), extra)
+		a.ctx.Sink.EmitAtExtra(r, line, col, report.TruncateEvidence(callEvidence(a.src, c), 160), extra)
 	}
 }
 
@@ -1127,18 +1127,10 @@ func callEvidence(src []byte, c Call) string {
 		if i > 0 {
 			s += ", "
 		}
-		s += truncateEvidence(a.Text(src))
+		s += report.TruncateEvidence(a.Text(src), 160)
 	}
 	s += ")"
 	return s
-}
-
-func truncateEvidence(s string) string {
-	const max = 160
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
 }
 
 func spanIsTrue(src []byte, sp Span) bool {
