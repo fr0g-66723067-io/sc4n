@@ -147,9 +147,21 @@ func TestFixtureExpectations(t *testing.T) {
 	}
 }
 
+// benignAllowlist is the explicit, reasoned exception list for the benign gate: a
+// rule ID that may report on a benign fixture, with the reason. It is empty, because
+// nothing the benign corpus contains is a finding above info. An entry is how a
+// legitimately-reported fixture gets in — with a reason a reviewer can disagree
+// with — rather than by raising the bar for everything.
+var benignAllowlist = map[string]string{}
+
 // TestBenignFixturesAreClean is the false-positive gate. A scanner that fires on a
 // real-structure torch state dict is not usable as a CI gate, so this is an
 // assertion about the whole benign set at once rather than per file.
+//
+// The threshold is "anything above info", not "high or critical". The weaker gate
+// passed while SC4N-ARCHIVE-NAME-MISMATCH was reported at medium on the committed
+// benign/model.npz — a false positive on a fixture this gate exists to protect,
+// invisible because a medium finding sat below the bar.
 func TestBenignFixturesAreClean(t *testing.T) {
 	benign := filepath.Join(fixtureRoot, "benign")
 	if _, err := os.Stat(benign); err != nil {
@@ -158,12 +170,18 @@ func TestBenignFixturesAreClean(t *testing.T) {
 	findings := scanPaths(t, benign)
 	var bad []string
 	for _, f := range findings {
-		if f.Severity.AtLeast(report.SeverityHigh) {
-			bad = append(bad, f.Severity.String()+" "+f.RuleID+" "+f.Artifact+" "+f.Evidence)
+		if f.Severity <= report.SeverityInfo {
+			continue
 		}
+		// An allowlist entry excuses a medium finding, never a high one: the
+		// high/critical bar is the subset of this gate that no entry can lift.
+		if _, ok := benignAllowlist[f.RuleID]; ok && !f.Severity.AtLeast(report.SeverityHigh) {
+			continue
+		}
+		bad = append(bad, f.Severity.String()+" "+f.RuleID+" "+f.Artifact+" "+f.Evidence)
 	}
 	if len(bad) > 0 {
-		t.Fatalf("benign corpus produced %d high/critical finding(s):\n%s", len(bad), strings.Join(bad, "\n"))
+		t.Fatalf("benign corpus produced %d finding(s) above info:\n%s", len(bad), strings.Join(bad, "\n"))
 	}
 	// Informational findings are allowed on a benign artifact (a legitimate chat
 	// template is still worth telling the reader about), but they must be
