@@ -1,0 +1,8 @@
+{
+  "architectures": ["LlamaForCausalLM"],
+  "model_type": "llama",
+  "auto_map": {
+    "AutoConfig": "configuration_x.CustomConfig",
+    "AutoModelForCausalLM": "modeling_x.CustomModel"
+  }
+}

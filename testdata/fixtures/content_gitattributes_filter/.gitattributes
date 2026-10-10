@@ -1,0 +1,2 @@
+*.dat filter=sc4n-clean
+*.txt diff=sc4n-diff-driver

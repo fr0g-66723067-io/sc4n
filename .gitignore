@@ -12,6 +12,13 @@
 /testdata/big/
 *.safetensors.tmp
 
+# `go test -cpuprofile` / `-c` droppings and the Python bytecode cache the
+# opcode-table generator leaves behind.
+*.test
+*.prof
+__pycache__/
+*.pyc
+
 # Editor and OS droppings.
 .DS_Store
 *~

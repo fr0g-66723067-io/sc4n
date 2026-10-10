@@ -1,0 +1,7 @@
+{
+  "peft_type": "LORA",
+  "task_type": "CAUSAL_LM",
+  "base_model_name_or_path": "meta-llama/Llama-2-7b-hf",
+  "r": 8,
+  "lora_alpha": 16
+}

@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "tokenizer_class": "BertTokenizerFast",
+  "pre_tokenizer": {
+    "type": "Sequence",
+    "pretokenizers": [
+      {"type": "Split", "pattern": {"Regex": "(?=secret)"}}
+    ]
+  },
+  "normalizer": {
+    "type": "Sequence",
+    "normalizers": [
+      {"type": "Regex", "pattern": "(\\w+)+"}
+    ]
+  }
+}

@@ -1,0 +1,93 @@
+package cards
+
+import "strings"
+
+// frontmatter is the subset of YAML that Hugging Face model and dataset cards
+// actually use: top-level scalars, inline lists and block lists. It exists so
+// that card fields can be resolved by name without linking a YAML library.
+type frontmatter struct {
+	scalars map[string]string
+	lists   map[string][]string
+}
+
+// parseFrontmatter parses the leading `---`-delimited YAML block of text.
+//
+// It reports ok=false when the block is present but does not match the subset,
+// which is the signal for SC4N-CARD-PARSE. Text that has no frontmatter block at
+// all returns (nil, true): there was nothing to parse, which is not an error.
+func parseFrontmatter(text string) (*frontmatter, bool) {
+	if !strings.HasPrefix(text, "---") {
+		return nil, true
+	}
+	nl := strings.IndexByte(text, '\n')
+	if nl < 0 {
+		return nil, false
+	}
+	if strings.TrimRight(text[:nl], " \t\r") != "---" {
+		return nil, true
+	}
+	fm := &frontmatter{scalars: map[string]string{}, lists: map[string][]string{}}
+	curKey := ""
+	closed := false
+	for _, line := range strings.Split(text[nl+1:], "\n") {
+		line = strings.TrimRight(line, "\r")
+		t := strings.TrimSpace(line)
+		if t == "---" || t == "..." {
+			closed = true
+			break
+		}
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if strings.HasPrefix(t, "- ") || t == "-" {
+			if curKey == "" {
+				return nil, false
+			}
+			fm.lists[curKey] = append(fm.lists[curKey], unquoteYAML(strings.TrimSpace(strings.TrimPrefix(t, "-"))))
+			continue
+		}
+		if line != t {
+			// Indented and not a list item: a nested mapping, which the subset
+			// does not model.
+			return nil, false
+		}
+		colon := strings.IndexByte(t, ':')
+		if colon <= 0 {
+			return nil, false
+		}
+		key := strings.TrimSpace(t[:colon])
+		val := strings.TrimSpace(t[colon+1:])
+		curKey = key
+		switch {
+		case val == "":
+			// A block list may follow; curKey already points at it.
+		case strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]"):
+			inner := strings.TrimSpace(val[1 : len(val)-1])
+			for _, p := range strings.Split(inner, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					fm.lists[key] = append(fm.lists[key], unquoteYAML(p))
+				}
+			}
+		default:
+			fm.scalars[key] = unquoteYAML(val)
+		}
+	}
+	if !closed {
+		return nil, false
+	}
+	return fm, true
+}
+
+// unquoteYAML strips matching single or double quotes from a scalar.
+func unquoteYAML(s string) string {
+	if len(s) < 2 || (s[0] != '"' && s[0] != '\'') || s[len(s)-1] != s[0] {
+		return s
+	}
+	inner := s[1 : len(s)-1]
+	if s[0] == '"' {
+		inner = strings.ReplaceAll(inner, `\"`, `"`)
+		inner = strings.ReplaceAll(inner, `\\`, `\`)
+		return inner
+	}
+	return strings.ReplaceAll(inner, "''", "'")
+}

