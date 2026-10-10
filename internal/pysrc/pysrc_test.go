@@ -7,6 +7,7 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
+	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
 func newTestCtx(t *testing.T) (*artifact.Ctx, *report.Collector) {
@@ -302,4 +303,42 @@ func TestNotebookCodeRulesRun(t *testing.T) {
 	AnalyzeNotebook(ctx, []byte(raw))
 	got := ids(c)
 	wantRule(t, got, "SC4N-CODE-TAINT-EXEC")
+}
+
+// ---- dispatch -----------------------------------------------------------------
+
+func TestSniffPythonNameGate(t *testing.T) {
+	l := limits.Default()
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		// A known extension that does not mean Python is rejected before the
+		// content heuristic runs, whatever the content looks like.
+		{"card.md", "# Model Card\n\n## Usage\n\n### Notes\n", false},
+		{"main.cpp", "// comment\n#include <vector>\nclass Foo {};\nreturn 0;\n", false},
+		{"app.ts", "// comment\nimport { x } from 'y';\nclass Foo {}\nreturn x;\n", false},
+		{"shader.wgsl", "// comment\n@group(0) @binding(0)\nclass Foo {}\nreturn x;\n", false},
+		{"run.sh", "#!/bin/sh\n# comment\nprint(1)\nfrom x import y\n", false},
+		{"index.json", "{\"a\": 1}\n", false},
+		{"data.txt", "# comment\ndef f():\n    return 1\n", false},
+		// Python extensions are claimed by name, and a Python-shaped file with an
+		// unhelpful name is claimed by content.
+		{"mod.py", "x = 1\n", true},
+		{"types.pyi", "def f() -> int: ...\n", true},
+		{"run", "import os\nimport sys\n\ndef main():\n    return 0\n", true},
+		{"script", "from os import path\nprint(1)\nclass A:\n    pass\n", true},
+		{"container.zip:code/train.py", "x = 1\n", true},
+		{"container.zip:docs/card.md", "# Card\n\n## Usage\n\n### Notes\n", false},
+		// Comments alone, however many, are not Python: '#' is C, shell, YAML and
+		// Markdown syntax too.
+		{"notes", "# one\n# two\n# three\n# four\n", false},
+	}
+	for _, tc := range cases {
+		got, _ := sniffPython(source.Mem(tc.name, []byte(tc.body)), l)
+		if (got == artifact.FormatPython) != tc.want {
+			t.Errorf("sniffPython(%q) = %v, want python=%v", tc.name, got, tc.want)
+		}
+	}
 }
