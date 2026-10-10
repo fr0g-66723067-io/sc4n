@@ -90,8 +90,11 @@ scan flags:
   -max-findings N              finding cap (default 100000)
   -timeout DURATION            bound the whole scan (e.g. 10m)
   -root DIR                    containment root for path-shaped values
+  -baseline FILE               suppress findings already present in a JSON report
   -stdin                       scan one artifact from stdin (-name required)
   -name NAME                   artifact name to use with -stdin
+  -hf-cache                    scan a Hugging Face download cache instead of paths
+  -hf-cache-dir DIR            cache root for -hf-cache (default ~/.cache/huggingface/hub)
   -deep-stats                  enable informational weight-statistics findings
   -timings                     include per-phase timings in the output
   -quiet                       print only rule counts and the summary line
