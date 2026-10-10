@@ -446,6 +446,60 @@ func TestSARIFShape(t *testing.T) {
 	}
 }
 
+// TestSARIFOccurrenceCountDistinguishesIdenticalEvidence is the regression for a
+// constant occurrence count. Fingerprint excludes the byte offset, so two findings
+// of one rule with identical evidence in one file share it; emitting "1:" for both
+// made primaryLocationLineHash byte-identical, and that is the value GitHub code
+// scanning de-duplicates on, so the second alert was merged into the first. The
+// fingerprint itself must not change: it is the baseline identity.
+func TestSARIFOccurrenceCountDistinguishesIdenticalEvidence(t *testing.T) {
+	c := NewCollector(0)
+	s := c.For("dup.txt")
+	s.Emit(testRuleMedium, 10, "same evidence")
+	s.Emit(testRuleMedium, 49, "same evidence")
+	s.Emit(testRuleMedium, 80, "different evidence")
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "", nil, c, Limits{}, nil, 0)
+
+	var buf bytes.Buffer
+	if err := rep.WriteSARIF(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Runs []struct {
+			Results []struct {
+				PartialFingerprints map[string]string `json:"partialFingerprints"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	results := doc.Runs[0].Results
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	seen := map[string]bool{}
+	for _, res := range results {
+		fp := res.PartialFingerprints["primaryLocationLineHash"]
+		if seen[fp] {
+			t.Fatalf("two results share the fingerprint value %q, so GitHub would merge them", fp)
+		}
+		seen[fp] = true
+	}
+	// The two identical-evidence findings differ only by their occurrence count,
+	// and both keep the same fingerprint prefix (the baseline identity).
+	if !strings.HasSuffix(results[0].PartialFingerprints["primaryLocationLineHash"], ":1") ||
+		!strings.HasSuffix(results[1].PartialFingerprints["primaryLocationLineHash"], ":2") {
+		t.Fatalf("occurrence counts = %q, %q",
+			results[0].PartialFingerprints["primaryLocationLineHash"],
+			results[1].PartialFingerprints["primaryLocationLineHash"])
+	}
+	base := strings.TrimSuffix(results[0].PartialFingerprints["primaryLocationLineHash"], ":1")
+	if base != Fingerprint(c.Findings()[0]) {
+		t.Fatalf("fingerprint prefix %q is not the baseline identity %q", base, Fingerprint(c.Findings()[0]))
+	}
+}
+
 func TestCycloneDXIsWellFormedAndDeterministic(t *testing.T) {
 	build := func() *Report {
 		c := NewCollector(0)

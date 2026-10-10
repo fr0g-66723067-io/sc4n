@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -189,6 +190,15 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 		}},
 	}
 
+	// GitHub code scanning de-duplicates on primaryLocationLineHash, and the value
+	// it generates itself is "<hash>:<count>". Fingerprint deliberately excludes
+	// the byte offset (see report.Fingerprint), so two findings of one rule with
+	// identical evidence in one file share it: emitting a constant count for both
+	// made the values byte-identical and GitHub merged the second alert into the
+	// first. The count is the 1-based occurrence of that fingerprint within the
+	// artifact, which is what makes the two values distinct while the fingerprint
+	// itself — the baseline identity — stays unchanged.
+	occurrences := map[string]int{}
 	for _, f := range r.Findings {
 		ri, ok := index[f.RuleID]
 		if !ok {
@@ -237,6 +247,14 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 		if f.Evidence != "" {
 			msg += ": " + oneLine(f.Evidence, 512)
 		}
+		// GitHub code scanning reads only the primaryLocationLineHash
+		// fingerprint for de-duplication (see the sarif-support page linked
+		// from the package header), so that is the key emitted; the value is
+		// our own stable fingerprint plus the occurrence count the format calls
+		// for. A second, tool-named key would have no reader.
+		fp := Fingerprint(f)
+		key := f.Artifact + "\x00" + fp
+		occurrences[key]++
 		res := sarifResult{
 			RuleID:    f.RuleID,
 			RuleIndex: ri,
@@ -246,12 +264,9 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 				ArtifactLocation: sarifArtifact{URI: pathURI(path)},
 				Region:           region,
 			}}},
-			// GitHub code scanning reads only the primaryLocationLineHash
-			// fingerprint for de-duplication (see the sarif-support page linked
-			// from the package header), so that is the key emitted; the value is
-			// our own stable fingerprint, prefixed with the occurrence count the
-			// format calls for. A second, tool-named key would have no reader.
-			PartialFingerprints: map[string]string{"primaryLocationLineHash": "1:" + Fingerprint(f)},
+			PartialFingerprints: map[string]string{
+				"primaryLocationLineHash": fp + ":" + strconv.Itoa(occurrences[key]),
+			},
 			Properties: sarifResultProp{
 				SecuritySeverity: SeverityBand(f.Severity),
 				Confidence:       f.Confidence.String(),
