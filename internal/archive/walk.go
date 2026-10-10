@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
@@ -331,7 +332,10 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 			emitOpenError(ctx, m.Name, err)
 			continue
 		}
-		cumulative += processReader(ctx, m.Name, m.Size, rc, nil)
+		// The zip member's expansion is already bounded by the ratio cap in
+		// collectZipMember's limitReader, so no extra justification bound is
+		// passed (-1 = unknown at this layer).
+		cumulative += processReader(ctx, m.Name, m.Size, -1, rc, nil)
 		_ = rc.Close()
 		if exceededDecompressed(ctx, cumulative) {
 			return
@@ -339,9 +343,23 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 	}
 }
 
+// countingReader counts the bytes read through it, so scanTarMembers can bound a
+// member's declared size by the archive bytes it has left.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // scanTarMembers walks a tar in one pass, so a tar with many members is O(n).
 func scanTarMembers(ctx *artifact.Ctx, s source.Source) {
-	tr := newTarReader(s)
+	cr := &countingReader{r: s.Reader(0)}
+	tr := tar.NewReader(cr)
 	max := ctx.Limits.MaxEntries
 	if max <= 0 {
 		max = limits.Default().MaxEntries
@@ -365,7 +383,15 @@ func scanTarMembers(ctx *artifact.Ctx, s source.Source) {
 		if hdr.Name == "" {
 			continue
 		}
-		cumulative += processReader(ctx, hdr.Name, hdr.Size, tr, nil)
+		// The archive bytes still unread bound what this member can hold: a tar
+		// member's data is stored verbatim, so a larger declared size (a sparse
+		// member whose holes Go's reader synthesises) cannot be backed by the
+		// file. cr.n is the position just past this member's header.
+		stretch := s.Size() - cr.n
+		if stretch < 0 {
+			stretch = 0
+		}
+		cumulative += processReader(ctx, hdr.Name, hdr.Size, stretch, tr, nil)
 		if exceededDecompressed(ctx, cumulative) {
 			return
 		}
@@ -384,12 +410,32 @@ func exceededDecompressed(ctx *artifact.Ctx, cumulative int64) bool {
 // at or below MaxStringBlob is read into memory (the pooled path); a larger one is
 // spilled to a private temp file and parsed through the normal Source machinery,
 // so a member far larger than memory still has its content analysed. declared is
-// the member's declared uncompressed size, or -1 when unknown, and is used only for
-// the SC4N-LIMIT-SPILL evidence. onPrefix, when non-nil, sees the member's leading
-// bytes before dispatch (the compression layer uses it to detect a nested wrapper).
-// It returns the number of member bytes consumed, for the cumulative cap.
-func processReader(ctx *artifact.Ctx, name string, declared int64, r io.Reader, onPrefix func([]byte)) int64 {
+// the member's declared uncompressed size, or -1 when unknown, and is used for the
+// SC4N-LIMIT-SPILL evidence and for the justification check below. stretch is the
+// most the archive can still hold for this member, or -1 when that bound is unknown
+// (a compression layer, where the declared size is not knowable). onPrefix, when
+// non-nil, sees the member's leading bytes before dispatch (the compression layer
+// uses it to detect a nested wrapper).
+//
+// It returns the number of member bytes charged to the cumulative decompressed
+// budget: the member's actual size when it fits in memory, the spilled size when it
+// was materialised, and, when the spill refused the member, the spill cap plus one
+// — the spill attempt writes at most that many bytes before refusing, whereas the
+// probe length it used to return undercharged the budget by the spill/probe ratio.
+func processReader(ctx *artifact.Ctx, name string, declared, stretch int64, r io.Reader, onPrefix func([]byte)) int64 {
 	max := maxBlob(ctx.Limits)
+	// A declared logical size the archive cannot back is refused before any of it
+	// is read: a tar header can declare a large size for a member whose data the
+	// archive does not contain (Go's reader synthesises the holes of a sparse
+	// member), so trusting the declaration would let a few archive bytes become a
+	// multi-gigabyte temp file. stretch bounds the member's data by the bytes the
+	// archive has left, which a valid member can never exceed.
+	unjustified := stretch >= 0 && declared > stretch
+	if unjustified {
+		limits.Emit(ctx.Sink, limits.RuleDecompressed, "MaxDecompressedBytes", declared, stretch,
+			"member "+snippet(name)+" declares more bytes than the archive holds")
+	}
+
 	probe, rerr := io.ReadAll(io.LimitReader(r, max+1))
 	n := int64(len(probe))
 
@@ -398,13 +444,16 @@ func processReader(ctx *artifact.Ctx, name string, declared int64, r io.Reader, 
 	}
 	checkNativeShebang(ctx, name, probe)
 
-	if n > max {
+	if n > max && !unjustified {
 		capBytes := spillCap(ctx.Limits)
 		src, err := source.Spill(name, io.MultiReader(bytes.NewReader(probe), r), capBytes)
 		if err != nil {
 			emitSpillError(ctx, name, declared, capBytes, err)
 			scanPrefix(ctx, name, probe)
-			return n
+			// The spill wrote at most capBytes+1 bytes before refusing; charge
+			// that rather than the probe length so the cumulative budget is not
+			// undercharged by the spill/probe ratio.
+			return capBytes + 1
 		}
 		artifact.ScanMember(ctx, name, src)
 		sn := src.Size()
@@ -565,7 +614,7 @@ func scanCompressed(ctx *artifact.Ctx, s source.Source) error {
 	if closer != nil {
 		defer closer.Close()
 	}
-	processReader(ctx, decompressedName(ctx), -1, r, func(probe []byte) {
+	processReader(ctx, decompressedName(ctx), -1, -1, r, func(probe []byte) {
 		if inner, ok := DetectCompressor(source.Mem("payload", probe), ctx.Limits); ok {
 			ctx.Sink.EmitExtra(ruleArchiveNestedCompression, 0,
 				c.String()+" payload is itself "+inner.String(),

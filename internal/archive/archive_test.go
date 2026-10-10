@@ -9,7 +9,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash/crc32"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -639,4 +642,170 @@ func TestNestedParseFailureIsReported(t *testing.T) {
 	if !found {
 		t.Fatalf("nested parse failure not reported: %v", ids(col.Findings()))
 	}
+}
+
+// rawTarHeader builds one 512-byte USTAR regular-file header that declares size
+// without any of the data that size implies. A hand-written header is the shape
+// an attacker uses: Go's reader trusts the declaration, so without a bound the
+// walk would try to materialise the whole declared size.
+func rawTarHeader(name string, size int64) []byte {
+	return rawTarHeaderType(name, size, '0')
+}
+
+func rawTarHeaderType(name string, size int64, typeflag byte) []byte {
+	h := make([]byte, 512)
+	copy(h[0:100], name)
+	copy(h[100:108], "0000644\x00")
+	copy(h[108:116], "0000000\x00")
+	copy(h[116:124], "0000000\x00")
+	copy(h[124:136], fmt.Sprintf("%011o\x00", size))
+	copy(h[136:148], "00000000000\x00")
+	for i := 148; i < 156; i++ {
+		h[i] = ' '
+	}
+	h[156] = typeflag
+	copy(h[257:263], "ustar\x00")
+	copy(h[263:265], "00")
+	var sum int
+	for _, b := range h {
+		sum += int(b)
+	}
+	copy(h[148:156], fmt.Sprintf("%06o\x00 ", sum))
+	return h
+}
+
+func padTarBlock(b []byte) []byte {
+	out := append([]byte(nil), b...)
+	if r := len(out) % 512; r != 0 {
+		out = append(out, make([]byte, 512-r)...)
+	}
+	return out
+}
+
+// paxRecord encodes one PAX extended-header record: "<len> <key>=<value>\n",
+// where len counts the whole record including its own digits. The space is part
+// of the count, which is the detail hand-rolled records get wrong.
+func paxRecord(key, value string) string {
+	body := key + "=" + value + "\n"
+	n := len(body)
+	for {
+		m := 1 + len(body) + len(strconv.Itoa(n))
+		if m == n {
+			break
+		}
+		n = m
+	}
+	return strconv.Itoa(n) + " " + body
+}
+
+// paxSparseTar builds a GNU/PAX sparse tar whose single member declares realsize
+// logical bytes while the archive holds one byte of real data. Go's reader
+// synthesises the holes, so reading the member yields realsize bytes — the shape
+// that turns a few archive bytes into a large spill without a bound.
+func paxSparseTar(realsize int64) []byte {
+	pax := paxRecord("GNU.sparse.size", strconv.FormatInt(realsize, 10)) +
+		paxRecord("GNU.sparse.numblocks", "1") +
+		paxRecord("GNU.sparse.map", "0,1") +
+		paxRecord("path", "sparse.bin")
+	var out []byte
+	out = append(out, rawTarHeaderType("./PaxHeaders/sparse.bin", int64(len(pax)), 'x')...)
+	out = append(out, padTarBlock([]byte(pax))...)
+	out = append(out, rawTarHeaderType("sparse.bin", 1, '0')...)
+	out = append(out, padTarBlock([]byte("A"))...)
+	out = append(out, make([]byte, 1024)...) // end-of-archive marker
+	return out
+}
+
+// dirBytes sums the size of the regular files directly under dir. t.Setenv points
+// TMPDIR here, so it measures how much the scan spilled to disk.
+func dirBytes(t *testing.T, dir string) int64 {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, e := range ents {
+		info, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
+// TestUnjustifiedTarMemberSize: a tar member declaring far more than the archive
+// holds is refused before any of it is materialised. The declared size cannot be
+// backed by the file, so it is a limit finding and TMPDIR must stay well under
+// MaxSpillBytes rather than growing to the declared size.
+func TestUnjustifiedTarMemberSize(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+
+	hdr := rawTarHeader("sparse.bin", 1<<32)
+	l := limits.Default()
+	l.MaxStringBlob = 1 << 10
+	l.MaxSpillBytes = 1 << 20
+
+	got := scanAs(t, "sparse.tar", hdr, artifact.FormatTar, l)
+	want(t, got, "SC4N-LIMIT-DECOMPRESSED")
+
+	n := dirBytes(t, dir)
+	t.Logf("TMPDIR holds %d bytes after the scan (MaxSpillBytes=%d)", n, l.MaxSpillBytes)
+	if n >= l.MaxSpillBytes {
+		t.Fatalf("TMPDIR grew to %d bytes, want under MaxSpillBytes=%d", n, l.MaxSpillBytes)
+	}
+}
+
+// TestJustifiedTarMemberSize: a valid tar must not trip the justification bound.
+func TestJustifiedTarMemberSize(t *testing.T) {
+	forbid(t, scanAs(t, "ok.tar", tarBytes(t), artifact.FormatTar, limits.Default()), "SC4N-LIMIT-DECOMPRESSED")
+}
+
+// TestUnjustifiedSparseTarMemberSize: a GNU/PAX sparse member declares 4 GiB while
+// the archive holds one byte and Go's reader synthesises the rest. The declared
+// size cannot be backed by the archive, so the member is refused before the spill
+// runs: the report carries the justification finding, not SC4N-LIMIT-SPILL, and
+// nothing large is written under TMPDIR.
+func TestUnjustifiedSparseTarMemberSize(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+
+	l := limits.Default()
+	l.MaxStringBlob = 1 << 10
+	l.MaxSpillBytes = 1 << 20
+	got := scanAs(t, "sparse.tar", paxSparseTar(1<<32), artifact.FormatTar, l)
+	want(t, got, "SC4N-LIMIT-DECOMPRESSED")
+	forbid(t, got, "SC4N-LIMIT-SPILL")
+	n := dirBytes(t, dir)
+	t.Logf("TMPDIR holds %d bytes after the scan (MaxSpillBytes=%d)", n, l.MaxSpillBytes)
+	if n >= l.MaxSpillBytes {
+		t.Fatalf("TMPDIR grew to %d bytes, want under MaxSpillBytes=%d", n, l.MaxSpillBytes)
+	}
+}
+
+// TestSpillRefusalChargesCap: when the spill refuses a member, the bytes charged
+// to the cumulative decompressed budget are the spill cap plus one, not the probe
+// length. Two refused members must exhaust a budget that is only 1.5x the spill
+// cap; charging the probe would leave the run looking clean and the later member
+// would still be scanned.
+func TestSpillRefusalChargesCap(t *testing.T) {
+	big := make([]byte, 2<<20)
+	data := buildZip(t, []zspec{
+		{name: "big1.bin", data: big, method: 8},
+		{name: "big2.bin", data: big, method: 8},
+		{name: "archive/data.pkl", data: gadgetPickle(), method: 8},
+	}, false)
+	l := limits.Default()
+	l.MaxStringBlob = 1 << 16
+	l.MaxSpillBytes = 1 << 20
+	l.MaxDecompressedBytes = 3 << 19 // 1.5 MiB: two spill charges exceed it, two probes do not
+	l.MaxRatio = 0
+	got := scanZip(t, "charge.zip", data, l)
+	want(t, got, "SC4N-LIMIT-SPILL")
+	want(t, got, "SC4N-LIMIT-DECOMPRESSED")
+	forbid(t, got, "SC4N-PICKLE-GLOBAL-CRITICAL")
 }
