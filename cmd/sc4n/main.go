@@ -98,9 +98,9 @@ scan flags:
   -hf-cache                    scan a Hugging Face download cache instead of paths
   -hf-cache-dir DIR            cache root for -hf-cache (default ~/.cache/huggingface/hub)
   -deep-stats                  enable informational weight-statistics findings
-  -timings                     include per-phase timings in the output
-  -quiet                       print only rule counts and the summary line
-  -color                       force ANSI colour (default: only on a terminal)
+  -timings                     include per-phase timings in the JSON output (json only)
+  -quiet                       print only rule counts and the summary line (text only)
+  -color                       force ANSI colour (text only; default: only on a terminal)
 
 exit codes: 0 clean, 1 findings at or above -fail-on, 2 usage error,
             3 a named path could not be opened.

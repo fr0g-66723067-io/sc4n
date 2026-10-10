@@ -113,6 +113,73 @@ func TestScanWritesToOutAndPrintsSummary(t *testing.T) {
 	}
 }
 
+// TestInertFlagsAreWarnedAbout: each of these flags reaches exactly one output
+// path, so with any other format the caller's intent is silently dropped. The
+// -timings case was the worst of them — the warning excluded text while the text
+// encoder ignores the timings map entirely, so `-timings -format text` was silent.
+func TestInertFlagsAreWarnedAbout(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+		want string // a fragment the warning must contain; "" means no warning
+	}{
+		{"timings with text", []string{"scan", "-timings", "-format", "text", dir}, "-timings has no effect with -format text"},
+		{"timings with sarif", []string{"scan", "-timings", "-format", "sarif", dir}, "-timings has no effect with -format sarif"},
+		{"color with json", []string{"scan", "-color", "-format", "json", dir}, "-color has no effect with -format json"},
+		{"quiet with cyclonedx", []string{"scan", "-quiet", "-format", "cyclonedx", dir}, "-quiet has no effect with -format cyclonedx"},
+		{"timings with json", []string{"scan", "-timings", "-format", "json", dir}, ""},
+		{"color and quiet with text", []string{"scan", "-color", "-quiet", "-format", "text", dir}, ""},
+		{"jobs with a path", []string{"scan", "-j", "4", dir}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			if code := run(tc.args, &out, &errOut); code != exitClean {
+				t.Fatalf("scan exited %d: %s", code, errOut.String())
+			}
+			got := errOut.String()
+			if tc.want == "" {
+				if strings.Contains(got, "has no effect") {
+					t.Fatalf("a warning fired for an effective flag: %q", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("stderr = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJobsIsInertWithStdin: -stdin scans one stream on the calling goroutine, so
+// the worker count is never read.
+func TestJobsIsInertWithStdin(t *testing.T) {
+	var out, errOut bytes.Buffer
+	restore := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(`{"a":1}`); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	os.Stdin = r
+	defer func() { os.Stdin = restore; r.Close() }()
+
+	if code := run([]string{"scan", "-stdin", "-name", "x.json", "-j", "4"}, &out, &errOut); code != exitClean {
+		t.Fatalf("scan exited %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "-j has no effect with -stdin") {
+		t.Fatalf("stderr = %q, want the -j warning", errOut.String())
+	}
+}
+
 func TestScanStdinRequiresName(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := run([]string{"scan", "-stdin"}, &out, &errOut); code != exitUsage {

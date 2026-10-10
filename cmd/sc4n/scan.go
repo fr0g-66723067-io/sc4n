@@ -63,9 +63,9 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&f.stdin, "stdin", false, "scan one artifact from stdin")
 	fs.StringVar(&f.name, "name", "", "artifact name to use with -stdin")
 	fs.BoolVar(&f.deepStats, "deep-stats", false, "enable informational weight-statistics findings")
-	fs.BoolVar(&f.timings, "timings", false, "include per-phase timings in the output")
-	fs.BoolVar(&f.quiet, "quiet", false, "print only rule counts and the summary line")
-	fs.BoolVar(&f.color, "color", false, "force ANSI colour (default: only on a terminal)")
+	fs.BoolVar(&f.timings, "timings", false, "include per-phase timings in the JSON output")
+	fs.BoolVar(&f.quiet, "quiet", false, "print only rule counts and the summary line (text only)")
+	fs.BoolVar(&f.color, "color", false, "force ANSI colour (text only; default: only on a terminal)")
 
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -303,8 +303,26 @@ func reportLimits(l limits.Limits) report.Limits {
 // these is a usage error: -timings with -format sarif is a harmless mistake, and
 // exiting non-zero would break a wrapper script that passes a fixed flag set.
 func warnInertFlags(f scanFlags, w io.Writer) {
-	if f.timings && f.format != "json" && f.format != "text" {
-		fmt.Fprintf(w, "sc4n: -timings has no effect with -format %s (the timings block is part of json and text)\n", f.format)
+	// -timings is JSON-only. The text encoder's summary line is the text-mode
+	// equivalent, and SARIF and CycloneDX have no place for it, so the flag was
+	// silently dropped for text.
+	if f.timings && f.format != "json" {
+		fmt.Fprintf(w, "sc4n: -timings has no effect with -format %s (the timings block is part of json only)\n", f.format)
+	}
+	// -color and -quiet are text-encoder options: they reach the encoder only in
+	// the "text" branch of render.
+	if f.format != "text" {
+		if f.color {
+			fmt.Fprintf(w, "sc4n: -color has no effect with -format %s (it colours the text report only)\n", f.format)
+		}
+		if f.quiet {
+			fmt.Fprintf(w, "sc4n: -quiet has no effect with -format %s (it shortens the text report only)\n", f.format)
+		}
+	}
+	// -stdin scans exactly one artifact, on the calling goroutine, so the worker
+	// count is never consulted.
+	if f.stdin && f.jobs > 0 {
+		fmt.Fprintln(w, "sc4n: -j has no effect with -stdin (a single stream is scanned in the calling goroutine)")
 	}
 	if f.hfCacheDir != "" && !f.hfCache {
 		fmt.Fprintln(w, "sc4n: -hf-cache-dir has no effect without -hf-cache")
