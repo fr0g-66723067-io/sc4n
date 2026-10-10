@@ -199,7 +199,12 @@ func (a *acAutomaton) scanLiterals(b []byte, hits []Hit) []Hit {
 				Off:      start,
 				Match:    match,
 				Redacted: ind.redact,
-				Extra:    map[string]string{"kind": ind.kind},
+				// shape is the table entry that matched, which is the
+				// indicator's own literal and never stream data. The redacted
+				// evidence names it, because "a value that matches the <rule
+				// title> shape" read the title ("Data string contains what looks
+				// like a hard-coded secret") where a shape name belongs.
+				Extra:    map[string]string{"kind": ind.kind, "shape": ind.literal},
 				codeOnly: ind.codeOnly,
 			})
 		}

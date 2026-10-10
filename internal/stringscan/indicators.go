@@ -207,7 +207,8 @@ func emit(sink *report.Sink, base int64, h Hit) {
 		ev = "indicator " + strconv.Quote(report.TruncateEvidence(h.Match, 120)) + " in a data string"
 	}
 	if h.Redacted {
-		sink.EmitRedacted(h.Rule, base+h.Off, "a value that matches the "+h.Rule.Title+" shape is present and has been masked", h.Extra)
+		sink.EmitRedacted(h.Rule, base+h.Off,
+			"a value matching the "+h.Extra["shape"]+" shape is present and has been masked", h.Extra)
 		return
 	}
 	sink.EmitExtra(h.Rule, base+h.Off, ev, h.Extra)
