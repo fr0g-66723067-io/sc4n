@@ -419,3 +419,56 @@ func TestRulesAreSortedByID(t *testing.T) {
 		t.Fatal("RuleByID did not find a registered rule")
 	}
 }
+
+// TestCycloneDXDoesNotClaimAPrefixDigestAsAFileHash is the CycloneDX half of the
+// sha256Scope rule: a CycloneDX `hashes` entry is a claim about the whole
+// component, so an artifact whose digest only covered a prefix must not appear
+// there — it is published as properties that carry the scope instead.
+func TestCycloneDXDoesNotClaimAPrefixDigestAsAFileHash(t *testing.T) {
+	c := NewCollector(0)
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "", []ArtifactSummary{
+		{Path: "big.safetensors", Size: 1 << 40, SHA256: "aaaa", SHA256Scope: "prefix:268435456", Format: "safetensors"},
+		{Path: "small.pkl", Size: 10, SHA256: "bbbb", SHA256Scope: "full", Format: "pickle"},
+	}, c, Limits{}, nil, 0)
+
+	var buf bytes.Buffer
+	if err := rep.WriteCycloneDX(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Components []struct {
+			Name   string `json:"name"`
+			Hashes []struct {
+				Content string `json:"content"`
+			} `json:"hashes"`
+			Properties []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			} `json:"properties"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("CycloneDX output is not valid JSON: %v", err)
+	}
+	byName := map[string]int{}
+	for i, comp := range doc.Components {
+		byName[comp.Name] = i
+	}
+	big := doc.Components[byName["big.safetensors"]]
+	if len(big.Hashes) != 0 {
+		t.Fatalf("a prefix digest was published as a component hash: %+v", big.Hashes)
+	}
+	var scope string
+	for _, p := range big.Properties {
+		if p.Name == "sc4n:sha256Scope" {
+			scope = p.Value
+		}
+	}
+	if scope != "prefix:268435456" {
+		t.Fatalf("the prefix scope is not recorded as a property: %+v", big.Properties)
+	}
+	small := doc.Components[byName["small.pkl"]]
+	if len(small.Hashes) != 1 || small.Hashes[0].Content != "bbbb" {
+		t.Fatalf("a full digest must still be a component hash: %+v", small.Hashes)
+	}
+}
