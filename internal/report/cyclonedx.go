@@ -39,6 +39,11 @@ type cdxBOM struct {
 
 type cdxMetadata struct {
 	Tools []cdxTool `json:"tools"`
+	// Properties carries the run-level facts a CycloneDX consumer cannot
+	// otherwise see: that the walk was cancelled, and how many paths could not be
+	// opened. Without them a partial scan is indistinguishable from a complete
+	// one in the BOM.
+	Properties []cdxProperty `json:"properties,omitempty"`
 }
 
 type cdxTool struct {
@@ -110,6 +115,14 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 			Version: version,
 		}}},
 		Components: make([]cdxComponent, 0, len(r.Artifacts)),
+	}
+	if r.Cancelled {
+		bom.Metadata.Properties = append(bom.Metadata.Properties,
+			cdxProperty{Name: "sc4n:cancelled", Value: "true"})
+	}
+	if r.Unreadable > 0 {
+		bom.Metadata.Properties = append(bom.Metadata.Properties,
+			cdxProperty{Name: "sc4n:unreadablePaths", Value: strconv.Itoa(r.Unreadable)})
 	}
 
 	refs := make(map[string]string, len(r.Artifacts))

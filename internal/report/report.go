@@ -260,6 +260,11 @@ type summaryJSON struct {
 	Suppressed     int            `json:"suppressed,omitempty"`
 	Dropped        int            `json:"dropped,omitempty"`
 	UnreadablePath int            `json:"unreadablePaths,omitempty"`
+	// Cancelled records that the walk stopped early (a deadline), so a consumer
+	// that reads only the summary cannot mistake a partial scan for a clean one.
+	// It sits beside unreadablePaths because both are run-level facts about how
+	// much of the requested scope was actually visited.
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 func (r *Report) toJSON() reportJSON {
@@ -308,6 +313,7 @@ func (r *Report) toJSON() reportJSON {
 		BySeverity:  by,
 		Suppressed:  r.Suppressed,
 		Dropped:     r.Dropped,
+		Cancelled:   r.Cancelled,
 	}
 	for _, a := range r.Artifacts {
 		if a.Error != "" {

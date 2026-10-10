@@ -210,6 +210,14 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		// findings because it means part of the requested scope was not scanned.
 		fmt.Fprintf(stderr, "sc4n: %v\n", runErr)
 	}
+	// A cancelled walk is not a clean run: the artifacts that were never visited
+	// cannot have produced findings, so exiting 0 would be a false CLEAN for a CI
+	// gate. It is reported the same way an unopenable path is, and the summary
+	// carries summary.cancelled for a consumer that reads only the report.
+	if res.Cancelled {
+		fmt.Fprintln(stderr, "sc4n: the scan was cancelled before every artifact was visited, so the requested scope was not fully scanned")
+		return exitUnreadable
+	}
 	v := policy.Decide(rep.Findings, sev, res.Unreadable)
 	if v.Code == policy.CodeFindings || v.Code == policy.CodeUnreadable {
 		fmt.Fprintf(stderr, "sc4n: %s\n", v.Reason)

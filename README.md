@@ -105,11 +105,14 @@ sha256 (and sha1) when a real provenance digest is what you need.
 | 0 | clean: no finding at or above `-fail-on` |
 | 1 | findings at or above `-fail-on` (default `high`) |
 | 2 | usage error |
-| 3 | a path you named could not be opened — the requested scope was not fully scanned |
+| 3 | a path you named could not be opened, or the scan was cancelled by `-timeout` — the requested scope was not fully scanned |
 
 Exit 3 is deliberately distinct from 1: findings are about the artifact, while 3
 is about the scan, and a CI job that treats them the same cannot tell "your model
-is malicious" from "the mount is missing".
+is malicious" from "the mount is missing". A cancelled run also carries
+`summary.cancelled` in the JSON report and `sc4n:cancelled` in the CycloneDX BOM,
+because a consumer that reads only the report must not see a partial scan as a
+clean one.
 
 ## CI usage
 
