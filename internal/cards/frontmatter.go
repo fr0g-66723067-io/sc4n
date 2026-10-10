@@ -15,6 +15,13 @@ type frontmatter struct {
 // It reports ok=false when the block is present but does not match the subset,
 // which is the signal for SC4N-CARD-PARSE. Text that has no frontmatter block at
 // all returns (nil, true): there was nothing to parse, which is not an error.
+//
+// A nested mapping (an indented line that is not a `- ` list item) is skipped
+// rather than treated as a parse failure: it is valid YAML that this subset does
+// not model, and the standard `model-index:` block of an evaluated model card is
+// exactly that shape. List items inside such a block are still appended to the
+// enclosing key's list, which is harmless because no rule reads those values as a
+// list of instructions.
 func parseFrontmatter(text string) (*frontmatter, bool) {
 	if !strings.HasPrefix(text, "---") {
 		return nil, true
@@ -47,9 +54,13 @@ func parseFrontmatter(text string) (*frontmatter, bool) {
 			continue
 		}
 		if line != t {
-			// Indented and not a list item: a nested mapping, which the subset
-			// does not model.
-			return nil, false
+			// Indented and not a list item: the value of the current key is a
+			// nested mapping, which this subset does not model. The line is skipped
+			// rather than fatal: every model card with evaluation results carries a
+			// `model-index:` block of that shape, and calling a valid card
+			// unparseable costs the structured scan for nothing (68 cards of the
+			// 273-model HF campaign).
+			continue
 		}
 		colon := strings.IndexByte(t, ':')
 		if colon <= 0 {

@@ -69,6 +69,19 @@
       ],
       "notes": "A model card with a valid apache-2.0 frontmatter block, an explicit \"ignore previous instructions\" line, a hidden HTML-comment directive and a zero-width run. Reproduces the OWASP LLM01 card-injection channel plus the Trojan-Source invisible-character channel (CWE-1007)."
     },
+    "card_nested_frontmatter/README.md": {
+      "expect": null,
+      "forbid": [
+        "SC4N-CARD-PARSE"
+      ],
+      "notes": "A card whose frontmatter carries the standard model-index block: a list of mappings with an indented results:/metrics: subtree. Valid YAML the subset does not model, and any indented non-list line used to fail the whole block — 68 cards of the campaign were reported unparseable and scanned as raw text."
+    },
+    "card_unclosed_frontmatter/README.md": {
+      "expect": [
+        "SC4N-CARD-PARSE"
+      ],
+      "notes": "The boundary: a block that is never closed is still a parse failure, so the structured view is reported as missing rather than silently absent."
+    },
     "card_zwsp/README.md": {
       "expect": [
         "SC4N-CARD-INVISIBLE"

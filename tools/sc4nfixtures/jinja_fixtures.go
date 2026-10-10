@@ -54,6 +54,18 @@ func init() {
 					Notes: "A right-to-left override around reversed text: the character rewrites the " +
 						"reading order, which is never accidental (Trojan Source).",
 				},
+				"card_nested_frontmatter/README.md": {
+					Forbid: []string{"SC4N-CARD-PARSE"},
+					Notes: "A card whose frontmatter carries the standard model-index block: a list of " +
+						"mappings with an indented results:/metrics: subtree. Valid YAML the subset does " +
+						"not model, and any indented non-list line used to fail the whole block — 68 " +
+						"cards of the campaign were reported unparseable and scanned as raw text.",
+				},
+				"card_unclosed_frontmatter/README.md": {
+					Expect: []string{"SC4N-CARD-PARSE"},
+					Notes: "The boundary: a block that is never closed is still a parse failure, so the " +
+						"structured view is reported as missing rather than silently absent.",
+				},
 				"obfuscation_url/README.md": {
 					Forbid: []string{"SC4N-STRING-OBFUSCATION"},
 					Notes: "A card whose prose carries a repository path fragment and whose usage snippet " +
@@ -185,6 +197,31 @@ func jinjaFixtures(f *fixtureSet) {
 	// override rewrites the reading order.
 	f.addText("card_zwsp/README.md", "# Card\n\nFields: text\u200b, label.\n")
 	f.addText("card_bidi/README.md", "# Card\n\nDescription: \u202eemit elpmis\u202c\n")
+
+	// --- nested frontmatter is valid YAML, not a parse failure --------------------
+	// The standard model-index block of an evaluated card is a list of mappings
+	// with an indented results:/metrics: subtree, and any indented non-list line
+	// used to fail the whole block: 68 cards of the campaign were reported
+	// SC4N-CARD-PARSE and scanned as raw text instead of as structured metadata.
+	f.addText("card_nested_frontmatter/README.md",
+		"---\n"+
+			"license: apache-2.0\n"+
+			"model-index:\n"+
+			"- name: tiny\n"+
+			"  results:\n"+
+			"  - task:\n"+
+			"      type: text-classification\n"+
+			"    metrics:\n"+
+			"    - name: Accuracy\n"+
+			"      value: 0.9\n"+
+			"---\n"+
+			"# Tiny Model\n\n"+
+			"An ordinary card with an eval-results block.\n")
+	f.addText("card_unclosed_frontmatter/README.md",
+		"---\n"+
+			"license: mit\n"+
+			"# the block is never closed\n"+
+			"This line is still inside it.\n")
 
 	// --- the obfuscation rule needs a real literal, next to a real decoder -------
 	// A card's URL fragment and its usage snippet are not an obfuscation chain:

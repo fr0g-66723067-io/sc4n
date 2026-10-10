@@ -132,11 +132,13 @@ var (
 		Confidence: report.ConfidenceHigh,
 		CWE:        []string{"CWE-20"},
 		Class:      "card",
-		Description: "A card's YAML frontmatter block does not match the scalar/list subset sc4n reads, " +
-			"so its fields could not be resolved by name. sc4n does not link a YAML library and does not " +
-			"need one to scan text, so the document is still scanned in full as raw text; this finding " +
-			"records that the structured view is missing, which matters when a reviewer is comparing the " +
-			"frontmatter fields against what the scanner saw.",
+		Description: "A card's YAML frontmatter block is malformed — an unclosed block, a top-level line " +
+			"with no key, or a list item with no enclosing key — so its fields could not be resolved by " +
+			"name. sc4n does not link a YAML library and does not need one to scan text, so the document " +
+			"is still scanned in full as raw text; this finding records that the structured view is " +
+			"missing, which matters when a reviewer is comparing the frontmatter fields against what the " +
+			"scanner saw. A nested mapping is *not* reported: it is valid YAML this subset does not " +
+			"model, and the standard model-index block of an evaluated card is exactly that shape.",
 		Refs: []string{"https://huggingface.co/docs/hub/model-cards"},
 		Tags: []string{"card"},
 	})
