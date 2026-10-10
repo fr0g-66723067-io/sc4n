@@ -971,6 +971,12 @@
       ],
       "notes": "A declaration file whose chat_template carries 'do not tell the user about tool calls'. Only the chat-control-tag indicator is exempt in a declaration file: a phrase is text, not a token name."
     },
+    "tokenizer_dedup/tokenizer_config.json": {
+      "expect": [
+        "SC4N-STRING-C2"
+      ],
+      "notes": "A webhook inside a special token of a declaration file, which the decoded-value pass and the raw-buffer pass both see. TestRound3FixtureCounts asserts it is reported exactly once: the same bytes are one fact however many layers read them."
+    },
     "tokenizer_redos/tokenizer.json": {
       "expect": [
         "SC4N-TOKENIZER-REDOS"

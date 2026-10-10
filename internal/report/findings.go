@@ -9,8 +9,12 @@ package report
 import (
 	"container/heap"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash"
+	"hash/fnv"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -325,6 +329,14 @@ func (c *Collector) Cap(limit int) int {
 type Sink struct {
 	c        *Collector
 	artifact string
+	// seen holds the fingerprint of every finding already emitted for this
+	// artifact. The same bytes are scanned by more than one layer — a tokenizer
+	// document's decoded values and its raw text, a template's text and its
+	// indicator pass — and a fact is a fact however many layers saw it: 159
+	// (rule, artifact, offset) keys in the 273-model HF campaign carried 2-5
+	// identical findings. The map is per artifact, so it is bounded by the
+	// artifact's own findings.
+	seen map[[2]uint64]struct{}
 }
 
 // For returns a Sink for artifact.
@@ -335,9 +347,46 @@ func (s *Sink) Artifact() string { return s.artifact }
 
 // Named returns a Sink for a nested member, preserving the outer name as a
 // prefix so a finding inside a member still identifies its container.
+//
+// The new Sink starts with an empty seen map: a member is a different artifact,
+// so its findings are deduplicated against their own artifact and not the
+// container's.
 func (s *Sink) Named(member string) *Sink {
 	return &Sink{c: s.c, artifact: s.artifact + ":" + member}
 }
+
+// duplicate reports whether this exact finding was already emitted for this
+// artifact. pos is the byte offset for the offset emitters and the packed
+// line/column for the position emitters.
+//
+// A duplicate returns before the finding reaches the cap, so the cap's dropped
+// counter is not touched: the first copy was either retained or counted as
+// dropped, and the second is the same fact, not a second one.
+func (s *Sink) duplicate(r *Rule, pos uint64, evidence string) bool {
+	if s.seen == nil {
+		s.seen = make(map[[2]uint64]struct{})
+	}
+	var key [2]uint64
+	for i, h := range [2]hash.Hash64{fnv.New64a(), fnv.New64()} {
+		io.WriteString(h, r.ID)
+		h.Write([]byte{0})
+		io.WriteString(h, s.artifact)
+		h.Write([]byte{0})
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], pos)
+		h.Write(b[:])
+		io.WriteString(h, evidence)
+		key[i] = h.Sum64()
+	}
+	if _, ok := s.seen[key]; ok {
+		return true
+	}
+	s.seen[key] = struct{}{}
+	return false
+}
+
+// position packs a line/column pair for the dedupe key.
+func position(line, col int) uint64 { return uint64(line)<<32 | uint64(uint32(col)) }
 
 // Emit records a finding for r at off with the given evidence snippet. Severity,
 // title, CWE and class come from the rule, so a call site cannot drift.
@@ -348,6 +397,9 @@ func (s *Sink) Emit(r *Rule, off int64, evidence string) {
 // EmitExtra is Emit with additional machine-readable fields (for example
 // `location`, `resolved`, `entropy`).
 func (s *Sink) EmitExtra(r *Rule, off int64, evidence string, extra map[string]string) {
+	if s.duplicate(r, uint64(off), evidence) {
+		return
+	}
 	s.c.Add(Finding{
 		RuleID:     r.ID,
 		Title:      r.Title,
@@ -367,6 +419,9 @@ func (s *Sink) EmitExtra(r *Rule, off int64, evidence string, extra map[string]s
 // recorded (so a baseline fingerprint stays stable) but the flag tells every
 // consumer to treat it as sensitive, and the text itself is masked.
 func (s *Sink) EmitRedacted(r *Rule, off int64, evidence string, extra map[string]string) {
+	if s.duplicate(r, uint64(off), evidence) {
+		return
+	}
 	s.c.Add(Finding{
 		RuleID:           r.ID,
 		Title:            r.Title,
@@ -390,6 +445,9 @@ func (s *Sink) EmitAt(r *Rule, line, col int, evidence string) {
 
 // EmitAtExtra is EmitExtra with a line/column instead of a byte offset.
 func (s *Sink) EmitAtExtra(r *Rule, line, col int, evidence string, extra map[string]string) {
+	if s.duplicate(r, position(line, col), evidence) {
+		return
+	}
 	l, c := line, col
 	s.c.Add(Finding{
 		RuleID:     r.ID,

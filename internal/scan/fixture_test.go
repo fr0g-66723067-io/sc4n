@@ -179,6 +179,19 @@ func TestRound3FixtureCounts(t *testing.T) {
 		}
 	})
 
+	t.Run("a tokenizer document's finding is emitted once", func(t *testing.T) {
+		fs := scanPaths(t, filepath.Join(fixtureRoot, "tokenizer_dedup", "tokenizer_config.json"))
+		var c2 int
+		for _, f := range fs {
+			if f.RuleID == "SC4N-STRING-C2" {
+				c2++
+			}
+		}
+		if c2 != 1 {
+			t.Fatalf("the webhook in the special token produced %d SC4N-STRING-C2 finding(s), want 1: %v", c2, fs)
+		}
+	})
+
 	t.Run("msgpack NaN offset is the blob's offset", func(t *testing.T) {
 		fs := scanPaths(t, filepath.Join(fixtureRoot, "round3", "msgpack_nan.msgpack"))
 		var found bool
