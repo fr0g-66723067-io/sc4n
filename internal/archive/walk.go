@@ -306,10 +306,13 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 			checkNativeShebang(ctx, m.Name, sourcePrefix(src))
 			// The section is handed over through crcSource: the parser may read
 			// only the header, so the container's one integrity check is performed
-			// when the parser is done rather than not at all.
-			artifact.ScanMember(ctx, m.Name, &crcSource{Source: src, sink: ctx.Sink, name: m.Name, want: m.CRC32})
+			// when the parser is done rather than not at all. ScanMember does not
+			// close the source it is given, so the wrapper is closed here — the
+			// Close *is* the check.
+			cs := &crcSource{Source: src, sink: ctx.Sink, name: m.Name, want: m.CRC32}
+			artifact.ScanMember(ctx, m.Name, cs)
 			n := src.Size()
-			_ = src.Close()
+			_ = cs.Close()
 			cumulative += n
 			if exceededDecompressed(ctx, cumulative) {
 				return
@@ -393,6 +396,7 @@ func processReader(ctx *artifact.Ctx, name string, declared int64, r io.Reader, 
 		src, err := source.Spill(name, io.MultiReader(bytes.NewReader(probe), r), capBytes)
 		if err != nil {
 			emitSpillError(ctx, name, declared, capBytes, err)
+			scanPrefix(ctx, name, probe)
 			return n
 		}
 		artifact.ScanMember(ctx, name, src)
@@ -411,8 +415,24 @@ func processReader(ctx *artifact.Ctx, name string, declared int64, r io.Reader, 
 		artifact.ScanMemberBytes(ctx, name, probe)
 	default:
 		emitOpenError(ctx, name, rerr)
+		scanPrefix(ctx, name, probe)
 	}
 	return n
+}
+
+// minScanBytes is the shortest prefix worth dispatching. Below it the content
+// rules see a fragment of a header and report noise.
+const minScanBytes = 16
+
+// scanPrefix dispatches the bytes already read from a member whose read ended in
+// a cap or a spill failure. Discarding them would lose every finding in the part
+// of the member that was read, and the first bytes are exactly where an attacker
+// puts the payload: the sibling CRC branch has always scanned them for that
+// reason.
+func scanPrefix(ctx *artifact.Ctx, name string, probe []byte) {
+	if len(probe) >= minScanBytes {
+		artifact.ScanMemberBytes(ctx, name, probe)
+	}
 }
 
 // crcSource validates a stored member's CRC-32 when the parser is finished with
@@ -438,15 +458,17 @@ var crcBufPool = sync.Pool{New: func() any { b := make([]byte, 1<<20); return &b
 func (c *crcSource) Close() error {
 	if !c.done {
 		c.done = true
-		if c.want != 0 {
-			sum := crc32.NewIEEE()
-			bufp := crcBufPool.Get().(*[]byte)
-			_, err := io.CopyBuffer(sum, c.Source.Reader(0), *bufp)
-			crcBufPool.Put(bufp)
-			if err == nil && sum.Sum32() != c.want {
-				c.sink.EmitExtra(ruleArchiveCRC, 0, "crc32 mismatch in member "+snippet(c.name),
-					map[string]string{"member": c.name})
-			}
+		// Every stored member is verified, including one whose declared CRC is 0:
+		// crc32 of the empty string is 0, so the guard that used to skip that case
+		// disabled the check for a legitimately empty member rather than avoiding
+		// a false positive.
+		sum := crc32.NewIEEE()
+		bufp := crcBufPool.Get().(*[]byte)
+		_, err := io.CopyBuffer(sum, c.Source.Reader(0), *bufp)
+		crcBufPool.Put(bufp)
+		if err == nil && sum.Sum32() != c.want {
+			c.sink.EmitExtra(ruleArchiveCRC, 0, "crc32 mismatch in member "+snippet(c.name),
+				map[string]string{"member": c.name})
 		}
 	}
 	return c.Source.Close()

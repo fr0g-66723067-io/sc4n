@@ -140,9 +140,23 @@ func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, bool, error
 	}
 	truncated := false
 	count := entriesTotal
+	if count < 0 {
+		// A negative count can only come from a crafted zip64 field; the range
+		// check in readZip64 rejects it, but the allocation below must never be
+		// handed a negative capacity even if a future caller changes that.
+		count = 0
+	}
 	if count > int64(max) {
 		count = int64(max)
 		truncated = true
+	}
+	// Every central-directory record occupies at least 46 bytes, so a count that
+	// cannot fit between cdStart and EOF describes a malformed directory. The
+	// loop below would fail on the first record that does not fit anyway; doing
+	// the arithmetic once keeps the loop (and the allocation) bounded by the file
+	// size rather than by a declared count.
+	if count > 0 && cdStart+46*count > s.Size() {
+		return nil, false, errors.New("archive: central directory truncated")
 	}
 
 	entries := make([]zipEntry, 0, min64int(count, 4096))
@@ -216,6 +230,14 @@ func readZip64(s source.Source, eocdPos int64) (z64Pos, cdSize, cdOff, entries i
 	entries = int64(le64(rec[32:]))
 	cdSize = int64(le64(rec[40:]))
 	cdOff = int64(le64(rec[48:]))
+	// The three fields are unsigned 64-bit in the spec but must describe a real
+	// directory inside this file. A negative (i.e. >= 2^63) or absurdly large
+	// value is a crafted record, and letting it through reaches the allocation
+	// in readZipDirectory with a nonsensical count.
+	const maxZip64 = int64(1) << 40
+	if entries < 0 || entries > maxZip64 || cdSize < 0 || cdSize > maxZip64 || cdOff < 0 || cdOff > maxZip64 {
+		return 0, 0, 0, 0, errors.New("archive: implausible zip64 end-of-central-directory")
+	}
 	return z64Pos, cdSize, cdOff, entries, nil
 }
 
@@ -342,6 +364,18 @@ type limitReader struct {
 
 func (l *limitReader) Read(p []byte) (int, error) {
 	if l.remaining <= 0 {
+		// The cap is spent. Whether that is an overrun depends on whether the
+		// member still has content: a member whose length is exactly the cap ends
+		// in io.EOF and must be scanned and CRC-checked, not reported as
+		// over-cap. Probing costs one byte, and that byte is only consumed on the
+		// path that is about to report an overrun anyway.
+		more, err := l.peekMore()
+		if err != nil {
+			return 0, err
+		}
+		if !more {
+			return 0, io.EOF
+		}
 		return 0, &LimitError{Rule: l.rule, Limit: l.limit, Value: l.read + 1, Cap: l.cap, Detail: l.detail}
 	}
 	if int64(len(p)) > l.remaining {
@@ -351,6 +385,26 @@ func (l *limitReader) Read(p []byte) (int, error) {
 	l.remaining -= int64(n)
 	l.read += int64(n)
 	return n, err
+}
+
+// peekMore reports whether the underlying reader has at least one more byte. A
+// reader that keeps returning (0, nil) cannot be told apart from an exhausted
+// one, so the probe gives up after a bounded number of attempts rather than
+// spinning.
+func (l *limitReader) peekMore() (bool, error) {
+	var scratch [1]byte
+	for range 8 {
+		n, err := l.r.Read(scratch[:])
+		switch {
+		case n > 0:
+			return true, nil
+		case err == io.EOF:
+			return false, nil
+		case err != nil:
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // crcReader validates a member's CRC-32 at end of stream.
@@ -395,6 +449,9 @@ func (m *memberReader) Close() error {
 }
 
 func min64int(a int64, b int) int {
+	if a < 0 {
+		return 0
+	}
 	if a < int64(b) {
 		return int(a)
 	}

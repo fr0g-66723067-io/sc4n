@@ -36,6 +36,11 @@ func polyglotFixtures(f *fixtureSet) {
 	// produce nothing, which is how the "a random .bin is not a finding"
 	// property is enforced.
 	f.add("benign/random.bin", deterministicNoise(2048))
+
+	// Benign: a zero-byte file. Real repositories are full of them (llama.cpp's
+	// models/ tree has an empty .gitmodules), and an empty artifact used to panic
+	// the scanner's digester because io.CopyBuffer rejects a zero-length buffer.
+	f.add("benign/empty.bin", nil)
 }
 
 // tinyELF builds the smallest ELF64 header plus one program header that Go's
@@ -156,6 +161,11 @@ func init() {
 					Notes: "fixed-seed pseudo-random bytes with no magic at any anchor: the universal " +
 						"layer must stay silent on it, so no magic scan may be driven by a byte pattern " +
 						"that ordinary data satisfies.",
+				},
+				"benign/empty.bin": {
+					Forbid: []string{"SC4N-INTERNAL-PANIC"},
+					Notes: "a zero-byte file. It must be scanned, hashed and reported as an ordinary " +
+						"clean artifact; the digester must not hand io.CopyBuffer a zero-length buffer.",
 				},
 			}
 		},

@@ -88,6 +88,14 @@ fuzz:
 	$(GO) test ./internal/coreml     -run '^$$' -fuzz FuzzCoreMLWalk     -fuzztime $(FUZZTIME)
 	$(GO) test ./internal/pte        -run '^$$' -fuzz FuzzPTEHeader      -fuzztime $(FUZZTIME)
 	$(GO) test ./internal/content    -run '^$$' -fuzz FuzzContentParse   -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/archive    -run '^$$' -fuzz FuzzArchive        -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/stringscan -run '^$$' -fuzz FuzzScanIndicators -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/pysrc      -run '^$$' -fuzz FuzzPythonLex      -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/jinja      -run '^$$' -fuzz FuzzJinjaAnalyze   -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/tokenizer  -run '^$$' -fuzz FuzzTokenizerJSON  -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/cards      -run '^$$' -fuzz FuzzCardText       -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/polyglot   -run '^$$' -fuzz FuzzPolyglot       -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/repo       -run '^$$' -fuzz FuzzRepoFile       -fuzztime $(FUZZTIME)
 
 # Optional differential check against fickling/picklescan/modelscan. Skipped
 # loudly when the tools are absent (they are absent on the reference host).

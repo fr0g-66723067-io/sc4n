@@ -408,9 +408,16 @@ func digestSource(s source.Source, max int64) (string, string) {
 		max = size
 	}
 	h := sha256.New()
+	if max == 0 {
+		// An empty artifact. io.CopyBuffer panics on a zero-length buffer, and
+		// there are no bytes to copy in any case.
+		return hex.EncodeToString(h.Sum(nil)), "full"
+	}
 	bufp := digestBufPool.Get().(*[]byte)
 	defer digestBufPool.Put(bufp)
-	buf := (*bufp)[:min(len(*bufp), int(max))]
+	// The clamp keeps the buffer non-empty even if a future caller passes a
+	// zero cap with a non-zero size.
+	buf := (*bufp)[:min(int64(len(*bufp)), max)]
 	if _, err := io.CopyBuffer(h, io.LimitReader(s.Reader(0), max), buf); err != nil {
 		return "", ""
 	}

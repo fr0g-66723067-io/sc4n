@@ -45,13 +45,19 @@ func (h *mmapHandle) release() error {
 // why the contract is stated on the Source interface.
 func mmapSource(name string, f *os.File, size int64) (Source, error) {
 	if size <= 0 {
+		_ = f.Close()
 		return nil, errors.New("source: refusing to map empty range")
 	}
 	if int64(int(size)) != size {
+		_ = f.Close()
 		return nil, errors.New("source: file too large to map on this platform")
 	}
 	b, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
+		// The caller keeps ownership when this returns an error, but every
+		// current caller closes on error too; closing here as well makes the
+		// function safe for a caller that does not.
+		_ = f.Close()
 		return nil, err
 	}
 	if int64(len(b)) < size {

@@ -853,6 +853,13 @@
       ],
       "notes": "The local header calls the member evil.txt and the central directory calls it good.txt, so a scanner reading one name and a loader using the other disagree about what the member is."
     },
+    "zip_ratio_cap_prefix.zip": {
+      "expect": [
+        "SC4N-LIMIT-RATIO",
+        "SC4N-PICKLE-GLOBAL-CRITICAL"
+      ],
+      "notes": "A REDUCE-bearing pickle followed by 4 MiB of zeros inside one deflate member. The ratio cap fires mid-member, so the prefix that was already read has to be dispatched anyway: a cap must bound the work, never hide the payload that comes first."
+    },
     "zip_slip.zip": {
       "expect": [
         "SC4N-ARCHIVE-PATH",
@@ -873,6 +880,13 @@
         "SC4N-CODE-TAINT-EXEC"
       ],
       "notes": "a plain print cell must produce no findings"
+    },
+    "benign/empty.bin": {
+      "expect": null,
+      "forbid": [
+        "SC4N-INTERNAL-PANIC"
+      ],
+      "notes": "a zero-byte file. It must be scanned, hashed and reported as an ordinary clean artifact; the digester must not hand io.CopyBuffer a zero-length buffer."
     },
     "benign/flax_model.msgpack": {
       "expect": null,

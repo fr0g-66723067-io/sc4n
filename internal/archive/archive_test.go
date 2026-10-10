@@ -87,7 +87,7 @@ type zspec struct {
 	crcFixed  bool
 }
 
-func buildZip(t *testing.T, specs []zspec, zip64 bool) []byte {
+func buildZip(t testing.TB, specs []zspec, zip64 bool) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	type cd struct {
@@ -183,7 +183,7 @@ func writeCentral(buf *bytes.Buffer, name string, method uint16, crc, comp, unco
 	buf.WriteString(name)
 }
 
-func deflate(t *testing.T, b []byte) []byte {
+func deflate(t testing.TB, b []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	w, err := flate.NewWriter(&buf, flate.BestCompression)
@@ -209,6 +209,86 @@ func gadgetPickle() []byte {
 		0x8c, 0x02, 'i', 'd',
 		0x85, 0x52, 0x2e,
 	}
+}
+
+// TestZip64NegativeEntryCountIsRejected: a zip64 end-of-central-directory whose
+// total-entries field has the high bit set is negative as an int64. It used to
+// reach make([]zipEntry, 0, min64int(count, 4096)) as a negative capacity and
+// panic; it must be a parse error instead.
+func TestZip64NegativeEntryCountIsRejected(t *testing.T) {
+	data := buildZip(t, []zspec{
+		{name: "a.bin", data: []byte("a")},
+		{name: "b.bin", data: []byte("b")},
+	}, true)
+	patched := patchZip64Entries(t, data, 1<<63)
+	if _, err := archive.Collect(source.Mem("neg64.zip", patched), limits.Default()); err == nil {
+		t.Fatal("Collect accepted a zip64 directory with a negative entry count")
+	}
+	if _, err := archive.ZipNames(source.Mem("neg64.zip", patched), limits.Default(), 0); err == nil {
+		t.Fatal("ZipNames accepted a zip64 directory with a negative entry count")
+	}
+}
+
+// TestImpossibleEntryCountIsRejected: a plain EOCD claiming 0xffff entries in a
+// file that cannot hold them is a malformed directory, not 65 535 reads.
+func TestImpossibleEntryCountIsRejected(t *testing.T) {
+	data := buildZip(t, []zspec{{name: "a.bin", data: []byte("a")}}, false)
+	patched := patchEOCDEntries(t, data, 0xffff)
+	if _, err := archive.Collect(source.Mem("liar.zip", patched), limits.Default()); err == nil {
+		t.Fatal("Collect accepted an EOCD claiming 65535 entries in a tiny file")
+	}
+}
+
+// patchZip64Entries rewrites the zip64 EOCD's total-entries field.
+func patchZip64Entries(t testing.TB, data []byte, entries uint64) []byte {
+	t.Helper()
+	off := bytes.Index(data, []byte{0x50, 0x4b, 0x06, 0x06})
+	if off < 0 || off+40 > len(data) {
+		t.Fatal("no zip64 end-of-central-directory in the fixture")
+	}
+	out := bytes.Clone(data)
+	binary.LittleEndian.PutUint64(out[off+32:], entries)
+	return out
+}
+
+// patchEOCDEntries rewrites the plain EOCD's entry count (both copies).
+func patchEOCDEntries(t testing.TB, data []byte, entries uint16) []byte {
+	t.Helper()
+	off := bytes.LastIndex(data, []byte{0x50, 0x4b, 0x05, 0x06})
+	if off < 0 || off+22 > len(data) {
+		t.Fatal("no end-of-central-directory in the fixture")
+	}
+	out := bytes.Clone(data)
+	binary.LittleEndian.PutUint16(out[off+8:], entries)
+	binary.LittleEndian.PutUint16(out[off+10:], entries)
+	return out
+}
+
+// TestMemberExactlyAtTheCapIsScanned is the F3 regression: a member whose length
+// is exactly the decompression cap used to be reported as over-cap (the cap
+// check ran before the read that would have returned io.EOF), so the member was
+// never dispatched and its findings were lost.
+func TestMemberExactlyAtTheCapIsScanned(t *testing.T) {
+	body := gadgetPickle()
+	data := buildZip(t, []zspec{{name: "archive/data.pkl", data: body}}, false)
+	l := limits.Default()
+	l.MaxRatio = 1 // the ratio cap is now exactly the member's length
+	got := scanZip(t, "exact.zip", data, l)
+	want(t, got, "SC4N-PICKLE-GLOBAL-CRITICAL")
+	forbid(t, got, "SC4N-LIMIT-RATIO")
+}
+
+// TestStoredLargeMemberCRCIsChecked is the F18b regression: the crcSource wrapper
+// handed to ScanMember was never closed, so the only integrity check performed
+// for a stored member too large to buffer never ran.
+func TestStoredLargeMemberCRCIsChecked(t *testing.T) {
+	body := append([]byte("#!/bin/sh\n"), make([]byte, 4096)...)
+	data := buildZip(t, []zspec{{name: "run.sh", data: body, crc: 0xdeadbeef, crcFixed: true}}, false)
+	l := limits.Default()
+	l.MaxStringBlob = 1024 // force the Section path
+	got := scanZip(t, "badcrc.zip", data, l)
+	want(t, got, "SC4N-ARCHIVE-SHEBANG")
+	want(t, got, "SC4N-ARCHIVE-CRC")
 }
 
 func TestZipBombRatio(t *testing.T) {
@@ -421,6 +501,22 @@ func TestUnwrapRatioCap(t *testing.T) {
 	}
 }
 
+// TestUnwrapZeroBudgetIsNotUnlimited: a zero-valued Limits means "unset", not
+// "unlimited". Mapping MaxDecompressedBytes to MaxInt64 made the +1 peek wrap to
+// MinInt64, io.LimitReader then reported EOF at once, and the payload came back
+// empty with a nil error — a silent truncation, which is the one outcome the
+// limits design forbids.
+func TestUnwrapZeroBudgetIsNotUnlimited(t *testing.T) {
+	payload := gadgetPickle()
+	got, err := archive.Unwrap(source.Mem("x.gz", gzipBytes(t, payload)), limits.Limits{}, archive.CompressorGzip)
+	if err != nil {
+		t.Fatalf("Unwrap: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("Unwrap returned %d bytes (%q), want the %d-byte payload", len(got), got, len(payload))
+	}
+}
+
 func TestUnwrapRejectsUnsupported(t *testing.T) {
 	_, err := archive.Unwrap(source.Mem("x", []byte{0x28, 0xb5, 0x2f, 0xfd}), limits.Default(), archive.CompressorZstd)
 	if !errors.Is(err, archive.ErrUnsupportedCompression) {
@@ -465,7 +561,7 @@ func tarBytes(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func zlibBytes(t *testing.T, b []byte) []byte {
+func zlibBytes(t testing.TB, b []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	w := zlib.NewWriter(&buf)
@@ -478,7 +574,7 @@ func zlibBytes(t *testing.T, b []byte) []byte {
 	return buf.Bytes()
 }
 
-func gzipBytes(t *testing.T, b []byte) []byte {
+func gzipBytes(t testing.TB, b []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	w := gzip.NewWriter(&buf)

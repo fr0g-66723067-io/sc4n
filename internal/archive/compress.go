@@ -202,7 +202,11 @@ func decompressionCap(compressed int64, l limits.Limits) (int64, *report.Rule) {
 	capBytes := l.MaxDecompressedBytes
 	rule := limits.RuleDecompressed
 	if capBytes <= 0 {
-		capBytes = math.MaxInt64
+		// A zero budget means "unset", exactly as maxBlob and spillCap read it.
+		// Mapping it to MaxInt64 is worse than useless here: the +1 peek in
+		// Unwrap wraps to MinInt64, io.LimitReader then reports EOF immediately,
+		// and an unset cap silently produced an empty payload with no error.
+		capBytes = limits.Default().MaxDecompressedBytes
 	}
 	if l.MaxRatio > 0 && compressed > 0 {
 		ratioCap := mulCap(compressed, l.MaxRatio)
@@ -276,7 +280,13 @@ func Unwrap(s source.Source, l limits.Limits, c Compressor) ([]byte, error) {
 	capBytes, rule := decompressionCap(s.Size(), l)
 	buf := getBuf()
 	defer putBuf(buf)
-	n, err := io.Copy(buf, io.LimitReader(r, capBytes+1))
+	// The extra byte is what distinguishes "exactly at the cap" from "over it";
+	// it must not be computed when the cap is already the largest int64.
+	peek := capBytes
+	if peek < math.MaxInt64 {
+		peek++
+	}
+	n, err := io.Copy(buf, io.LimitReader(r, peek))
 	if n > capBytes {
 		return nil, &LimitError{
 			Rule:   rule,

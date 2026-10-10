@@ -57,6 +57,37 @@ func TestRunWalksDirectoriesDeterministically(t *testing.T) {
 	}
 }
 
+func TestZeroByteArtifactIsScanned(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "empty.bin", nil)
+
+	res, err := Run(context.Background(), Config{Paths: []string{p}, Limits: limits.Default(), Jobs: 2})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Artifacts) != 1 {
+		t.Fatalf("scanned %d artifacts, want 1", len(res.Artifacts))
+	}
+	a := res.Artifacts[0]
+	if a.Error != "" {
+		t.Fatalf("empty artifact reported an error: %s", a.Error)
+	}
+	if a.Size != 0 {
+		t.Fatalf("size = %d, want 0", a.Size)
+	}
+	// The digest of the empty string, with a scope that says it covers everything.
+	const emptyDigest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if a.SHA256 != emptyDigest {
+		t.Fatalf("sha256 = %q, want the empty-string digest %q", a.SHA256, emptyDigest)
+	}
+	if a.SHA256Scope != "full" {
+		t.Fatalf("sha256Scope = %q, want full", a.SHA256Scope)
+	}
+	if got := res.Collector.Len(); got != 0 {
+		t.Fatalf("empty artifact produced %d finding(s)", got)
+	}
+}
+
 func TestRunIsWorkerCountIndependent(t *testing.T) {
 	dir := t.TempDir()
 	for i := range 40 {

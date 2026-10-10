@@ -38,6 +38,18 @@ func archiveFixtures(f *fixtureSet) {
 		method: 8,
 	}}))
 
+	// --- ratio cap firing mid-member: the bytes already read must still be scanned
+	// A deflate member whose payload is a REDUCE-bearing pickle followed by 4 MiB
+	// of zeros. The ratio cap fires after the pickle prefix has been read, and
+	// those bytes must still be dispatched: the first bytes of a member are where
+	// an attacker puts the payload, so discarding them loses exactly the finding
+	// the member was there to carry.
+	f.add("zip_ratio_cap_prefix.zip", arcZip([]arcZipSpec{{
+		name:   "archive/data.pkl",
+		data:   append(arcGadgetPickle(), make([]byte, 4<<20)...),
+		method: 8,
+	}}))
+
 	// --- zip_slip: traversal + symlink -------------------------------------------
 	// A ".." member and a symlink member whose target is an absolute path: the
 	// classic zip_slip pair (CWE-22 / CWE-59).
@@ -327,6 +339,13 @@ func archiveExpectations() (map[string]expectation, map[string]expectation) {
 			Expect: []string{"SC4N-LIMIT-RATIO"},
 			Notes: "4 MiB of zeros deflate-compressed to a few kilobytes: the ratio cap " +
 				"fires before the member is decompressed, so the scan is fast and bounded.",
+		},
+		"zip_ratio_cap_prefix.zip": {
+			Expect: []string{"SC4N-LIMIT-RATIO", "SC4N-PICKLE-GLOBAL-CRITICAL"},
+			Notes: "A REDUCE-bearing pickle followed by 4 MiB of zeros inside one deflate " +
+				"member. The ratio cap fires mid-member, so the prefix that was already read " +
+				"has to be dispatched anyway: a cap must bound the work, never hide the " +
+				"payload that comes first.",
 		},
 		"zip_slip.zip": {
 			Expect: []string{"SC4N-ARCHIVE-PATH", "SC4N-ARCHIVE-LINK"},
