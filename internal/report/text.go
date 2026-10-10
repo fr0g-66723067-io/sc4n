@@ -55,12 +55,21 @@ func (r *Report) WriteText(w io.Writer, o TextOptions) error {
 		if _, err := io.WriteString(w, "ARTIFACT\tFORMAT\tSIZE\tFINDINGS\n"); err != nil {
 			return err
 		}
+		// A finding inside a container is stamped "outer:member" (see Sink.Named),
+		// so an exact match would show a container row with no findings while its
+		// members carry them. Count both the row itself and anything nested in it.
 		counts := map[string]int{}
 		for _, f := range r.Findings {
 			counts[f.Artifact]++
 		}
 		for _, a := range r.Artifacts {
-			line := []string{a.Path, a.Format, humanBytes(a.Size), strconv.Itoa(counts[a.Path])}
+			n := counts[a.Path]
+			for k, v := range counts {
+				if len(k) > len(a.Path) && strings.HasPrefix(k, a.Path) && k[len(a.Path)] == ':' {
+					n += v
+				}
+			}
+			line := []string{a.Path, a.Format, humanBytes(a.Size), strconv.Itoa(n)}
 			if a.Error != "" {
 				line[1] = "unreadable"
 				line[3] = a.Error

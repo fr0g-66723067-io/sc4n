@@ -71,9 +71,15 @@ func DefaultDir() string {
 
 // Expand walks dir and returns one Entry per unique blob, sorted by Display. It is
 // deterministic. Structural problems (an escaping symlink, a missing blob, a
-// malformed ref) are reported through sink when sink is non-nil and are otherwise
+// malformed ref) are reported through c when c is non-nil and are otherwise
 // skipped.
-func Expand(dir string, sink *report.Sink) ([]Entry, error) {
+//
+// Findings are stamped with the cache-relative path they concern, the same string
+// the engine uses as the artifact name for a scanned entry, so a finding resolves
+// to a component in every encoder. Nothing here invents a "hf-cache:" prefix: it
+// was neither a path nor a member separator, and it made the CycloneDX
+// vulnerability's affects[].ref point at a component that no bom-ref declared.
+func Expand(dir string, c *report.Collector) ([]Entry, error) {
 	fi, err := os.Stat(dir)
 	if err != nil {
 		return nil, err
@@ -100,7 +106,7 @@ func Expand(dir string, sink *report.Sink) ([]Entry, error) {
 			continue
 		}
 		repoRel := repo.Name()
-		refs := readRefs(root, sink, repoRel)
+		refs := readRefs(root, c, repoRel)
 
 		snapDir := path.Join(repoRel, "snapshots")
 		err := filepath.WalkDir(filepath.Join(dir, filepath.FromSlash(snapDir)),
@@ -120,7 +126,7 @@ func Expand(dir string, sink *report.Sink) ([]Entry, error) {
 				}
 				relSlash := filepath.ToSlash(rel)
 
-				blobRel, display, ok := resolveEntry(root, sink, relSlash)
+				blobRel, display, ok := resolveEntry(root, c, relSlash)
 				if !ok {
 					return nil
 				}
@@ -151,34 +157,34 @@ func Expand(dir string, sink *report.Sink) ([]Entry, error) {
 // resolveEntry turns a snapshot-relative path into the blob it points at. It
 // returns the blob path relative to the cache root, the display name for findings,
 // and false when the entry must be skipped.
-func resolveEntry(root *os.Root, sink *report.Sink, relSlash string) (blobRel, display string, ok bool) {
+func resolveEntry(root *os.Root, c *report.Collector, relSlash string) (blobRel, display string, ok bool) {
 	display = relSlash
 	fi, err := root.Lstat(relSlash)
 	if err != nil {
-		emit(sink, RuleBlobMissing, display, "snapshot entry could not be stat'd: "+err.Error())
+		emit(c, RuleBlobMissing, display, "snapshot entry could not be stat'd: "+err.Error())
 		return "", "", false
 	}
 	target := relSlash
 	if fi.Mode()&os.ModeSymlink != 0 {
 		link, lerr := root.Readlink(relSlash)
 		if lerr != nil {
-			emit(sink, RuleSymlinkEscape, display, "snapshot symlink could not be read: "+lerr.Error())
+			emit(c, RuleSymlinkEscape, display, "snapshot symlink could not be read: "+lerr.Error())
 			return "", "", false
 		}
 		if path.IsAbs(link) || filepath.IsAbs(link) {
-			emit(sink, RuleSymlinkEscape, display, "snapshot symlink is absolute: "+link)
+			emit(c, RuleSymlinkEscape, display, "snapshot symlink is absolute: "+link)
 			return "", "", false
 		}
 		joined := path.Clean(path.Join(path.Dir(relSlash), filepath.ToSlash(link)))
 		if joined == ".." || strings.HasPrefix(joined, "../") {
-			emit(sink, RuleSymlinkEscape, display, "snapshot symlink escapes the cache root: "+link)
+			emit(c, RuleSymlinkEscape, display, "snapshot symlink escapes the cache root: "+link)
 			return "", "", false
 		}
 		target = joined
 	}
 	tfi, err := root.Stat(target)
 	if err != nil {
-		emit(sink, RuleBlobMissing, display, "resolved blob is missing: "+target)
+		emit(c, RuleBlobMissing, display, "resolved blob is missing: "+target)
 		return "", "", false
 	}
 	if tfi.IsDir() {
@@ -188,7 +194,7 @@ func resolveEntry(root *os.Root, sink *report.Sink, relSlash string) (blobRel, d
 }
 
 // readRefs reads refs/<name> files into a commit -> ref names map.
-func readRefs(root *os.Root, sink *report.Sink, repoRel string) map[string][]string {
+func readRefs(root *os.Root, c *report.Collector, repoRel string) map[string][]string {
 	out := map[string][]string{}
 	refRoot := path.Join(repoRel, "refs")
 	_ = filepath.WalkDir(filepath.Join(root.Name(), filepath.FromSlash(refRoot)),
@@ -208,7 +214,7 @@ func readRefs(root *os.Root, sink *report.Sink, repoRel string) map[string][]str
 			name := strings.TrimPrefix(relSlash, repoRel+"/refs/")
 			commit := strings.TrimSpace(string(b))
 			if !isCommit(commit) {
-				emit(sink, RuleRefMalformed, relSlash, "refs/"+name+" is not a 40-hex commit")
+				emit(c, RuleRefMalformed, relSlash, "refs/"+name+" is not a 40-hex commit")
 				return nil
 			}
 			out[commit] = append(out[commit], name)
@@ -245,9 +251,9 @@ func isCommit(s string) bool {
 	return true
 }
 
-func emit(sink *report.Sink, r *report.Rule, name, evidence string) {
-	if sink == nil {
+func emit(c *report.Collector, r *report.Rule, name, evidence string) {
+	if c == nil {
 		return
 	}
-	sink.Named(name).Emit(r, 0, evidence)
+	c.For(name).Emit(r, 0, evidence)
 }

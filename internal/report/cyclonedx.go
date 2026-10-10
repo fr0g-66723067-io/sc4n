@@ -94,8 +94,11 @@ type cdxAffect struct {
 
 // WriteCycloneDX emits a CycloneDX 1.6 ML-BOM.
 func (r *Report) WriteCycloneDX(w io.Writer) error {
-	if r.Tool.Version == "" {
-		r.Tool.Version = "dev"
+	// A local copy, never r.Tool.Version: writing one format must not change what
+	// a later WriteJSON on the same *Report emits.
+	version := r.Tool.Version
+	if version == "" {
+		version = "dev"
 	}
 	bom := cdxBOM{
 		BOMFormat:   "CycloneDX",
@@ -104,7 +107,7 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 		Metadata: cdxMetadata{Tools: []cdxTool{{
 			Vendor:  "fr0g",
 			Name:    r.Tool.Name,
-			Version: r.Tool.Version,
+			Version: version,
 		}}},
 		Components: make([]cdxComponent, 0, len(r.Artifacts)),
 	}
@@ -182,7 +185,7 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 		bom.Vulnerabilities = append(bom.Vulnerabilities, v)
 	}
 
-	bom.SerialNumber = serialNumber(r)
+	bom.SerialNumber = serialNumber(r, version)
 
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
@@ -193,11 +196,11 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 // serialNumber derives a deterministic RFC 4122 version-5-shaped URN from the
 // document's own content, so that a BOM identifies its content rather than its
 // run.
-func serialNumber(r *Report) string {
+func serialNumber(r *Report, version string) string {
 	h := sha256.New()
 	h.Write([]byte(r.SchemaVersion))
 	h.Write([]byte(r.Tool.Name))
-	h.Write([]byte(r.Tool.Version))
+	h.Write([]byte(version))
 	for _, a := range r.Artifacts {
 		h.Write([]byte(a.Path))
 		h.Write([]byte(a.SHA256))

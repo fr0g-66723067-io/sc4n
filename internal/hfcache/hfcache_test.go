@@ -94,7 +94,7 @@ func TestEscapingSymlinkIsReportedNotScanned(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := report.NewCollector(0)
-	if _, err := Expand(dir, c.For("cache")); err != nil {
+	if _, err := Expand(dir, c); err != nil {
 		t.Fatalf("expand: %v", err)
 	}
 	if !hasRule(c.Findings(), RuleSymlinkEscape.ID) {
@@ -123,7 +123,7 @@ func TestMissingBlobAndMalformedRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := report.NewCollector(0)
-	if _, err := Expand(dir, c.For("cache")); err != nil {
+	if _, err := Expand(dir, c); err != nil {
 		t.Fatalf("expand: %v", err)
 	}
 	if !hasRule(c.Findings(), RuleBlobMissing.ID) {

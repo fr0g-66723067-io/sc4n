@@ -3,6 +3,7 @@ package scan
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -306,5 +307,41 @@ func TestFindingsCapIsReportedAsAFinding(t *testing.T) {
 	}
 	if len(fs) != 2 {
 		t.Fatalf("kept %d finding(s), want the capped one plus the notice", len(fs))
+	}
+}
+
+// TestDuplicatePathsAreScannedOnce pins F29: the same path twice on the command
+// line produced two artifact rows and two CycloneDX components with the same
+// bom-ref, which the spec forbids.
+func TestDuplicatePathsAreScannedOnce(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "m.pkl")
+	write(t, dir, "m.pkl", []byte("\x80\x04N."))
+	res, err := Run(context.Background(), Config{Paths: []string{p, p, dir}, Limits: limits.Default(), Jobs: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Artifacts) != 1 {
+		t.Fatalf("artifacts = %d, want 1 (the path given three ways is one artifact): %+v", len(res.Artifacts), res.Artifacts)
+	}
+	rep := report.Build(report.Tool{Name: "sc4n", Version: "t"}, "", res.Artifacts, res.Collector, report.Limits{}, nil, 0)
+	var buf bytes.Buffer
+	if err := rep.WriteCycloneDX(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Components []struct {
+			BOMRef string `json:"bom-ref"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, c := range doc.Components {
+		if seen[c.BOMRef] {
+			t.Fatalf("duplicate bom-ref %q", c.BOMRef)
+		}
+		seen[c.BOMRef] = true
 	}
 }

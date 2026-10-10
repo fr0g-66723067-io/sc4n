@@ -80,7 +80,15 @@ type sarifHelp struct {
 }
 
 type sarifInvocation struct {
-	ExecutionSuccessful bool `json:"executionSuccessful"`
+	ExecutionSuccessful        bool                `json:"executionSuccessful"`
+	ToolExecutionNotifications []sarifNotification `json:"toolExecutionNotifications,omitempty"`
+}
+
+// sarifNotification is a run-level message that is not a finding: the scan
+// completed, but not over everything it was asked to cover.
+type sarifNotification struct {
+	Level   string    `json:"level"`
+	Message sarifText `json:"message"`
 }
 
 type sarifResult struct {
@@ -159,8 +167,11 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 				InformationURI: informationURI,
 				Rules:          descriptors,
 			}},
-			Invocations: []sarifInvocation{{ExecutionSuccessful: true}},
-			Results:     make([]sarifResult, 0, len(r.Findings)),
+			Invocations: []sarifInvocation{{
+				ExecutionSuccessful:        r.ExecutionSuccessful(),
+				ToolExecutionNotifications: r.executionNotifications(),
+			}},
+			Results: make([]sarifResult, 0, len(r.Findings)),
 			Properties: map[string]any{
 				"artifactsScanned": len(r.Artifacts),
 				"suppressed":       r.Suppressed,

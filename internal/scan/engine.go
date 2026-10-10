@@ -496,7 +496,7 @@ func expand(cfg Config) ([]Entry, error) {
 	if len(cfg.Entries) > 0 {
 		out := append([]Entry(nil), cfg.Entries...)
 		sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-		return out, nil
+		return dedupeEntries(out), nil
 	}
 	var out []Entry
 	var firstErr error
@@ -535,5 +535,27 @@ func expand(cfg Config) ([]Entry, error) {
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, firstErr
+	return dedupeEntries(out), firstErr
+}
+
+// dedupeEntries drops a repeated path, keeping the first entry. The same path can
+// arrive twice -- `sc4n scan a.bin a.bin`, or a directory and a file inside it --
+// and scanning it twice is wasted work that also produced two CycloneDX
+// components with the same bom-ref, which the spec forbids. The input is already
+// sorted, so the survivor is deterministic.
+func dedupeEntries(in []Entry) []Entry {
+	seen := make(map[string]bool, len(in))
+	out := in[:0]
+	for _, e := range in {
+		key := e.Path
+		if key == "" {
+			key = e.Display
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, e)
+	}
+	return out
 }

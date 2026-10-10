@@ -133,8 +133,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		// The expander runs before the walk and reports its own structural
 		// findings (an escaping symlink, a missing blob), so it needs the
 		// collector the report will be built from.
-		collector := report.NewCollector(f.maxFindings)
-		entries, err := hfcache.Expand(dir, collector.For("hf-cache"))
+		collector := report.NewCollector(l.MaxFindings)
+		entries, err := hfcache.Expand(dir, collector)
 		if err != nil {
 			fmt.Fprintf(stderr, "sc4n: -hf-cache: %v\n", err)
 			return exitUnreadable
@@ -174,6 +174,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		timings = res.Timings
 	}
 	rep := report.Build(report.Tool{Name: "sc4n", Version: version}, f.root, res.Artifacts, res.Collector, reportLimits(l), timings, suppressed)
+	rep.Unreadable = res.Unreadable
+	rep.Cancelled = res.Cancelled
 
 	w := stdout
 	var file *os.File

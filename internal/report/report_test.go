@@ -472,3 +472,165 @@ func TestCycloneDXDoesNotClaimAPrefixDigestAsAFileHash(t *testing.T) {
 		t.Fatalf("a full digest must still be a component hash: %+v", small.Hashes)
 	}
 }
+
+// TestPartialScanIsNotExecutionSuccessful pins F28. executionSuccessful was a
+// constant true, so a SARIF consumer recorded an unreadable path or a cancelled
+// walk as a clean, complete run.
+func TestPartialScanIsNotExecutionSuccessful(t *testing.T) {
+	readRun := func(t *testing.T, rep *Report) (bool, []string) {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := rep.WriteSARIF(&buf); err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Runs []struct {
+				Invocations []struct {
+					ExecutionSuccessful bool `json:"executionSuccessful"`
+					Notifications       []struct {
+						Level   string `json:"level"`
+						Message struct {
+							Text string `json:"text"`
+						} `json:"message"`
+					} `json:"toolExecutionNotifications"`
+				} `json:"invocations"`
+			} `json:"runs"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Runs) != 1 || len(doc.Runs[0].Invocations) != 1 {
+			t.Fatalf("no invocation in %s", buf.String())
+		}
+		inv := doc.Runs[0].Invocations[0]
+		var msgs []string
+		for _, n := range inv.Notifications {
+			msgs = append(msgs, n.Level+": "+n.Message.Text)
+		}
+		return inv.ExecutionSuccessful, msgs
+	}
+
+	complete := Build(Tool{Name: "sc4n", Version: "t"}, "", nil, NewCollector(0), Limits{}, nil, 0)
+	if ok, msgs := readRun(t, complete); !ok || len(msgs) != 0 {
+		t.Fatalf("a complete scan reported executionSuccessful=%v notifications=%v", ok, msgs)
+	}
+
+	partial := Build(Tool{Name: "sc4n", Version: "t"}, "", []ArtifactSummary{{Path: "gone.bin", Error: "no such file"}}, NewCollector(0), Limits{}, nil, 0)
+	partial.Unreadable = 1
+	ok, msgs := readRun(t, partial)
+	if ok {
+		t.Fatal("a scan with an unreadable path reported executionSuccessful=true")
+	}
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "1 path(s)") {
+		t.Fatalf("notifications = %v, want one naming the unreadable count", msgs)
+	}
+
+	cancelled := Build(Tool{Name: "sc4n", Version: "t"}, "", nil, NewCollector(0), Limits{}, nil, 0)
+	cancelled.Cancelled = true
+	if ok, msgs := readRun(t, cancelled); ok || len(msgs) != 1 {
+		t.Fatalf("a cancelled scan reported executionSuccessful=%v notifications=%v", ok, msgs)
+	}
+}
+
+// TestEveryFindingArtifactIsDeclared pins F27's invariant from the encoder side: a
+// producer can report on a path it did not scan (the hf-cache expander reports a
+// missing blob or a malformed ref), and CycloneDX requires every affects[].ref to
+// name a declared bom-ref.
+func TestEveryFindingArtifactIsDeclared(t *testing.T) {
+	c := NewCollector(0)
+	c.For("models--org--repo/snapshots/aaa/gone").Emit(testRuleInfo, 0, "resolved blob is missing")
+	c.For("models--org--repo/refs/bad").Emit(testRuleInfo, 0, "refs/bad is not a 40-hex commit")
+	c.For("scanned.bin").Emit(testRuleCritical, 1, "payload")
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "",
+		[]ArtifactSummary{{Path: "scanned.bin", Format: "pickle"}}, c, Limits{}, nil, 0)
+
+	var buf bytes.Buffer
+	if err := rep.WriteCycloneDX(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Components []struct {
+			BOMRef string `json:"bom-ref"`
+		} `json:"components"`
+		Vulnerabilities []struct {
+			Affects []struct {
+				Ref string `json:"ref"`
+			} `json:"affects"`
+		} `json:"vulnerabilities"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	declared := map[string]bool{}
+	for _, comp := range doc.Components {
+		declared[comp.BOMRef] = true
+	}
+	if len(declared) != 3 {
+		t.Fatalf("declared %d components, want the scanned path plus the two named by findings: %v", len(declared), declared)
+	}
+	for _, v := range doc.Vulnerabilities {
+		for _, a := range v.Affects {
+			if !declared[a.Ref] {
+				t.Errorf("affects[].ref %q names no declared bom-ref", a.Ref)
+			}
+		}
+	}
+}
+
+// TestWritingOneFormatDoesNotChangeAnother pins F30a: WriteCycloneDX assigned
+// "dev" to the report's own Tool.Version, so a later WriteJSON on the same report
+// emitted a different version than the one the caller set.
+func TestWritingOneFormatDoesNotChangeAnother(t *testing.T) {
+	rep := Build(Tool{Name: "sc4n", Version: "1.2.3"}, "", nil, NewCollector(0), Limits{}, nil, 0)
+	var cdx bytes.Buffer
+	if err := rep.WriteCycloneDX(&cdx); err != nil {
+		t.Fatal(err)
+	}
+	var json1 bytes.Buffer
+	if err := rep.WriteJSON(&json1); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Tool.Version != "1.2.3" {
+		t.Fatalf("WriteCycloneDX changed the report's tool version to %q", rep.Tool.Version)
+	}
+	if !strings.Contains(json1.String(), `"version": "1.2.3"`) {
+		t.Fatalf("JSON after CycloneDX = %s", json1.String())
+	}
+	// The empty version is still rendered as "dev" in the BOM, without being
+	// written back.
+	empty := Build(Tool{Name: "sc4n"}, "", nil, NewCollector(0), Limits{}, nil, 0)
+	var cdx2 bytes.Buffer
+	if err := empty.WriteCycloneDX(&cdx2); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cdx2.String(), `"version": "dev"`) {
+		t.Fatalf("an empty tool version is not rendered as dev: %s", cdx2.String())
+	}
+	if empty.Tool.Version != "" {
+		t.Fatalf("the report's tool version was mutated to %q", empty.Tool.Version)
+	}
+}
+
+// TestTextCountsNestedFindings pins F30c: a finding inside a container is stamped
+// "outer:member", so the container's own row showed FINDINGS 0 while its members
+// carried the findings.
+func TestTextCountsNestedFindings(t *testing.T) {
+	c := NewCollector(0)
+	c.For("outer.zip").Emit(testRuleInfo, 0, "outer-level")
+	c.For("outer.zip").Named("inner.pkl").Emit(testRuleCritical, 4, "member-level")
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "",
+		[]ArtifactSummary{{Path: "outer.zip", Size: 12, Format: "zip"}}, c, Limits{}, nil, 0)
+	var buf bytes.Buffer
+	if err := rep.WriteText(&buf, TextOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	line := ""
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.HasPrefix(l, "outer.zip") {
+			line = l
+		}
+	}
+	if !strings.Contains(line, "2") {
+		t.Fatalf("the container row does not count its member's finding: %q\n%s", line, buf.String())
+	}
+}

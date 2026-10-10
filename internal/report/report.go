@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -56,6 +57,55 @@ type Limits struct {
 	MaxStackDepth        int   `json:"maxStackDepth"`
 }
 
+// dedupeArtifacts drops a repeated summary for the same path, keeping the first.
+// Two identical paths on the command line are one artifact, and a CycloneDX
+// bom-ref must be unique.
+func dedupeArtifacts(arts []ArtifactSummary) []ArtifactSummary {
+	seen := make(map[string]bool, len(arts))
+	out := arts[:0]
+	for _, a := range arts {
+		if seen[a.Path] {
+			continue
+		}
+		seen[a.Path] = true
+		out = append(out, a)
+	}
+	return out
+}
+
+// declareFindingArtifacts appends a summary for every path a finding names that no
+// summary covers, so that every encoder's reference resolves: CycloneDX requires
+// each affects[].ref to name a declared bom-ref, and SARIF needs a location that
+// is not a fabricated path. A producer can legitimately report on something it did
+// not scan -- the hf-cache expander reports a missing blob or a malformed ref, and
+// names a path that therefore has no summary -- and that is exactly when a dangling
+// reference would otherwise appear.
+func declareFindingArtifacts(arts []ArtifactSummary, findings []Finding) []ArtifactSummary {
+	have := make(map[string]bool, len(arts))
+	for _, a := range arts {
+		have[a.Path] = true
+	}
+	var extra []ArtifactSummary
+	declared := map[string]bool{}
+	for _, f := range findings {
+		path, _ := splitArtifact(f.Artifact)
+		if path == "" || have[path] || declared[path] {
+			continue
+		}
+		declared[path] = true
+		extra = append(extra, ArtifactSummary{
+			Path:      path,
+			Format:    "unknown",
+			SubFormat: "not scanned: named by a finding",
+		})
+	}
+	if len(extra) == 0 {
+		return arts
+	}
+	sort.SliceStable(extra, func(i, j int) bool { return extra[i].Path < extra[j].Path })
+	return append(arts, extra...)
+}
+
 // Report is the complete scan result.
 type Report struct {
 	SchemaVersion string            `json:"schemaVersion"`
@@ -72,17 +122,51 @@ type Report struct {
 	Timings map[string]int64 `json:"timings,omitempty"`
 	// Limits echoes the effective budget.
 	Limits Limits `json:"limits"`
+	// Unreadable is the number of named artifacts that could not be opened, and
+	// Cancelled records that the walk stopped early. Both are needed by SARIF,
+	// whose invocation otherwise claims a clean, complete run: a SARIF consumer
+	// that is told nothing about a partial scan records it as a full one.
+	Unreadable int  `json:"unreadable,omitempty"`
+	Cancelled  bool `json:"cancelled,omitempty"`
+}
+
+// ExecutionSuccessful reports whether the scan covered everything it was asked
+// to: every named path was opened and the walk was not cancelled.
+func (r *Report) ExecutionSuccessful() bool {
+	return r.Unreadable == 0 && !r.Cancelled
+}
+
+// executionNotifications names what stopped the run from being complete, so a
+// consumer sees the reason rather than only a false flag.
+func (r *Report) executionNotifications() []sarifNotification {
+	var out []sarifNotification
+	if r.Unreadable > 0 {
+		out = append(out, sarifNotification{
+			Level:   "error",
+			Message: sarifText{Text: strconv.Itoa(r.Unreadable) + " path(s) could not be opened or read, so the scan is partial"},
+		})
+	}
+	if r.Cancelled {
+		out = append(out, sarifNotification{
+			Level:   "warning",
+			Message: sarifText{Text: "the scan was cancelled before every artifact was visited, so the result is partial"},
+		})
+	}
+	return out
 }
 
 // Build assembles a Report from a Collector.
 func Build(t Tool, root string, arts []ArtifactSummary, c *Collector, lim Limits, timings map[string]int64, suppressed int) *Report {
+	arts = dedupeArtifacts(arts)
+	findings := c.Findings()
+	arts = declareFindingArtifacts(arts, findings)
 	sort.SliceStable(arts, func(i, j int) bool { return arts[i].Path < arts[j].Path })
 	return &Report{
 		SchemaVersion: SchemaVersion,
 		Tool:          t,
 		Root:          root,
 		Artifacts:     arts,
-		Findings:      c.Findings(),
+		Findings:      findings,
 		Suppressed:    suppressed,
 		Dropped:       c.Dropped(),
 		Timings:       timings,
@@ -197,9 +281,11 @@ func (r *Report) WriteJSON(w io.Writer) error {
 	return enc.Encode(r.toJSON())
 }
 
-// MarshalJSON makes a bare json.Marshal(report) emit the same bytes as WriteJSON
-// (minus the trailing newline), so a consumer cannot get two different payloads
-// depending on which entry point it used.
+// MarshalJSON emits the same *fields* as WriteJSON, so a consumer cannot get two
+// different payloads depending on which entry point it used. The bytes differ in
+// one respect: WriteJSON indents two spaces and appends a newline (the CLI's
+// contract, and what the determinism test pins), while json.Marshal produces the
+// compact form. A consumer that wants the CLI's bytes calls WriteJSON.
 func (r *Report) MarshalJSON() ([]byte, error) {
 	return json.Marshal(r.toJSON())
 }
