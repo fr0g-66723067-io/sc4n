@@ -351,6 +351,19 @@
       ],
       "notes": "A class outside the curated Keras safe set. The loader must supply it from host code, which is the surface the safe_mode bypasses live behind."
     },
+    "memo_routes/joblib_shape.pkl": {
+      "expect": null,
+      "forbid": [
+        "SC4N-PICKLE-MEMO-ALIAS"
+      ],
+      "notes": "joblib's NumpyArrayWrapper shape: the same name assembled by STACK_GLOBAL twice, each binding its own memo slot. One route, several slots — what every serializer that rebuilds a global per object produces, and what made ptouch/phishing-distilbert-cyber207/log_reg_model.joblib report high."
+    },
+    "memo_routes/two_routes.pkl": {
+      "expect": [
+        "SC4N-PICKLE-MEMO-ALIAS"
+      ],
+      "notes": "The same name written literally (GLOBAL pickle\\nloads\\n) and then assembled from strings (STACK_GLOBAL \"pickle\",\"loads\"): two routes to one resolved name, so a scanner keyed on the literal spelling and the loader disagree about the stream. The evidence names both routes."
+    },
     "msgpack_nan/flax_model.msgpack": {
       "expect": [
         "SC4N-MSGPACK-NAN-PAYLOAD"

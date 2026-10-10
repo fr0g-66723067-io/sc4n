@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -722,10 +723,13 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		w.st.push(v)
-		if v.global != nil {
-			// A global reached through the memo is the same name; record the slot so
-			// that a rebinding shows up as a distinct binding.
-			w.mm.noteGlobal(v.global.QualName(), int(idx))
+		if v.kind == kGlobal && v.global != nil {
+			// A name reached through the memo is the same name in the same slot:
+			// record the slot, so that two slots holding it show up. The kind guard
+			// matters because Val.global is also set on an instance (the class it
+			// was built from), and attributing a class name to a slot on every read
+			// of an instance is the same mistake put() already avoids.
+			w.mm.noteGlobal(v.global, int(idx))
 		}
 
 	case opPUT, opBINPUT, opLONG_BINPUT:
@@ -804,6 +808,8 @@ func (w *walker) globalValue(module, name string, off int64, stackBuilt bool) Va
 	g := &Global{
 		Module:     resolvedModule,
 		Name:       resolvedName,
+		SrcModule:  module,
+		SrcName:    name,
 		Off:        off,
 		StackBuilt: stackBuilt,
 		Allows:     verdict,
@@ -970,6 +976,21 @@ func (w *walker) noteMemoOverwrite(off int64) {
 	}
 }
 
+// routeNames renders the distinct routes to a name for the evidence, sorted so
+// the output is deterministic.
+func routeNames(routes map[bindingRoute]struct{}) []string {
+	out := make([]string, 0, len(routes))
+	for r := range routes {
+		s := r.srcModule + "." + r.srcName
+		if r.stackBuilt {
+			s += " (assembled)"
+		}
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // flush emits the findings that are decisions about the whole stream.
 func (w *walker) flush() {
 	if w.silent {
@@ -979,16 +1000,26 @@ func (w *walker) flush() {
 		w.sink.Emit(ruleMemoAlias, w.memoOverwriteOff,
 			fmt.Sprintf("memo slot written more than once (%d rebinding(s)); allowlist-by-name scanners see one binding per name, and ShadowPickle uses a rebinding to present an allowlisted name while binding something else", w.mm.overwrites))
 	}
-	// Names bound in more than one memo slot.
-	for name, slots := range w.mm.byGlobal {
-		if len(slots) > 1 {
+	// Names reachable through more than one route. A second *slot* is not the
+	// signal: any serializer that reconstructs a global per object binds it more
+	// than once (joblib's NumpyArrayWrapper emits its own STACK_GLOBAL numpy.dtype
+	// per array), so counting slots reported an ordinary sklearn model as high. A
+	// second *route* is: a name-keyed allowlist sees one spelling and the loader
+	// resolves another, which is the ShadowPickle bypass.
+	for name, b := range w.mm.byGlobal {
+		if len(b.routes) > 1 {
 			off := int64(0)
 			if g, ok := w.globals[name]; ok {
 				off = g.Off
 			}
 			w.sink.EmitExtra(ruleMemoAlias, off,
-				fmt.Sprintf("%s is bound in %d memo slots (%v); a benign stream binds each name once", name, len(slots), slots),
-				map[string]string{"global": name, "slots": strconv.Itoa(len(slots))})
+				fmt.Sprintf("%s is reachable through %d distinct bindings (%s) in memo slots %v; a benign stream binds a name one way",
+					name, len(b.routes), strings.Join(routeNames(b.routes), ", "), b.slots),
+				map[string]string{
+					"global": name,
+					"slots":  strconv.Itoa(len(b.slots)),
+					"routes": strconv.Itoa(len(b.routes)),
+				})
 		}
 	}
 	// Out-of-allowlist requirement.

@@ -153,6 +153,37 @@ func pickleFixtures(f *fixtureSet) {
 		stop(),
 	))
 
+	// --- memo-alias: two routes to one name ---------------------------------------
+	// joblib's NumpyArrayWrapper emits its own STACK_GLOBAL numpy.dtype per array,
+	// so a benign sklearn .joblib binds one name in several memo slots. That is not
+	// the ShadowPickle signal: a name-keyed allowlist sees the same spelling every
+	// time. The fixture is the shape that made
+	// ptouch/phishing-distilbert-cyber207/log_reg_model.joblib report high.
+	f.add("memo_routes/joblib_shape.pkl", cat(
+		proto(2),
+		stackGlobal("numpy", "dtype"),
+		[]byte{bMEMOIZE},
+		stackGlobal("numpy", "dtype"),
+		[]byte{bMEMOIZE},
+		[]byte{bBINGET, 0x00},
+		[]byte{bTUPLE1},
+		[]byte{bREDUCE},
+		stop(),
+	))
+
+	// One name reached two ways: written literally by GLOBAL and assembled from
+	// strings by STACK_GLOBAL. The spelling a name-keyed allowlist matches is not
+	// the spelling the loader resolves, which is what the rule is for.
+	f.add("memo_routes/two_routes.pkl", cat(
+		proto(2),
+		globalText("pickle", "loads"),
+		[]byte{bBINPUT, 0x00},
+		stackGlobal("pickle", "loads"),
+		[]byte{bBINPUT, 0x01},
+		[]byte{bNONE},
+		stop(),
+	))
+
 	// --- benign: a real-structure torch state dict --------------------------------
 	// The false-positive gate for the whole pickle engine. Every global is one the
 	// weights-only unpickler accepts, the persistent id is the ("storage", …)

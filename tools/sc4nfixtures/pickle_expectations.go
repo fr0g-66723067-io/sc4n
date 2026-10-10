@@ -124,6 +124,20 @@ func pickleExpectations() map[string]expectation {
 				"the first valid opcode report the pickle and never mention the source " +
 				"text in front of it.",
 		},
+		"memo_routes/joblib_shape.pkl": {
+			Forbid: []string{"SC4N-PICKLE-MEMO-ALIAS"},
+			Notes: "joblib's NumpyArrayWrapper shape: the same name assembled by STACK_GLOBAL twice, " +
+				"each binding its own memo slot. One route, several slots — what every serializer " +
+				"that rebuilds a global per object produces, and what made " +
+				"ptouch/phishing-distilbert-cyber207/log_reg_model.joblib report high.",
+		},
+		"memo_routes/two_routes.pkl": {
+			Expect: []string{"SC4N-PICKLE-MEMO-ALIAS"},
+			Notes: "The same name written literally (GLOBAL pickle\\nloads\\n) and then assembled from " +
+				"strings (STACK_GLOBAL \"pickle\",\"loads\"): two routes to one resolved name, so a " +
+				"scanner keyed on the literal spelling and the loader disagree about the stream. " +
+				"The evidence names both routes.",
+		},
 	}
 }
 

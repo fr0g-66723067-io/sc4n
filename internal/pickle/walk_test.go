@@ -740,9 +740,11 @@ func TestCodeStringInBinaryConstantIsSeen(t *testing.T) {
 	mustHave(t, fs, "SC4N-PICKLE-CODE-STRING")
 }
 
-// TestMemoAliasNeedsDistinctSlots pins the F17 fix: a stream that binds a name
-// once and reads it per tensor is a benign state_dict, not a rebinding. The
-// 44-byte shape below is the minimal multi-tensor state_dict.
+// TestMemoAliasNeedsDistinctSlots pins the rule's semantics: a name bound once
+// and read per tensor is a benign state_dict, and a name stored in two memo slots
+// is a benign multi-object stream — joblib's NumpyArrayWrapper emits its own
+// STACK_GLOBAL numpy.dtype per array, so counting slots reported an ordinary
+// sklearn model as high. What the rule is about is two *routes* to one name.
 func TestMemoAliasNeedsDistinctSlots(t *testing.T) {
 	global := func() []byte {
 		data := []byte{opPROTO, 2}
@@ -757,13 +759,34 @@ func TestMemoAliasNeedsDistinctSlots(t *testing.T) {
 	_, fs := walk(t, data)
 	mustNotHave(t, fs, "SC4N-PICKLE-MEMO-ALIAS")
 
-	// The same name in two distinct slots: the finding, with both slots named.
+	// One route, two distinct slots: still no finding. The same name stored
+	// twice is what every serializer that rebuilds a global per object produces.
 	data = global()
 	data = append(data, opBINPUT, 0, opBINPUT, 1, opSTOP)
 	_, fs = walk(t, data)
+	mustNotHave(t, fs, "SC4N-PICKLE-MEMO-ALIAS")
+
+	// Two routes to one name: written literally by GLOBAL, then assembled from
+	// strings by STACK_GLOBAL. A scanner keyed on the literal spelling and a
+	// loader that resolves the assembled one disagree about what the stream calls.
+	data = []byte{opPROTO, 2, opGLOBAL}
+	data = append(data, []byte("pickle\nloads\n")...)
+	data = append(data, opBINPUT, 0)
+	data = append(data, binUnicode("pickle")...)
+	data = append(data, binUnicode("loads")...)
+	data = append(data, opSTACK_GLOBAL)
+	data = append(data, opBINPUT, 1, opSTOP)
+	_, fs = walk(t, data)
 	mustHave(t, fs, "SC4N-PICKLE-MEMO-ALIAS")
 	for _, f := range fs {
-		if f.RuleID == "SC4N-PICKLE-MEMO-ALIAS" && !strings.Contains(f.Evidence, "[0 1]") {
+		if f.RuleID != "SC4N-PICKLE-MEMO-ALIAS" {
+			continue
+		}
+		if !strings.Contains(f.Evidence, "pickle.loads (assembled)") ||
+			!strings.Contains(f.Evidence, "2 distinct bindings") {
+			t.Fatalf("evidence = %q, want both routes named", f.Evidence)
+		}
+		if !strings.Contains(f.Evidence, "[0 1]") {
 			t.Fatalf("evidence = %q, want the distinct slots [0 1]", f.Evidence)
 		}
 	}

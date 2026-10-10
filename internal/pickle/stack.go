@@ -112,6 +112,11 @@ type Val struct {
 type Global struct {
 	Module string
 	Name   string
+	// SrcModule and SrcName are the pair as the stream wrote it, before
+	// resolveGlobal remapped it. They are what distinguishes two spellings of one
+	// name for SC4N-PICKLE-MEMO-ALIAS.
+	SrcModule string
+	SrcName   string
 	// Off is the offset of the opcode that introduced the name.
 	Off int64
 	// StackBuilt is true when the name was assembled by STACK_GLOBAL from two
@@ -223,13 +228,16 @@ type memo struct {
 	slots []Val
 	set   []bool
 	// byGlobal records, for every qualified name, which *distinct* memo slots held
-	// it, in the order they were first seen. Two slots holding the same name is
-	// the ShadowPickle signal (SC4N-PICKLE-MEMO-ALIAS): a benign stream binds a
-	// name once. The slots are a set, not a log: a stream that binds a name in
-	// slot 0 and then BINGETs it once per tensor has one binding, and recording
-	// one entry per read made every real multi-tensor state_dict a high-severity
-	// finding whose evidence contradicted itself ("bound in 3 memo slots ([0 0 0])").
-	byGlobal map[string][]int
+	// it and which distinct *routes* produced it. Two routes to one name is the
+	// ShadowPickle signal (SC4N-PICKLE-MEMO-ALIAS): a name-keyed allowlist is
+	// bypassed when a scanner sees one spelling and the loader resolves another,
+	// and a stream that writes a name literally and then assembles the same name
+	// from strings is doing exactly that. Two *slots* holding one name is not the
+	// signal: any serializer that reconstructs a global per object binds it more
+	// than once, which is how a benign sklearn .joblib (joblib's
+	// NumpyArrayWrapper emits its own STACK_GLOBAL numpy.dtype per array) was
+	// reported high. The slots are a set, not a log.
+	byGlobal map[string]*globalBindings
 	// overwrites counts slots written twice, which is the other half of the same
 	// signal.
 	overwrites int
@@ -243,6 +251,23 @@ type memo struct {
 	high map[int]Val
 }
 
+// bindingRoute is one way a name was produced: the pair as the stream wrote it,
+// plus whether the stream assembled it from strings (STACK_GLOBAL) instead of
+// writing it literally. Two distinct routes to one resolved name is what
+// SC4N-PICKLE-MEMO-ALIAS is about.
+type bindingRoute struct {
+	srcModule  string
+	srcName    string
+	stackBuilt bool
+}
+
+// globalBindings is the per-name bookkeeping: the distinct memo slots that held
+// the name and the distinct routes that produced it.
+type globalBindings struct {
+	slots  []int
+	routes map[bindingRoute]struct{}
+}
+
 // newMemo returns a memo whose dense table is bounded by streamLen, the length of
 // the bytes the walk is looking at. Indices beyond that are held in a map.
 func newMemo(streamLen int) *memo {
@@ -253,7 +278,7 @@ func newMemo(streamLen int) *memo {
 	if limit < 0 {
 		limit = 0
 	}
-	return &memo{byGlobal: map[string][]int{}, limit: limit}
+	return &memo{byGlobal: map[string]*globalBindings{}, limit: limit}
 }
 
 func (m *memo) get(i int) (Val, bool) {
@@ -325,7 +350,7 @@ func (m *memo) put(i int, v Val) (overwrote bool, ok bool) {
 	// ("bound in 2 memo slots"), on an ordinary numpy or joblib stream, where the
 	// name is bound once and the instance is a different value.
 	if v.kind == kGlobal && v.global != nil {
-		m.noteGlobal(v.global.QualName(), i)
+		m.noteGlobal(v.global, i)
 	}
 	if overwrote {
 		m.overwrites++
@@ -333,14 +358,25 @@ func (m *memo) put(i int, v Val) (overwrote bool, ok bool) {
 	return overwrote, true
 }
 
-// noteGlobal records that slot i holds the name, if no other slot already does.
-func (m *memo) noteGlobal(name string, i int) {
-	for _, existing := range m.byGlobal[name] {
+// noteGlobal records slot i and the route that produced the name.
+func (m *memo) noteGlobal(g *Global, i int) {
+	name := g.QualName()
+	b := m.byGlobal[name]
+	if b == nil {
+		b = &globalBindings{routes: map[bindingRoute]struct{}{}}
+		m.byGlobal[name] = b
+	}
+	seen := false
+	for _, existing := range b.slots {
 		if existing == i {
-			return
+			seen = true
+			break
 		}
 	}
-	m.byGlobal[name] = append(m.byGlobal[name], i)
+	if !seen {
+		b.slots = append(b.slots, i)
+	}
+	b.routes[bindingRoute{srcModule: g.SrcModule, srcName: g.SrcName, stackBuilt: g.StackBuilt}] = struct{}{}
 }
 
 // next is the index MEMOIZE uses: the number of entries the loader's dict holds,
