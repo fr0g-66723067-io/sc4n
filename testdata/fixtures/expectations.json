@@ -1036,6 +1036,24 @@
       ],
       "notes": "A joblib array (NumpyArrayWrapper + a correctly sized 2x3 f8 payload) with the wrapper globals registered as allowlisted, so the wrapper's own REDUCE/BUILD do not fire and the whole SC4N-PICKLE-* family and SC4N-JOBLIB-WRAPPER-MISMATCH are forbidden. The stream is protocol 2 to isolate that property: a current joblib file defaulting to protocol 4/5 would also, honestly, trip SC4N-PICKLE-REQUIRES-UNSAFE-LOADER at low confidence, which is the rule's documented behaviour rather than a wrapper problem."
     },
+    "benign/joblib_compressed.joblib": {
+      "expect": null,
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH",
+        "SC4N-JOBLIB-WRAPPER-MISMATCH",
+        "SC4N-PICKLE-REQUIRES-UNSAFE-LOADER",
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-GLOBAL-HIGH",
+        "SC4N-PICKLE-GLOBAL-UNKNOWN",
+        "SC4N-PICKLE-REDUCE",
+        "SC4N-PICKLE-BUILD-STATE",
+        "SC4N-PICKLE-MEMO-ALIAS",
+        "SC4N-PICKLE-STRUCT",
+        "SC4N-PICKLE-INCOMPLETE",
+        "SC4N-PICKLE-TRAILING"
+      ],
+      "notes": "A protocol-2 joblib array wrapped in zlib — the shape joblib.dump(compress=3) writes, and the shape joblib.load reads back. The content is dispatched as zlib, unwrapped, and the member is parsed by the joblib/pickle engine, so the correct output is no finding at all: the extension check must treat joblib's own compressors as plausible for .joblib, exactly as it treats the pre-0.10 ZF frame. The pickle family is forbidden as well, so a regression in the unwrap/mask path is caught by the benign gate rather than by the mismatch alone."
+    },
     "benign/keras_sequential.keras": {
       "expect": null,
       "forbid": [

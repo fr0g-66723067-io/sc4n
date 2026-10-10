@@ -289,11 +289,24 @@ func Sniff(s source.Source, l limits.Limits) (Format, string) {
 // saved as chat_template.txt is a template, and the content sniffer classifies it
 // as one, so without this entry every such file reported
 // SC4N-FORMAT-EXTENSION-MISMATCH for being what it is.
+//
+// ".joblib" lists the single-stream compressors because joblib's own loader accepts
+// them: joblib.dump's `compress` parameter is part of the format's API, and
+// _detect_compressor picks the decompressor from the file's magic prefix, so a
+// .joblib that is a zlib/gzip/bzip2/xz/lzma/lz4 stream is exactly what joblib.load
+// reads. (The prefixes joblib ships are \x78, \x1f\x8b, BZ, \xfd7zXZ, \x5d\x00 and
+// \x04\x22\x4d\x18, plus "ZF" for pre-0.9.3 files — the seven this table lists.
+// zstd is deliberately absent: joblib 1.4.2 has no zstd compressor, so a .joblib
+// that is a zstd stream is genuinely not loadable by joblib.load.)
+//
+// The same does not hold for the pickle extensions: pickle.load does not
+// transparently decompress, so a .pkl that is a gzip stream really does contradict
+// its name and stays reported.
 var extensions = map[string][]Format{
 	"pkl":         {FormatPickle, FormatJoblib, FormatZlibJoblibLegacy},
 	"pickle":      {FormatPickle, FormatJoblib, FormatZlibJoblibLegacy},
 	"pcl":         {FormatPickle},
-	"joblib":      {FormatJoblib, FormatZlibJoblibLegacy},
+	"joblib":      {FormatJoblib, FormatZlibJoblibLegacy, FormatZlib, FormatGzip, FormatBzip2, FormatXz, FormatLzma, FormatLz4},
 	"pt":          {FormatTorchNew, FormatTorchLegacy, FormatTorchScript, FormatPT2, FormatPickle, FormatSevenZip, FormatZip, FormatNPZ},
 	"pth":         {FormatTorchNew, FormatTorchLegacy, FormatPickle, FormatPython},
 	"ptl":         {FormatTorchScript, FormatPTE, FormatPickle},
