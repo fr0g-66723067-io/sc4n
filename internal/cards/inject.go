@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,16 +58,15 @@ func ScanText(sink *report.Sink, base int64, what, text string) {
 // ScanJSONFile runs the document-level card detectors over a decoded HF metadata
 // document (config.json, model_index.json, dataset_info.json, and any other
 // metadata JSON). README frontmatter is handled inside ScanText.
+//
+// Every value in the stream is decoded, not just the first. A metadata file can
+// hold more than one JSON document, and a second one — or any trailing bytes —
+// was previously neither decoded nor scanned, so a webhook in it produced no
+// finding where the same bytes in a plain .json produced one. Whatever the
+// decoder did not consume is scanned as raw text, so nothing past the last
+// complete value is dropped in silence either.
 func ScanJSONFile(sink *report.Sink, base int64, path string, data []byte) {
 	if len(data) == 0 {
-		return
-	}
-	var doc any
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if err := dec.Decode(&doc); err != nil {
-		sink.Emit(ruleCardParse, base, "metadata document "+path+" is not valid JSON; scanned as raw text")
-		ScanText(sink, base, path, string(data))
 		return
 	}
 	// The document is walked twice at most: once to index where each string
@@ -74,9 +74,34 @@ func ScanJSONFile(sink *report.Sink, base int64, path string, data []byte) {
 	// whole-document search made a metadata file with 150000 keys quadratic, and
 	// the measured cost was over 300 s before this index existed.
 	idx := buildOffsetIndex(data)
-	walkJSONStrings(doc, func(s string) {
-		ScanText(sink, base+idx.locate(data, s), path, s)
-	})
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	decoded := 0
+	for {
+		var doc any
+		err := dec.Decode(&doc)
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			off := dec.InputOffset()
+			if decoded == 0 {
+				// The first value never completed, so the whole document is the
+				// undecoded remainder.
+				off = 0
+			}
+			if off > int64(len(data)) {
+				off = int64(len(data))
+			}
+			sink.Emit(ruleCardParse, base+off, "metadata document "+path+" is not valid JSON; the remainder is scanned as raw text")
+			ScanText(sink, base+off, path, string(data[off:]))
+			return
+		}
+		decoded++
+		walkJSONStrings(doc, func(s string) {
+			ScanText(sink, base+idx.locate(data, s), path, s)
+		})
+	}
 }
 
 // walkJSONStrings calls fn for every string that is a key or a value of the
