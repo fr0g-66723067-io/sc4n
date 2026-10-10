@@ -64,7 +64,8 @@ go build -o sc4n ./cmd/sc4n
 | `-max-artifact`, `-max-depth`, `-max-decompress`, `-max-ratio` | override the resource caps in `docs/architecture.md` |
 | `-timeout DURATION` | bound the whole scan; a cancelled scan says so rather than presenting a partial result as complete |
 | `-root DIR` | containment root for path-shaped values (ONNX external data, SavedModel assets, symlinks) |
-| `-hf-cache [DIR]` | scan a Hugging Face download cache, resolving `snapshots/` symlinks into `blobs/` and scanning each blob once |
+| `-hf-cache` | scan a Hugging Face download cache instead of paths: `snapshots/` symlinks are resolved into `blobs/`, each blob is scanned once no matter how many revisions point at it, and `refs/` names the revision |
+| `-hf-cache-dir DIR` | the cache root for `-hf-cache` (default `$HF_HOME/hub`, else `~/.cache/huggingface/hub`) |
 | `-deep-stats` | enable the informational weight-statistics rules (NaN/Inf, duplicates, outliers, entropy) |
 | `-timings` | include per-phase timings in the report |
 | `-quiet`, `-color` | output control |

@@ -182,20 +182,21 @@ today, with the honest gaps marked.
 | path | budget | measured | note |
 |---|---|---|---|
 | pickle walk, opcode-dense state_dict (4000 entries × 256 B) | ≥ 300 MB/s/core | **359 MB/s**, 14719 allocs/1.2 MB | per-opcode cost, not per-byte |
-| pickle walk, blob-dense (16 × 64 KiB constants) | — | **3.7 GB/s** | this is the shape a real torch storage pickle has |
-| byte histogram / entropy (full file) | ≥ 1 GB/s/core | **1.13 GB/s**, 0 allocs | the full-file pass |
-| indicator engine over prose + indicators | ≥ 1 GB/s/core | **118 MB/s** | **not met** — see below |
+| pickle walk, blob-dense (16 × 64 KiB constants) | — | **20 GB/s** | this is the shape a real torch storage pickle has |
+| byte histogram / entropy (full file) | ≥ 1 GB/s/core | **1.65 GB/s**, 0 allocs | the full-file pass |
+| indicator engine over prose + indicators | ≥ 1 GB/s/core | **131 MB/s** | **not met** — see below |
 | — of which: Aho–Corasick literals | — | 220 MB/s | one dependent load chain per byte |
 | — of which: Unicode anomaly walk | — | 550 MB/s | ASCII fast path, `utf8.DecodeRune` only for non-ASCII |
 | — of which: raw-IP URL hunt | — | 2.2 GB/s | two single-anchor `bytes.IndexByte` passes |
-| validated-native search over random bytes | — | 186 MB/s | header validation, not a byte scan |
-| safetensors header + metadata | ≥ 1 GB/s | 8 µs per header | the file's *body* is not read |
+| validated-native search over random bytes | — | 338 MB/s | header validation, not a byte scan |
+| safetensors header + metadata | ≥ 1 GB/s | 7 µs per header | the file's *body* is not read |
 | end-to-end 13.00 GiB F16 safetensors | ≤ 20 s wall, ≤ 512 MiB RSS | **1.25 s wall (10.4 GiB/s), 7.8 MiB anonymous RSS** | `make bench-big` |
+| `-hf-cache` over a synthetic two-revision cache | — | one scan per unique blob | `TestHFCacheScansEachBlobOnce` |
 
 ### The one budget that is not met, and why
 
 The plan asked for a full-file string/entropy scan at ≥ 1 GB/s per core. The
-histogram meets it (1.13 GB/s). The indicator engine does not: a byte-at-a-time
+histogram meets it (1.65 GB/s). The indicator engine does not: a byte-at-a-time
 Aho–Corasick walk is a *dependent* chain — the transition for byte *i+1* cannot
 start until byte *i*'s table load has completed — and that chain costs about 4.5 ns
 per byte on this CPU regardless of how the table is laid out. The obvious encoding
@@ -228,8 +229,9 @@ threat model states the same distinction.
 **The digest is capped, and says so.** `sha256Scope` is `full` below
 `MaxHashBytes` and `prefix:<bytes>` above it. A prefix digest presented as a file
 digest would be exactly the kind of silent truncation the rest of this tool
-refuses to do, so the scope travels with the value in JSON, in the text summary
-and in the SARIF/CycloneDX output.
+refuses to do, so the scope travels with the value in JSON and — for a prefix —
+as a pair of `sc4n:sha256`/`sc4n:sha256Scope` properties in CycloneDX rather than
+as a component `hashes` entry, which is a claim about the whole component.
 
 The budgets are properties of the design rather than hopes: an artifact is mapped
 once, its digest is computed concurrently with the parse, the indicator engine is
