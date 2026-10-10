@@ -93,6 +93,12 @@ const (
 )
 
 // ruleTiers names the rules that survive every Kind. Everything else is a shape.
+//
+// The Unicode-anomaly rule is deliberately not here: a tokenizer vocabulary or a
+// symbol table is a KindSecrets region, and such a table legitimately contains
+// zero-width and private-use characters as *data* (64 of llama.cpp's 19 GGUF
+// vocabularies do). A text artifact that is not valid UTF-8 still gets the pass
+// through EmitUnicodeAnomalies, which is where the byte-safe tier needs it.
 var ruleTiers = map[*report.Rule]tier{
 	ruleC2:          tierSecret,
 	ruleRawIPURL:    tierSecret,
@@ -116,6 +122,17 @@ func (k Kind) allows(r *report.Rule) bool {
 		return r != ruleInjection
 	default:
 		return true
+	}
+}
+
+// EmitUnicodeAnomalies reports the invisible, order-changing and mixed-script hits
+// in b. It is separate from EmitKind because that pass is byte-safe: it decodes
+// runes and skips an invalid byte rather than standing down, so a caller holding a
+// buffer it will not scan as text — a text artifact that is not valid UTF-8 — still
+// runs this one.
+func EmitUnicodeAnomalies(sink *report.Sink, base int64, b []byte) {
+	for _, h := range scanUnicodeAnomalies(b, nil) {
+		emit(sink, base, h)
 	}
 }
 

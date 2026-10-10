@@ -317,6 +317,19 @@ func TestNonUTF8IsReportedAndStillScanned(t *testing.T) {
 		}
 	}
 
+	// The Unicode-anomaly pass is part of the byte-safe tier: it decodes runes and
+	// skips an invalid byte rather than standing down, so a bidi override next to
+	// a stray byte is still reported. Without it, one bad byte anywhere in the
+	// artifact hid the override.
+	fs = scanBytes(t, "evil.txt", []byte("evil\xe2\x80\xaeclass and one bad byte \xe9 here\n"), l)
+	got = ids(fs)
+	if !got["SC4N-UNICODE-ANOMALY"] {
+		t.Fatalf("the anomaly next to an invalid byte was not reported: %v", got)
+	}
+	if !got["SC4N-CONTENT-NOT-UTF8"] {
+		t.Fatalf("the invalid-UTF-8 skip was not reported: %v", got)
+	}
+
 	// Prose-shaped rules must not fire on a non-prose buffer: a symbol table with
 	// no valid UTF-8 must not be read as injection text.
 	var junk []byte

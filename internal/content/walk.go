@@ -169,12 +169,14 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		// Analysing arbitrary binary as prose would manufacture findings from
 		// random bytes — a NUL-free symbol table such as cscope.out yields dozens
 		// of "injection" hits from its own symbol names — so the prose-shaped
-		// rules are skipped, as are the text-only layers (cards, tokenizer, jinja,
-		// the Unicode-anomaly pass). What still runs is the byte-safe tier: the
-		// literal table, the raw-IP URL hunt and the credential/secret
-		// assignments, which are structural and correct on any buffer. The skip
-		// itself is reported rather than the artifact being dropped in silence.
+		// rules are skipped, as are the text-only layers (cards, tokenizer,
+		// jinja). What still runs is the byte-safe tier: the literal table, the
+		// raw-IP URL hunt, the credential/secret assignments and the
+		// Unicode-anomaly pass, which decode runes and skip an invalid byte rather
+		// than standing down, so they are correct on any buffer. The skip itself
+		// is reported rather than the artifact being dropped in silence.
 		stringscan.EmitKind(ctx.Sink, 0, data, stringscan.KindSecrets)
+		stringscan.EmitUnicodeAnomalies(ctx.Sink, 0, data)
 		ctx.Sink.EmitExtra(ruleNotUTF8, 0,
 			"the artifact is not valid UTF-8, so the text-only layers did not run",
 			map[string]string{"invalidAt": strconv.Itoa(firstInvalidUTF8(data))})
