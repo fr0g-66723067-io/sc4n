@@ -58,7 +58,6 @@ Two invariants hold across the whole graph:
 | `internal/policy` | exit-code verdicts and baseline suppression |
 | `internal/hfcache` | the Hugging Face cache expander: symlink resolution, revision labels, blob de-duplication |
 | `internal/formats` | blank-imports every parser package so a binary states what it contains |
-| `internal/formats` | blank-imports every parser package so a binary states what it contains |
 | `cmd/sc4n` | flag parsing, output selection, exit codes |
 
 ## The parser contract
