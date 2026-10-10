@@ -80,7 +80,7 @@ func Supported(c Compressor) bool {
 }
 
 // DetectCompressor identifies a single-stream compression wrapper by magic. It
-// reads at most 16 leading bytes and never allocates from a length in them.
+// reads at most 32 leading bytes and never allocates from a length in them.
 func DetectCompressor(s source.Source, l limits.Limits) (Compressor, bool) {
 	if s == nil || s.Size() < 2 {
 		return CompressorNone, false

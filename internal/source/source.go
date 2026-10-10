@@ -47,11 +47,11 @@ type Source interface {
 	// requires.
 	ReadAt(p []byte, off int64) (int, error)
 
-	// Bytes returns the bytes at [off, off+n) where available. Unlike ReadAt it
-	// returns a slice directly into the underlying storage where the whole range
-	// is mapped, so it performs no copy for mapped sources. It returns
-	// io.ErrUnexpectedEOF (with a short slice) when the range runs past the end,
-	// and an error when the range exceeds the implementation's copy budget.
+	// Bytes returns the bytes at [off, off+n) where available. It returns a slice
+	// directly into the underlying storage — the mapping, or the buffer Mem was
+	// given — so it performs no copy. It returns io.ErrUnexpectedEOF (with a short
+	// slice) when the range runs past the end, and a negative-range error for a
+	// negative offset or length.
 	Bytes(off, n int64) ([]byte, error)
 
 	// Reader returns a sequential reader over [off, size).

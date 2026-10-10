@@ -850,6 +850,48 @@ func TestSharedEmitKeysKeepDistinctFindings(t *testing.T) {
 	}
 }
 
+// decodeLongForTest runs one LONG1 argument through the walker's decoder.
+func decodeLongForTest(t *testing.T, raw []byte) int64 {
+	t.Helper()
+	data := append([]byte{opLONG1, byte(len(raw))}, raw...)
+	data = append(data, opSTOP)
+	w := &walker{data: data, lim: limits.Default(), mm: newMemo(len(data)), once: map[string]bool{}, structs: map[string]*structStat{}}
+	got, _, err := w.decodeArg(opTable[opLONG1], 0)
+	if err != nil {
+		t.Fatalf("LONG1 % x: %v", raw, err)
+	}
+	n, ok := got.(int64)
+	if !ok {
+		t.Fatalf("LONG1 % x decoded to %T, want an int64", raw, got)
+	}
+	return n
+}
+
+// TestCountedLongKeepsTheHighBytes pins the documented narrowing for a value that
+// does not fit an int64: the fold keeps the most significant eight bytes, so the
+// sign survives and the magnitude is a floor of the true one. CPython's
+// _decode_long would produce the exact value; the walker needs only a scalar for
+// the stack, and an attacker-controlled thousand-digit integer must not cost an
+// allocation.
+func TestCountedLongKeepsTheHighBytes(t *testing.T) {
+	// 2**80 is eleven little-endian bytes: ten zeroes and 0x01. The eight bytes the
+	// fold keeps are therefore the top ones, and the result is 2**80 >> 24 = 2**56.
+	wide := make([]byte, 11)
+	wide[10] = 0x01
+	if got := decodeLongForTest(t, wide); got != 1<<56 {
+		t.Fatalf("2**80 in eleven bytes decoded to %d, want %d", got, int64(1)<<56)
+	}
+	// A negative value wider than eight bytes has no int64 representation, so it is
+	// clamped rather than reported as a positive number the stream does not contain.
+	neg := make([]byte, 9)
+	for i := range neg {
+		neg[i] = 0xff
+	}
+	if got := decodeLongForTest(t, neg); got != math.MinInt64 {
+		t.Fatalf("a nine-byte 0xff..ff decoded to %d, want MinInt64", got)
+	}
+}
+
 // TestCountedLongMatchesTheLoader: CPython's _decode_long folds the bytes and then
 // subtracts 1 << (8*len(data)) when the top bit is set, so a one-byte 0xff is -1.
 // The walker computed -(v & MaxInt64), which reported -255 for the same bytes.
@@ -879,13 +921,8 @@ func TestCountedLongMatchesTheLoader(t *testing.T) {
 		}
 		// The stack value reaches a finding only when it is consumed, so assert on
 		// the decoded value directly as well.
-		w := &walker{data: data, lim: limits.Default(), mm: newMemo(len(data)), once: map[string]bool{}, structs: map[string]*structStat{}}
-		got, _, err := w.decodeArg(opTable[opLONG1], 0)
-		if err != nil {
-			t.Fatalf("LONG1 % x: %v", tc.raw, err)
-		}
-		if n, ok := got.(int64); !ok || n != tc.want {
-			t.Errorf("LONG1 % x decoded to %v, want %d (finding match: %v)", tc.raw, got, tc.want, found)
+		if got := decodeLongForTest(t, tc.raw); got != tc.want {
+			t.Errorf("LONG1 % x decoded to %d, want %d (finding match: %v)", tc.raw, got, tc.want, found)
 		}
 	}
 }

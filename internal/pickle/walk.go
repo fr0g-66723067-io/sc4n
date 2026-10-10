@@ -146,8 +146,6 @@ type walker struct {
 	// bounds the cost of walking a region that is not opcodes at all.
 	resyncRun int
 
-	// segments tracks how many complete pickles have been seen.
-	segments int
 	// firstSegmentDone is set after the first STOP.
 	firstSegmentDone bool
 	// windowStart is the offset the stream was located at (0 for a clean start).
@@ -215,7 +213,6 @@ func (w *walker) run() {
 		}
 		// Decide what the bytes after the STOP are.
 		if w.probePickle(pos) {
-			w.segments++
 			w.emitOnce("segment", ruleSegment, int64(pos),
 				"a second pickle starts at this offset; STOP is not end-of-file and a reader that loops over load() executes every segment")
 			continue
@@ -1272,11 +1269,12 @@ func quote(s string) string {
 	const max = 160
 	var b strings.Builder
 	// Grow is bounded by the truncation: a 1 MiB PERSID argument must not make the
-	// builder reserve 1 MiB to emit at most max runes (each escaping to at most
-	// six bytes) plus the quotes and the ellipsis.
+	// builder reserve 1 MiB to emit at most max runes — each escaping to at most
+	// four bytes, since every escape is \xNN and a rune is at most four bytes —
+	// plus the two quotes and the three-byte ellipsis.
 	grow := len(s) + 2
-	if grow > max*6+8 {
-		grow = max*6 + 8
+	if grow > max*4+5 {
+		grow = max*4 + 5
 	}
 	b.Grow(grow)
 	b.WriteByte('"')
@@ -1594,8 +1592,9 @@ func (w *walker) countedBytes(info opcodeInfo, start int, n int64) (any, int, er
 // CPython's _decode_long does: fold the bytes, then subtract 1 << (8*len) when the
 // top bit is set. The value is not materialised as a big.Int: the walker only needs
 // a scalar for the stack, and an attacker-controlled thousand-digit integer must
-// not cost an allocation, so a value wider than eight bytes keeps its low 64 bits
-// and is clamped when negative.
+// not cost an allocation, so a value wider than eight bytes keeps its most
+// significant eight bytes — the sign survives — and is clamped to MinInt64 when
+// negative.
 func (w *walker) countedLong(info opcodeInfo, start int, n int64) (any, int, error) {
 	if n < 0 {
 		return nil, start, argErr("negative-length", fmt.Sprintf("%s declares a negative length %d", info.name, n))
@@ -1610,8 +1609,10 @@ func (w *walker) countedLong(info opcodeInfo, start int, n int64) (any, int, err
 	}
 	raw := w.data[start : start+int(n)]
 	var v int64
-	// Fold at most the low eight bytes; the flag records that the value was
-	// truncated so the stack entry is honest about it.
+	// Fold the eight most significant bytes — the fold runs from the last byte
+	// down, so what is kept is the top of the little-endian value. For a value of
+	// at most eight bytes that is all of it; for a wider one it is the true value
+	// shifted down, so the magnitude is a floor of it.
 	for i := len(raw) - 1; i >= 0 && i >= len(raw)-8; i-- {
 		v = v<<8 | int64(raw[i])
 	}
@@ -1627,9 +1628,9 @@ func (w *walker) countedLong(info opcodeInfo, start int, n int64) (any, int, err
 		// The fold already produced the two's-complement value.
 	default:
 		// More than 64 bits: the exact value does not fit an int64, so only the
-		// low eight bytes are kept and the magnitude is a floor. A negative value
-		// is clamped rather than reported as a positive number the stream does
-		// not contain.
+		// most significant eight bytes are kept — the sign survives — and the
+		// magnitude is a floor of the true one. A negative value is clamped rather
+		// than reported as a positive number the stream does not contain.
 		if negative {
 			v = math.MinInt64
 		}
