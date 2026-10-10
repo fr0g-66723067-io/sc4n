@@ -7,7 +7,7 @@
 #
 #   - a SIMD byte-class histogram (goexperiment.simd, simd/archsimd). Evaluated,
 #     dropped and then deleted: no detector reads a byte-class histogram (the entropy
-#     pass over the same bytes is bytescan.Entropy, 1.1-1.2 GB/s), the kernel itself
+#     pass over the same bytes is bytescan.Entropy, 1.0-1.2 GB/s), the kernel itself
 #     measured 0.10 GB/s on tensor-body bytes, and the string engine's real bottleneck
 #     is the Aho-Corasick walk's dependent load chain, which a histogram kernel does
 #     not touch. Measured numbers are in docs/architecture.md.
