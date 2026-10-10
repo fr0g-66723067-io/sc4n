@@ -337,6 +337,7 @@ func (w *walker) bin(n int) error {
 	if n < 0 || n > len(w.data)-w.idx {
 		return errTruncated
 	}
+	start := w.idx
 	body := w.data[w.idx : w.idx+n]
 	w.idx += n
 	if !w.emitting() {
@@ -346,7 +347,7 @@ func (w *walker) bin(n int) error {
 	if int64(len(body)) > cap {
 		limits.Emit(w.ctx.Sink, limits.RuleString, "MaxStringBlob", int64(len(body)), cap, "msgpack blob")
 	}
-	w.nanRuns(body)
+	w.nanRuns(start, body)
 	// Route a blob that begins with a native magic or a pickle protocol byte to
 	// the normal member machinery; the member's own parser validates the header,
 	// so a bare magic without a valid executable is not reported as one. Only the
@@ -418,11 +419,14 @@ func (w *walker) maxBlob() int64 {
 	return limits.Default().MaxStringBlob
 }
 
-// nanRuns reports a run of NaN-shaped byte pairs in a blob. A double NaN has
-// 0x7ff8 or 0xfff8 in its exponent/top-mantissa bytes, so the two-byte prefix
-// 0x7f 0xf8 / 0xff 0xf8 can recur at stride two once per value; four consecutive
-// pairs is a run, not a single accidental NaN.
-func (w *walker) nanRuns(b []byte) {
+// nanRuns reports a run of NaN-shaped byte pairs in the blob that begins at base.
+// A double NaN has 0x7ff8 or 0xfff8 in its exponent/top-mantissa bytes, so the
+// two-byte prefix 0x7f 0xf8 / 0xff 0xf8 can recur at stride two once per value;
+// four consecutive pairs is a run, not a single accidental NaN. base is the
+// blob's offset in the artifact: every other finding this walker emits carries an
+// absolute offset, and a blob-relative one pointed the reader at the container
+// header instead of the payload.
+func (w *walker) nanRuns(base int, b []byte) {
 	pair := func(i int) bool {
 		return i+1 < len(b) && (b[i] == 0x7f || b[i] == 0xff) && b[i+1] == 0xf8
 	}
@@ -438,7 +442,7 @@ func (w *walker) nanRuns(b []byte) {
 			j += 2
 		}
 		if n >= 4 {
-			w.ctx.Sink.EmitExtra(RuleNaNPayload, int64(i),
+			w.ctx.Sink.EmitExtra(RuleNaNPayload, int64(base+i),
 				strconv.Itoa(n)+" NaN-shaped byte pairs at stride two in a MessagePack blob",
 				map[string]string{"pairs": strconv.Itoa(n)})
 			return

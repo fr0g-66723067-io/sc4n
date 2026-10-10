@@ -100,9 +100,18 @@ func TestParseMsgpackNestedPickle(t *testing.T) {
 
 func TestParseMsgpackNaNRuns(t *testing.T) {
 	blob := bytes.Repeat([]byte{0x7f, 0xf8}, 6)
-	fs := parse(t, mmap(mstr("w"), mbin(blob)))
+	doc := mmap(mstr("w"), mbin(blob))
+	fs := parse(t, doc)
 	if !ids(fs)["SC4N-MSGPACK-NAN-PAYLOAD"] {
 		t.Fatalf("expected SC4N-MSGPACK-NAN-PAYLOAD, got %v", ids(fs))
+	}
+	// The finding must name the payload's offset in the artifact, not the
+	// container header: every other finding this walker emits is absolute.
+	wantOff := int64(bytes.Index(doc, blob))
+	for _, f := range fs {
+		if f.RuleID == "SC4N-MSGPACK-NAN-PAYLOAD" && f.Offset != wantOff {
+			t.Fatalf("NAN-PAYLOAD offset = %d, want %d (the blob starts there)", f.Offset, wantOff)
+		}
 	}
 }
 
