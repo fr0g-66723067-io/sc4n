@@ -74,6 +74,12 @@ type Config struct {
 	Timeout time.Duration
 	// MaxFindings is the finding cap; zero means the limits default.
 	MaxFindings int
+	// Collector, when non-nil, receives every finding instead of a fresh
+	// collector. It exists for the hf-cache expander, which runs *before* the
+	// walk and has its own structural findings (a symlink that escapes the
+	// cache, a referenced blob that is missing) to report into the same document
+	// as the artifacts it yields.
+	Collector *report.Collector
 }
 
 // Result is the outcome of a scan.
@@ -118,7 +124,10 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		maxFindings = l.MaxFindings
 	}
 
-	collector := report.NewCollector(maxFindings)
+	collector := cfg.Collector
+	if collector == nil {
+		collector = report.NewCollector(maxFindings)
+	}
 	sess := artifact.NewSession(collector, cfg.Root, l)
 	sess.DeepStats = cfg.DeepStats
 

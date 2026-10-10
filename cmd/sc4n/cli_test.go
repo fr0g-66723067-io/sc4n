@@ -265,3 +265,91 @@ func TestBaselineGate(t *testing.T) {
 		t.Fatalf("unreadable baseline exited %d, want %d", code, exitUsage)
 	}
 }
+
+// TestHFCacheScansEachBlobOnce builds a synthetic Hugging Face cache in a temp
+// directory: two revisions whose snapshot entries are relative symlinks into
+// blobs/, one of which is a malicious pickle. It asserts that the cache is
+// scanned, that the malicious blob is reported under its snapshot path, and that
+// the second revision pointing at the same blob does not produce a second scan.
+func TestHFCacheScansEachBlobOnce(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "models--acme--tiny")
+	const (
+		revA = "0123456789abcdef0123456789abcdef01234567"
+		revB = "89abcdef0123456789abcdef0123456789abcdef"
+	)
+	for _, p := range []string{
+		filepath.Join(repo, "blobs"),
+		filepath.Join(repo, "refs"),
+		filepath.Join(repo, "snapshots", revA),
+		filepath.Join(repo, "snapshots", revB),
+	} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A pickle whose REDUCE calls os.system, built here rather than read from the
+	// fixture corpus so the test owns its input.
+	evil := []byte{0x80, 0x04, 0x95, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		'c', 'o', 's', '\n', 's', 'y', 's', 't', 'e', 'm', '\n',
+		'\x8c', 0x02, 'i', 'd',
+		'R', '.', 0x94}
+	blob := filepath.Join(repo, "blobs", "aaaa1111")
+	if err := os.WriteFile(blob, evil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, rev := range []string{revA, revB} {
+		link := filepath.Join(repo, "snapshots", rev, "model.pkl")
+		if err := os.Symlink(filepath.Join("..", "..", "blobs", "aaaa1111"), link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "refs", "main"), []byte(revA), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"scan", "-hf-cache", "-hf-cache-dir", dir, "-format", "json"}, &out, &errOut)
+	if code != exitFindings {
+		t.Fatalf("exit %d, want %d (stderr: %s)", code, exitFindings, errOut.String())
+	}
+	var doc struct {
+		Artifacts []struct {
+			Path string `json:"path"`
+		} `json:"artifacts"`
+		Findings []struct {
+			RuleID string `json:"ruleId"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out.String())
+	}
+	if len(doc.Artifacts) != 1 {
+		t.Fatalf("scanned %d artifacts, want 1 (the two revisions share one blob): %+v", len(doc.Artifacts), doc.Artifacts)
+	}
+	if !strings.Contains(doc.Artifacts[0].Path, "snapshots/") {
+		t.Fatalf("artifact is not named by its snapshot path: %q", doc.Artifacts[0].Path)
+	}
+	found := false
+	for _, f := range doc.Findings {
+		if f.RuleID == "SC4N-PICKLE-GLOBAL-CRITICAL" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the malicious blob was not reported: %+v", doc.Findings)
+	}
+
+	// -hf-cache names its own scope; a path argument as well is a usage error.
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"scan", "-hf-cache", "-hf-cache-dir", dir, "."}, &out, &errOut); code != exitUsage {
+		t.Fatalf("-hf-cache with a path argument exited %d, want %d", code, exitUsage)
+	}
+	// A directory with no blobs is not a silent clean run.
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"scan", "-hf-cache", "-hf-cache-dir", t.TempDir()}, &out, &errOut); code != exitUnreadable {
+		t.Fatalf("empty cache exited %d, want %d", code, exitUnreadable)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fr0g-66723067-io/sc4n/internal/hfcache"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/policy"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
@@ -32,6 +33,8 @@ type scanFlags struct {
 	stdin       bool
 	name        string
 	baseline    string
+	hfCache     bool
+	hfCacheDir  string
 	deepStats   bool
 	timings     bool
 	quiet       bool
@@ -55,6 +58,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.DurationVar(&f.timeout, "timeout", 0, "bound the whole scan (e.g. 10m; 0 = unbounded)")
 	fs.StringVar(&f.root, "root", "", "containment root for path-shaped values")
 	fs.StringVar(&f.baseline, "baseline", "", "suppress findings already present in a previous JSON report")
+	fs.BoolVar(&f.hfCache, "hf-cache", false, "scan a Hugging Face download cache instead of paths")
+	fs.StringVar(&f.hfCacheDir, "hf-cache-dir", "", "cache root for -hf-cache (default $HF_HOME/hub or ~/.cache/huggingface/hub)")
 	fs.BoolVar(&f.stdin, "stdin", false, "scan one artifact from stdin")
 	fs.StringVar(&f.name, "name", "", "artifact name to use with -stdin")
 	fs.BoolVar(&f.deepStats, "deep-stats", false, "enable informational weight-statistics findings")
@@ -67,13 +72,25 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	}
 	paths := fs.Args()
 
-	if f.stdin {
+	switch {
+	case f.stdin:
 		if f.name == "" {
 			fmt.Fprintln(stderr, "sc4n: -stdin requires -name")
 			return exitUsage
 		}
-	} else if len(paths) == 0 {
-		fmt.Fprintln(stderr, "sc4n: scan needs at least one path (or -stdin -name NAME)")
+		if f.hfCache {
+			fmt.Fprintln(stderr, "sc4n: -stdin and -hf-cache are mutually exclusive")
+			return exitUsage
+		}
+	case f.hfCache:
+		// -hf-cache names its own scope; a path argument as well would make the
+		// report's scope ambiguous, which is the one thing a scanner must not be.
+		if len(paths) > 0 {
+			fmt.Fprintln(stderr, "sc4n: -hf-cache takes no path arguments (use -hf-cache-dir to point it at a cache)")
+			return exitUsage
+		}
+	case len(paths) == 0:
+		fmt.Fprintln(stderr, "sc4n: scan needs at least one path (or -stdin -name NAME, or -hf-cache)")
 		return exitUsage
 	}
 	if _, err := report.ParseSeverity(f.failOn); err != nil {
@@ -103,10 +120,35 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		Timeout:     f.timeout,
 		MaxFindings: f.maxFindings,
 	}
-	if f.stdin {
+	switch {
+	case f.stdin:
 		cfg.StdinName = f.name
 		cfg.Stdin = os.Stdin
 		cfg.Paths = nil
+	case f.hfCache:
+		dir := f.hfCacheDir
+		if dir == "" {
+			dir = hfcache.DefaultDir()
+		}
+		// The expander runs before the walk and reports its own structural
+		// findings (an escaping symlink, a missing blob), so it needs the
+		// collector the report will be built from.
+		collector := report.NewCollector(f.maxFindings)
+		entries, err := hfcache.Expand(dir, collector.For("hf-cache"))
+		if err != nil {
+			fmt.Fprintf(stderr, "sc4n: -hf-cache: %v\n", err)
+			return exitUnreadable
+		}
+		if len(entries) == 0 {
+			fmt.Fprintf(stderr, "sc4n: -hf-cache: %s holds no blobs\n", dir)
+			return exitUnreadable
+		}
+		cfg.Paths = nil
+		cfg.Collector = collector
+		cfg.Entries = make([]scan.Entry, 0, len(entries))
+		for _, e := range entries {
+			cfg.Entries = append(cfg.Entries, scan.Entry{Path: e.Path, Display: e.Display, Digest: e.Digest})
+		}
 	}
 
 	res, runErr := scan.Run(context.Background(), cfg)
