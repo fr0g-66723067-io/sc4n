@@ -54,6 +54,29 @@ func init() {
 					Notes: "A right-to-left override around reversed text: the character rewrites the " +
 						"reading order, which is never accidental (Trojan Source).",
 				},
+				"obfuscation_url/README.md": {
+					Forbid: []string{"SC4N-STRING-OBFUSCATION"},
+					Notes: "A card whose prose carries a repository path fragment and whose usage snippet " +
+						"says model.eval(). The path is not a quoted literal and is not the argument of " +
+						"a decoder, so the pairing the rule is about does not exist: this is the shape " +
+						"behind 224 of the campaign's 260 findings.",
+				},
+				"obfuscation_b64/README.md": {
+					Expect: []string{"SC4N-STRING-OBFUSCATION"},
+					Notes: "The positive control: a quoted base64 literal inside base64.b64decode(...). " +
+						"Both halves are present and adjacent, which is the second-stage shape.",
+				},
+				"obfuscation_hex/README.md": {
+					Expect: []string{"SC4N-STRING-OBFUSCATION"},
+					Notes: "A quoted 66-character hex literal inside binascii.unhexlify(...): the same " +
+						"shape with the other encoding.",
+				},
+				"obfuscation_far/README.md": {
+					Forbid: []string{"SC4N-STRING-OBFUSCATION"},
+					Notes: "A quoted base64 literal and a decoder call separated by a paragraph of prose: " +
+						"the decoder is not reading this literal, and a decoder anywhere in the buffer " +
+						"used to corroborate every long run in it.",
+				},
 				"jinja_ssti.jinja": {
 					Expect: []string{"SC4N-JINJA-PY-OBJECT", "SC4N-JINJA-DANGEROUS-GLOBAL", "SC4N-JINJA-INCLUDE",
 						"SC4N-JINJA-RAW", "SC4N-JINJA-DYNAMIC-NAME", "SC4N-TEMPLATE-INJECTION"},
@@ -156,6 +179,47 @@ func jinjaFixtures(f *fixtureSet) {
 	// override rewrites the reading order.
 	f.addText("card_zwsp/README.md", "# Card\n\nFields: text\u200b, label.\n")
 	f.addText("card_bidi/README.md", "# Card\n\nDescription: \u202eemit elpmis\u202c\n")
+
+	// --- the obfuscation rule needs a real literal, next to a real decoder -------
+	// A card's URL fragment and its usage snippet are not an obfuscation chain:
+	// the rule pairs a literal with the decoder that reads it, and 224 of the
+	// campaign's 260 findings were exactly this shape.
+	f.addText("obfuscation_url/README.md",
+		"# FlagEmbedding\n\n"+
+			"Fine-tuning examples live at "+
+			"com/FlagOpen/FlagEmbedding/tree/master/examples/finetune in the repository.\n\n"+
+			"## Usage\n\n"+
+			"```python\n"+
+			"from transformers import AutoModel\n"+
+			"model = AutoModel.from_pretrained('BAAI/bge-base-en-v1.5')\n"+
+			"model.eval()\n"+
+			"```\n")
+	f.addText("obfuscation_b64/README.md",
+		"# Payload\n\n"+
+			"```python\n"+
+			"payload = base64.b64decode(\"aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3QgcGF5bG9hZCE=\")\n"+
+			"```\n")
+	f.addText("obfuscation_hex/README.md",
+		"# Payload\n\n"+
+			"```python\n"+
+			"blob = binascii.unhexlify(\"48656c6c6f20776f726c64207468697320697320612074657374207061796c6f616421\")\n"+
+			"```\n")
+	f.addText("obfuscation_far/README.md",
+		"# Payload\n\n"+
+			"```python\n"+
+			"payload = \"aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3QgcGF5bG9hZCE=\"\n"+
+			"```\n\n"+
+			"## Notes\n\n"+
+			"The blob above is a sample. The decoding helper is described below, with enough\n"+
+			"prose between the literal and the call that they are not one statement any more:\n"+
+			"the rule pairs a literal with the decoder that reads it, and a decoder four\n"+
+			"hundred bytes away is not reading this one. Padding prose keeps the two apart\n"+
+			"so the fixture measures the pairing rather than the literal.\n\n"+
+			"```python\n"+
+			"import base64\n"+
+			"def decode(blob):\n"+
+			"    return base64.b64decode(blob)\n"+
+			"```\n")
 
 	f.addText("jinja_ssti.jinja",
 		"{{ ''.__class__.__mro__[1].__subclasses__() }}\n"+

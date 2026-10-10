@@ -120,6 +120,32 @@ func TestObfuscationNeedsBothHalves(t *testing.T) {
 			t.Fatalf("a short literal was reported as obfuscation: %+v", h)
 		}
 	}
+	// The literal must be the decoder's argument. A path in prose is not one,
+	// which is the shape behind 224 of the campaign's 260 findings: the card's
+	// own usage snippet corroborated a URL fragment.
+	url := "Fine-tuning examples live at com/FlagOpen/FlagEmbedding/tree/master/examples/finetune here.\n" +
+		"model.eval()\n"
+	for _, h := range hitsFor(t, url) {
+		if h.Rule.ID == "SC4N-STRING-OBFUSCATION" {
+			t.Fatalf("a path in prose was reported as obfuscation: %+v", h)
+		}
+	}
+	// Nor may a decoder anywhere in the buffer corroborate a run: the pairing is
+	// the same statement, not the same file.
+	far := "payload = \"" + blob + "\"\n" + strings.Repeat("filler prose. ", 40) +
+		"\nimport base64\nbase64.b64decode(blob)\n"
+	for _, h := range hitsFor(t, far) {
+		if h.Rule.ID == "SC4N-STRING-OBFUSCATION" {
+			t.Fatalf("a decoder far from the literal corroborated it: %+v", h)
+		}
+	}
+	// A run that is not an encoding at all is not a literal either: this id is
+	// 49 characters, so it cannot be base64.
+	for _, h := range hitsFor(t, "see 'mteb/sprintduplicatequestions-pairclassification' then base64.b64decode('x')") {
+		if h.Rule.ID == "SC4N-STRING-OBFUSCATION" {
+			t.Fatalf("a dataset id was reported as obfuscation: %+v", h)
+		}
+	}
 }
 
 func TestSecretValueIsRedacted(t *testing.T) {

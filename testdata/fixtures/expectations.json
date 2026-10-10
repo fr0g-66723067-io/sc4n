@@ -431,6 +431,32 @@
       ],
       "notes": "A correct 2-element array with an undeclared tail: the format has no field for it, so it is a polyglot/steganography shape."
     },
+    "obfuscation_b64/README.md": {
+      "expect": [
+        "SC4N-STRING-OBFUSCATION"
+      ],
+      "notes": "The positive control: a quoted base64 literal inside base64.b64decode(...). Both halves are present and adjacent, which is the second-stage shape."
+    },
+    "obfuscation_far/README.md": {
+      "expect": null,
+      "forbid": [
+        "SC4N-STRING-OBFUSCATION"
+      ],
+      "notes": "A quoted base64 literal and a decoder call separated by a paragraph of prose: the decoder is not reading this literal, and a decoder anywhere in the buffer used to corroborate every long run in it."
+    },
+    "obfuscation_hex/README.md": {
+      "expect": [
+        "SC4N-STRING-OBFUSCATION"
+      ],
+      "notes": "A quoted 66-character hex literal inside binascii.unhexlify(...): the same shape with the other encoding."
+    },
+    "obfuscation_url/README.md": {
+      "expect": null,
+      "forbid": [
+        "SC4N-STRING-OBFUSCATION"
+      ],
+      "notes": "A card whose prose carries a repository path fragment and whose usage snippet says model.eval(). The path is not a quoted literal and is not the argument of a decoder, so the pairing the rule is about does not exist: this is the shape behind 224 of the campaign's 260 findings."
+    },
     "onnx_absolute_external.onnx": {
       "expect": [
         "SC4N-ONNX-EXTERNAL-TRAVERSAL"

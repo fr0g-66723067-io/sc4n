@@ -2,6 +2,8 @@ package stringscan
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -392,26 +394,46 @@ func EmitUse(sink *report.Sink, off int64, text, callable string) {
 		map[string]string{"kind": kind, "length": strconv.Itoa(run), "callable": callable})
 }
 
-// scanOpaqueLiterals reports a long opaque literal in the same buffer as a decoder
-// call.
+// opaqueDecoderWindow is how far a decoder call may sit from a literal for the
+// pairing to count: the same statement, or the line next to it. A decoder
+// anywhere in the buffer used to corroborate every long run in it, which is how a
+// model card's URL fragment became "an opaque literal passed to a decoder"
+// because the card's own usage snippet says model.eval().
+const opaqueDecoderWindow = 200
+
+// scanOpaqueLiterals reports a long opaque literal that a decoder call reads.
 //
 // The pairing is the point: a 64-character base64 string is a checksum, a git blob
 // id, a token or a payload, and the only thing that separates the last of those
-// from the others is whether something in the same string decodes it.
+// from the others is whether something decodes it. Four conditions, each with its
+// own reason, all needed:
+//
+//   - the run is long enough (minOpaqueRun) that it is not a hash or an id;
+//   - it is a *quoted* string literal, because the rule is about the argument a
+//     decoder reads — a path or a dataset id in prose is not an argument;
+//   - it is a real encoding (validOpaqueRun);
+//   - the decoder is next to it (decoderWithin), because a decoder anywhere in
+//     the buffer used to corroborate every long run in it.
+//
+// The last two and the first are what the 273-model HF campaign's 224 false
+// positives needed: a card's "com/FlagOpen/FlagEmbedding/tree/master/examples/
+// finetune" was corroborated by the card's own usage snippet, and a dataset id
+// like "mteb/sprintduplicatequestions-pairclassification" is not base64 at all.
 func scanOpaqueLiterals(b []byte, hits []Hit) []Hit {
-	hasDecoder := false
+	var decoders []int64
 	for _, h := range hits {
 		if h.Extra["kind"] == "decoder" {
-			hasDecoder = true
-			break
+			decoders = append(decoders, h.Off)
 		}
 	}
-	if !hasDecoder {
+	if len(decoders) == 0 {
 		return hits
 	}
 	kind, start, run := classifyRun(b, 0)
 	for start < len(b) {
-		if run >= minOpaqueRun {
+		if run >= minOpaqueRun && quotedAt(b, start, run) &&
+			validOpaqueRun(kind, b[start:start+run]) &&
+			decoderWithin(decoders, int64(start), int64(run)) {
 			hits = append(hits, Hit{
 				Rule:  ruleObfuscation,
 				Off:   int64(start),
@@ -429,6 +451,69 @@ func scanOpaqueLiterals(b []byte, hits []Hit) []Hit {
 		kind, start, run = classifyRun(b, start)
 	}
 	return hits
+}
+
+// quotedAt reports whether the run is a quoted string literal: a quote
+// immediately before it and the same quote immediately after it. The rule is
+// about the argument a decoder reads, and in every real encoding — Python source,
+// JSON, YAML, TOML — that argument is a quoted string. Prose that mentions a path
+// is not one, which is the difference between a payload and a README's URL.
+func quotedAt(b []byte, start, run int) bool {
+	if start == 0 || start+run >= len(b) {
+		return false
+	}
+	q := b[start-1]
+	if q != '"' && q != '\'' {
+		return false
+	}
+	return b[start+run] == q
+}
+
+// decoderWithin reports whether a decoder hit sits within opaqueDecoderWindow
+// bytes of the run, counting a hit inside the run as adjacent.
+func decoderWithin(offs []int64, start, run int64) bool {
+	for _, o := range offs {
+		if o >= start && o < start+run {
+			return true
+		}
+		d := start - o
+		if o >= start+run {
+			d = o - (start + run)
+		}
+		if d <= opaqueDecoderWindow {
+			return true
+		}
+	}
+	return false
+}
+
+// validOpaqueRun reports whether a run is an actual base64 or hex literal rather
+// than an identifier, a URL path or a dataset id that happens to be 48 characters
+// long. A model card's "com/FlagOpen/FlagEmbedding/tree/master/examples/finetune"
+// and a dataset id like "mteb/sprintduplicatequestions-pairclassification" are the
+// two shapes that made 224 of the campaign's 260 findings: the second cannot be
+// base64 at all (a 4n+1 length is not decodable), and the first is only decodable
+// as text, which is what the decode-to-at-least-24-bytes test checks.
+func validOpaqueRun(kind string, run []byte) bool {
+	switch kind {
+	case "hex":
+		if len(run)%2 != 0 {
+			return false
+		}
+		_, err := hex.DecodeString(string(run))
+		return err == nil
+	case "base64":
+		s := strings.TrimRight(string(run), "=")
+		if len(s)%4 == 1 {
+			return false
+		}
+		if dec, err := base64.RawStdEncoding.DecodeString(s); err == nil && len(dec) >= 24 {
+			return true
+		}
+		dec, err := base64.RawURLEncoding.DecodeString(s)
+		return err == nil && len(dec) >= 24
+	}
+	return false
 }
 
 // classifyRun returns the class of the run of opaque characters starting at from,
