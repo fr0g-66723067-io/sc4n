@@ -1,0 +1,11 @@
+{{- if .Messages }}
+{{- range .Messages }}
+{{- if eq .Role "user" }}
+{{- range .Content }}
+{{- if .ImageURL }}{{ .ImageURL }}{{- else }}{{ .Text }}{{- end }}
+{{- end }}
+{{- else }}
+{{- range $i, $_ := .Content }}{{ .Text }}{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

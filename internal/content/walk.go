@@ -105,13 +105,20 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	case isJinjaName(base):
 		return artifact.FormatJinja, true
 	}
-	if looksLikeJinjaHead(head) {
+	// A Go text/template is not Jinja. Both tests below accept "{{", which a Go
+	// template is made of, and the analyser then reads Go's action keywords as
+	// Jinja: `{{- range .Tools }}` was reported as `range` used as the receiver of
+	// attribute access (SC4N-JINJA-DANGEROUS-GLOBAL, high) on unsloth's
+	// Qwen3-Coder template. The name test above still wins for a file called
+	// *.tmpl/*.jinja, exactly as sniffTemplate documents.
+	goTmpl := looksLikeGoTemplate(head)
+	if !goTmpl && looksLikeJinjaHead(head) {
 		return artifact.FormatJinja, true
 	}
 	if looksLikeJSON(head) {
 		return artifact.FormatJSON, true
 	}
-	if looksLikeJinja(head) {
+	if !goTmpl && looksLikeJinja(head) {
 		return artifact.FormatJinja, true
 	}
 	// Not specific: return false so the built-in classifier records FormatText.
@@ -355,6 +362,78 @@ func looksLikeJinja(b []byte) bool {
 	return bytes.Contains(b, []byte("{{")) ||
 		bytes.Contains(b, []byte("{%")) ||
 		bytes.Contains(b, []byte("{#"))
+}
+
+// goTemplateKeywords are the action keywords Go's text/template uses inside
+// {{ }}.
+var goTemplateKeywords = []string{"range", "if", "else", "end", "with", "template",
+	"define", "block", "break", "continue", "nil"}
+
+// goOperandKeywords are the keywords that take an operand: `{{ range .Tools }}` is
+// Go, `{{ range(3) }}` is a Jinja call to the range builtin.
+var goOperandKeywords = []string{"range", "if", "with"}
+
+// looksLikeGoTemplate reports whether head is a Go text/template document: it
+// contains a {{ ... }} action whose body starts with a Go keyword or with a
+// leading-dot/$ operand, and it contains no {% or {# delimiter (which only Jinja2
+// uses).
+//
+// It exists because Jinja2 and Go's text/template share "{{ }}": a Go template
+// reached internal/jinja and was analysed as Jinja, so `{{- range .Tools }}` — an
+// action keyword followed by a field reference — was reported as the Jinja global
+// `range` receiving an attribute walk. The name test still wins for a file called
+// *.tmpl/*.jinja.
+func looksLikeGoTemplate(head []byte) bool {
+	if bytes.Contains(head, []byte("{%")) || bytes.Contains(head, []byte("{#")) {
+		return false
+	}
+	for i := 0; i < len(head); {
+		j := bytes.Index(head[i:], []byte("{{"))
+		if j < 0 {
+			return false
+		}
+		rest := head[i+j+2:]
+		k := bytes.Index(rest, []byte("}}"))
+		if k < 0 {
+			return false
+		}
+		if goTemplateAction(bytes.TrimSpace(rest[:k])) {
+			return true
+		}
+		i += j + 2 + k + 2
+	}
+	return false
+}
+
+// goTemplateAction reports whether one action body is Go rather than Jinja2.
+func goTemplateAction(body []byte) bool {
+	body = bytes.TrimSpace(bytes.Trim(bytes.TrimSpace(body), "-"))
+	if len(body) == 0 {
+		return false
+	}
+	if body[0] == '$' || (body[0] == '.' && len(body) > 1 && isIdentByte(body[1])) {
+		return true
+	}
+	word, operand := body, []byte(nil)
+	if k := bytes.IndexAny(body, " \t\n"); k >= 0 {
+		word, operand = body[:k], bytes.TrimSpace(body[k+1:])
+	}
+	for _, kw := range goOperandKeywords {
+		if string(word) == kw {
+			return len(operand) > 0
+		}
+	}
+	for _, kw := range goTemplateKeywords {
+		if string(word) == kw {
+			return true
+		}
+	}
+	return false
+}
+
+// isIdentByte reports whether c can start a Go template field or variable name.
+func isIdentByte(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'
 }
 
 // baseName is the final path element of a display name, after any archive-member

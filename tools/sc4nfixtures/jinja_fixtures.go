@@ -83,6 +83,29 @@ func init() {
 					Notes: "A quoted 66-character hex literal inside binascii.unhexlify(...): the same " +
 						"shape with the other encoding.",
 				},
+				"go_template_no_ext": {
+					Forbid: []string{"SC4N-JINJA-DANGEROUS-GLOBAL", "SC4N-JINJA-PY-OBJECT", "SC4N-FORMAT-EXTENSION-MISMATCH"},
+					Notes: "A Go text/template with no extension, in the shape unsloth's Qwen3-Coder " +
+						"template ships: {{- range .Tools }}, {{- range $i, $_ := .Messages }}, {{ end }}. " +
+						"Go's text/template shares Jinja2's {{ }} delimiters, so the content test read the " +
+						"action keyword `range` as the Jinja global and reported a DANGEROUS-GLOBAL " +
+						"(high) twice. The file is text, and nothing in it is a Jinja construct.",
+				},
+				"go_template.jinja": {
+					Expect: []string{"SC4N-JINJA-DANGEROUS-GLOBAL"},
+					Notes: "The same bytes under a Jinja name. The name still wins — a file called " +
+						"*.jinja is a template whatever its first lines look like — and the cost of that " +
+						"rule is visible here: the Go template is analysed as Jinja and `range .Messages` " +
+						"is read as a global receiving an attribute walk. The alternative (a content test " +
+						"that overrides the name) is what let a model file with \"{{\" in an early string " +
+						"be analysed as a template and never reach its own parser.",
+				},
+				"jinja_range_call.jinja": {
+					Forbid: []string{"SC4N-JINJA-DANGEROUS-GLOBAL"},
+					Notes: "{{ range(3) }} is a Jinja call to the range builtin, not a Go action: the " +
+						"operand-keyword test requires an operand, so this stays Jinja. It is the boundary " +
+						"of the Go-template discriminator.",
+				},
 				"obfuscation_far/README.md": {
 					Forbid: []string{"SC4N-STRING-OBFUSCATION"},
 					Notes: "A quoted base64 literal and a decoder call separated by a paragraph of prose: " +
@@ -355,4 +378,25 @@ func jinjaFixtures(f *fixtureSet) {
 	// asserts the count is exactly one.
 	f.addText("tokenizer_dedup/tokenizer_config.json",
 		"{\"bos_token\":{\"content\":\"discord.com/api/webhooks/1\"}}\n")
+
+	// --- a Go text/template is not Jinja -----------------------------------------
+	// The unsloth Qwen3-Coder template verbatim in shape: Go's text/template uses
+	// the same {{ }} delimiters as Jinja2, and `{{- range .Tools }}` — an action
+	// keyword followed by a field reference — was read as the Jinja global `range`
+	// receiving an attribute walk, so a Go template was reported
+	// SC4N-JINJA-DANGEROUS-GLOBAL (high) twice.
+	goTemplate := "{{- if .Messages }}\n" +
+		"{{- range .Messages }}\n" +
+		"{{- if eq .Role \"user\" }}\n" +
+		"{{- range .Content }}\n" +
+		"{{- if .ImageURL }}{{ .ImageURL }}{{- else }}{{ .Text }}{{- end }}\n" +
+		"{{- end }}\n" +
+		"{{- else }}\n" +
+		"{{- range $i, $_ := .Content }}{{ .Text }}{{- end }}\n" +
+		"{{- end }}\n" +
+		"{{- end }}\n" +
+		"{{- end }}\n"
+	f.addText("go_template_no_ext", goTemplate)
+	f.addText("go_template.jinja", goTemplate)
+	f.addText("jinja_range_call.jinja", "{{ range(3) }}{{ i }}{% endfor %}\n")
 }

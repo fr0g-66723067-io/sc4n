@@ -378,3 +378,37 @@ func TestLeadingJinjaDelimiterBeatsTheJSONGuess(t *testing.T) {
 		t.Errorf("a JSON document containing {{ was misrouted; findings=%v", ids(fs))
 	}
 }
+
+// TestGoTemplateIsNotJinja is the regression for the shared delimiters: Go's
+// text/template uses {{ }} like Jinja2, so a Go template reached internal/jinja
+// and `{{- range .Tools }}` was read as the Jinja global `range` receiving an
+// attribute walk (SC4N-JINJA-DANGEROUS-GLOBAL, high) — the unsloth Qwen3-Coder
+// template. The discriminator is the action body: a Go keyword with an operand,
+// or a leading-dot/$ operand.
+func TestGoTemplateIsNotJinja(t *testing.T) {
+	l := limits.Default()
+	goTmpl := "{{- if .Messages }}\n{{- range .Messages }}\n{{ .Role }}\n{{- end }}\n{{- end }}\n"
+	if fs := scanBytes(t, "template", []byte(goTmpl), l); ids(fs)["SC4N-JINJA-DANGEROUS-GLOBAL"] {
+		t.Errorf("a Go template was analysed as Jinja; findings=%v", ids(fs))
+	}
+
+	// Jinja's own shapes must keep their routing: a call to the range builtin has
+	// no operand, and a control block uses {% %}, which Go never emits.
+	for _, body := range []string{
+		"{{ range(3) }}{{ i }}{% endfor %}",
+		"{{ cycler.next }}",
+		"{% for m in messages %}{{ m['role'] }}{% endfor %}",
+	} {
+		if !looksLikeJinjaHead([]byte(body)) && !looksLikeJinja([]byte(body)) {
+			t.Errorf("%q is not recognised as Jinja at all", body)
+		}
+		if looksLikeGoTemplate([]byte(body)) {
+			t.Errorf("%q was classified as a Go template", body)
+		}
+	}
+	// The name still wins: a Go template saved as *.jinja is analysed as Jinja,
+	// which is the documented trade-off (see sniffTemplate).
+	if !looksLikeGoTemplate([]byte(goTmpl)) {
+		t.Error("the Go template was not recognised by the content test")
+	}
+}

@@ -275,6 +275,21 @@
       ],
       "notes": "Well-formed GGUF followed by 512 undeclared bytes that are not an executable. The trailing bytes are invisible to the GGUF reader and are where a second artifact can be smuggled."
     },
+    "go_template.jinja": {
+      "expect": [
+        "SC4N-JINJA-DANGEROUS-GLOBAL"
+      ],
+      "notes": "The same bytes under a Jinja name. The name still wins — a file called *.jinja is a template whatever its first lines look like — and the cost of that rule is visible here: the Go template is analysed as Jinja and `range .Messages` is read as a global receiving an attribute walk. The alternative (a content test that overrides the name) is what let a model file with \"{{\" in an early string be analysed as a template and never reach its own parser."
+    },
+    "go_template_no_ext": {
+      "expect": null,
+      "forbid": [
+        "SC4N-JINJA-DANGEROUS-GLOBAL",
+        "SC4N-JINJA-PY-OBJECT",
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A Go text/template with no extension, in the shape unsloth's Qwen3-Coder template ships: {{- range .Tools }}, {{- range $i, $_ := .Messages }}, {{ end }}. Go's text/template shares Jinja2's {{ }} delimiters, so the content test read the action keyword `range` as the Jinja global and reported a DANGEROUS-GLOBAL (high) twice. The file is text, and nothing in it is a Jinja construct."
+    },
     "h5_external_link.h5": {
       "expect": [
         "SC4N-HDF5-EXTERNAL-LINK"
@@ -298,6 +313,13 @@
         "SC4N-FORMAT-EXTENSION-MISMATCH"
       ],
       "notes": "A chat template whose first three lines are a comment pair and an import, the shape that made the Python content heuristic score it as source. The name says template, so the template analyser must run (and the extension must not be reported as contradicting the content)."
+    },
+    "jinja_range_call.jinja": {
+      "expect": null,
+      "forbid": [
+        "SC4N-JINJA-DANGEROUS-GLOBAL"
+      ],
+      "notes": "{{ range(3) }} is a Jinja call to the range builtin, not a Go action: the operand-keyword test requires an operand, so this stays Jinja. It is the boundary of the Go-template discriminator."
     },
     "jinja_ssti.jinja": {
       "expect": [
