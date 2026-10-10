@@ -15,6 +15,10 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	// Blank-imported so every format parser registers itself with
+	// internal/artifact; see internal/formats for why this is explicit.
+	_ "github.com/fr0g-66723067-io/sc4n/internal/formats"
 )
 
 // version is stamped by the build when set with -ldflags, and is otherwise the

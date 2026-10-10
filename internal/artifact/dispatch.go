@@ -26,7 +26,7 @@ import (
 //   - it reports every finding through ctx.Sink, never directly on the Collector,
 //     so the artifact name is always right.
 type Parser interface {
-	Parse(ctx *Ctx) error
+	Parse(ctx *Ctx, s source.Source) error
 }
 
 var (
@@ -177,7 +177,7 @@ func Scan(ctx *Ctx, s source.Source) (Format, error) {
 	if !ok {
 		return f, nil
 	}
-	if err := p.Parse(ctx); err != nil {
+	if err := p.Parse(ctx, s); err != nil {
 		return f, err
 	}
 	return f, nil
@@ -390,13 +390,12 @@ func sniffPickleHeader(s source.Source, l limits.Limits) (Format, bool) {
 	if b[0] == 0x80 && b[1] >= 1 && b[1] <= 5 {
 		return FormatPickle, true
 	}
-	// Protocol 0/1 pickles have no PROTO prefix; the first opcode is one of the
-	// text-mode openers. Require a plausible second byte so that "(" or "c" at
-	// the start of an ordinary file does not classify as a pickle.
-	switch b[0] {
-	case '(', 'c', 'S', 'V', ']', '}', '\x8c':
-		return FormatPickle, true
-	}
+	// Protocol 0/1 pickles have no PROTO prefix, and their first byte is an
+	// ordinary ASCII letter -- 'c' for GLOBAL, '(' for MARK, ']' for EMPTY_LIST.
+	// A file whose first byte is 'c' is far more likely to be source code than a
+	// pickle, so this sniffer deliberately does not claim those: internal/pickle
+	// registers a walk-based sniffer above it that accepts a protocol-0/1 stream
+	// only after decoding it to a clean STOP.
 	return FormatUnknown, false
 }
 
