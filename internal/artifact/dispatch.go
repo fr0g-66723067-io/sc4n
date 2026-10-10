@@ -310,7 +310,7 @@ func init() {
 	RegisterSniffer("text", -100, sniffText)
 
 	RegisterFormat(Info{Format: FormatUnknown, Magic: "(none)", Depth: DepthNone,
-		Notes: "no sniffer matched; the file is scanned for native magic and string indicators only, at depth shallow, and reported with format \"unknown\"."})
+		Notes: "no sniffer matched; the file is reported as \"unknown\" and only the format-independent layers run — native magic, the format-versus-extension check, a shebang, and the name-driven rules for .pth, .start, .pyc and Dockerfile. No parser runs and no string indicators: a file that reaches \"unknown\" had no text sniff, so an indicator inside it is not reported."})
 	RegisterFormat(Info{Format: FormatZip, Magic: "PK\\x03\\x04", Depth: DepthStructural, Container: true,
 		Notes: "stored and deflate members (plus zip64) are read; encrypted entries, CRC mismatches, duplicate names, absolute or traversal paths, link members, local-vs-central name disagreements and bomb ratios are reported; members are never extracted to disk."})
 	RegisterFormat(Info{Format: FormatTar, Magic: "ustar at offset 257", Depth: DepthStructural, Container: true,
