@@ -12,6 +12,9 @@ import (
 // 120 s. The bound is deliberately generous (10 s) so it fails only on a return
 // to quadratic behaviour, not on a slow host.
 func TestDottedChainIsLinear(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector inflates this timing budget; the untagged pass guards it")
+	}
 	data := []byte(strings.Repeat("a.", 200000))
 	ctx, _ := newTestCtx(t)
 	start := time.Now()
@@ -28,6 +31,9 @@ func TestDottedChainIsLinear(t *testing.T) {
 // it either. The bound is generous (10 s) so it fails only on a return to
 // quadratic behaviour, not on a slow host.
 func TestNestedCallsAreBounded(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector inflates this timing budget; the untagged pass guards it")
+	}
 	data := []byte("x = " + strings.Repeat("exec(", 60000) + "1" + strings.Repeat(")", 60000) + "\n")
 	ctx, c := newTestCtx(t)
 	start := time.Now()
