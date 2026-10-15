@@ -116,6 +116,16 @@ func decodeHeader(raw []byte) (*header, []string) {
 	}
 
 	seen := make(map[string]bool)
+	// tensorAt maps a tensor name to its position in h.entries. The reference
+	// loader parses the header object into a map, so a repeated key has exactly
+	// one surviving (last) value and the shadowed entry does not exist for the
+	// loader. Replacing it in place -- rather than appending a second entry --
+	// is what keeps the rest of the walk describing that same file: two entries
+	// under one name made the contiguity pass report the surviving tensor as
+	// overlapping its own shadow, so a single defect produced two findings.
+	// Replacing in place also matches where Python's json puts a rebound key:
+	// the position of the first occurrence, with the last value.
+	tensorAt := make(map[string]int)
 	for dec.More() {
 		keyTok, err := dec.Token()
 		if err != nil {
@@ -127,15 +137,32 @@ func decodeHeader(raw []byte) (*header, []string) {
 			viol = append(viol, "top-level object key is not a string")
 			return h, viol
 		}
-		if seen[key] {
+		dup := seen[key]
+		if dup {
 			viol = append(viol, fmt.Sprintf("duplicate top-level key %q", key))
 		}
 		seen[key] = true
 		keyOff := dec.InputOffset() - int64(len(key))
 		if key == metadataKey {
+			first := len(h.meta)
 			decodeMetadata(dec, h, &viol)
+			if dup {
+				// The last __metadata__ object wins as well, so the entries the
+				// shadowed object contributed are not part of the header the
+				// loader builds and must not be walked as if they were.
+				h.meta = h.meta[first:]
+			}
 		} else {
-			decodeEntry(dec, h, key, keyOff, &viol)
+			e, complete := decodeEntry(dec, key, keyOff, &viol)
+			if !complete {
+				continue
+			}
+			if i, known := tensorAt[key]; known {
+				h.entries[i] = e
+			} else {
+				tensorAt[key] = len(h.entries)
+				h.entries = append(h.entries, e)
+			}
 		}
 	}
 	if _, err := dec.Token(); err != nil {
@@ -200,15 +227,20 @@ func decodeMetadata(dec *json.Decoder, h *header, viol *[]string) {
 	_, _ = dec.Token() // closing '}'
 }
 
-// decodeEntry consumes one tensor entry. Unknown keys inside an entry are
-// recorded because the reference struct has exactly three fields; a fourth key
-// is data the loader would ignore and a reviewer would miss.
-func decodeEntry(dec *json.Decoder, h *header, name string, keyOff int64, viol *[]string) {
+// decodeEntry consumes one tensor entry and returns it. Unknown keys inside an
+// entry are recorded because the reference struct has exactly three fields; a
+// fourth key is data the loader would ignore and a reviewer would miss. The bool
+// reports whether a complete entry was decoded: a value that is not an object
+// yields no entry, and decodeHeader accounts for that when it decides which
+// entry a duplicated name leaves behind. The caller, not this function, places
+// the entry in the header, because a duplicate top-level key replaces the entry
+// the loader shadows instead of adding a second one.
+func decodeEntry(dec *json.Decoder, name string, keyOff int64, viol *[]string) (entry, bool) {
 	e := entry{name: name, off: keyOff, begin: -1, end: -1}
 	tok, err := dec.Token()
 	if err != nil {
 		*viol = append(*viol, fmt.Sprintf("tensor %q entry is malformed: %v", name, err))
-		return
+		return e, false
 	}
 	d, ok := tok.(json.Delim)
 	if !ok || d != '{' {
@@ -216,7 +248,7 @@ func decodeEntry(dec *json.Decoder, h *header, name string, keyOff int64, viol *
 		if ok && d == '[' {
 			skipContainer(dec, d)
 		}
-		return
+		return e, false
 	}
 	var haveDtype, haveShape, haveOffsets bool
 	seen := make(map[string]bool)
@@ -224,7 +256,7 @@ func decodeEntry(dec *json.Decoder, h *header, name string, keyOff int64, viol *
 		kt, err := dec.Token()
 		if err != nil {
 			*viol = append(*viol, fmt.Sprintf("tensor %q entry ended mid-object: %v", name, err))
-			return
+			return e, false
 		}
 		k, ok := kt.(string)
 		if !ok {
@@ -240,7 +272,7 @@ func decodeEntry(dec *json.Decoder, h *header, name string, keyOff int64, viol *
 			vt, err := dec.Token()
 			if err != nil {
 				*viol = append(*viol, fmt.Sprintf("tensor %q entry ended mid-object: %v", name, err))
-				return
+				return e, false
 			}
 			s, ok := vt.(string)
 			if !ok {
@@ -280,7 +312,7 @@ func decodeEntry(dec *json.Decoder, h *header, name string, keyOff int64, viol *
 	if !haveOffsets {
 		*viol = append(*viol, fmt.Sprintf("tensor %q: missing data_offsets", name))
 	}
-	h.entries = append(h.entries, e)
+	return e, true
 }
 
 // decodeIntArray reads one JSON array whose elements MUST all be integers. A

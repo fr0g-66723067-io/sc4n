@@ -1,9 +1,11 @@
 package onnx
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -447,6 +449,70 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
+// TestCustomDomainIsAggregated pins the one-fact-one-finding contract for a
+// non-standard operator domain. An onnxruntime-optimised model puts hundreds of
+// nodes in com.microsoft: reporting each of them separately produced 100
+// findings on one artifact (96 of them the same fact with a different offset),
+// which buries every other finding in the report. The contract is the count:
+// exactly one finding per distinct (domain, kind) pair, carrying the number of
+// uses and the first offset, so a reviewer still sees how much of the graph is
+// affected and can still go and look at it.
+func TestCustomDomainIsAggregated(t *testing.T) {
+	const domain = "com.example"
+	const uses = 5
+	node := tbytes(1, tnode("n", "Fused", domain))
+	var nodes []byte
+	for range uses {
+		nodes = append(nodes, node...)
+	}
+	data := tcat(
+		tv(1, 8),
+		tstr(2, "sc4n-test"),
+		tbytes(8, toptset("", 17)),
+		tbytes(8, toptset(domain, 1)),
+		tbytes(7, tcat(tstr(2, "g"), nodes)),
+	)
+
+	var got []report.Finding
+	for _, f := range parseFindings(t, "agg.onnx", data, "") {
+		if f.RuleID == "SC4N-ONNX-CUSTOM-DOMAIN" {
+			got = append(got, f)
+		}
+	}
+	// uses nodes in one domain plus an opset import of the same domain are two
+	// distinct (domain, kind) pairs, not uses+1 findings.
+	if len(got) != 2 {
+		t.Fatalf("got %d SC4N-ONNX-CUSTOM-DOMAIN findings, want 2 (one per (domain, kind)): %+v", len(got), got)
+	}
+	byKind := map[string]report.Finding{}
+	for _, f := range got {
+		byKind[f.Extra["kind"]] = f
+	}
+	nodeFinding, ok := byKind["node"]
+	if !ok {
+		t.Fatalf("no kind=node aggregate; got %+v", got)
+	}
+	if _, ok := byKind["opset_import"]; !ok {
+		t.Fatalf("no kind=opset_import aggregate; got %+v", got)
+	}
+	if nodeFinding.Extra["domain"] != domain {
+		t.Errorf("node aggregate domain = %q, want %q", nodeFinding.Extra["domain"], domain)
+	}
+	if nodeFinding.Extra["occurrences"] != strconv.Itoa(uses) {
+		t.Errorf("node aggregate occurrences = %q, want %d", nodeFinding.Extra["occurrences"], uses)
+	}
+	if !strings.Contains(nodeFinding.Evidence, strconv.Itoa(uses)+" occurrences reported as one finding") {
+		t.Errorf("node evidence %q does not name the use count", nodeFinding.Evidence)
+	}
+	// The offset is the first use: the domain field of the first node, so the
+	// aggregate points at bytes a reviewer can read rather than at the opset
+	// import or at 0.
+	wantOff := int64(bytes.Index(data, node)) + int64(bytes.Index(node, tstr(7, domain)))
+	if nodeFinding.Offset != wantOff {
+		t.Errorf("node aggregate offset = %d, want %d (the first node's domain field)", nodeFinding.Offset, wantOff)
+	}
+}
+
 // TestStructInvariants covers the structural contradictions the reference loader
 // validates and a scanner/loader disagreement would hide behind.
 func TestStructInvariants(t *testing.T) {
@@ -475,13 +541,15 @@ func TestStructInvariants(t *testing.T) {
 		{
 			name: "negative-dim",
 			data: tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tbytes(5, tcat(
-				tv(2, 1), tbytes(1, tcat(pbLocalVarint(^uint64(0)))), tbytes(9, make([]byte, 4)))))),
+				tv(2, 1), tbytes(1, tcat(pbLocalVarint(^uint64(0)))), tbytes(9, make([]byte, 4)),
+			)))),
 			want: []string{"SC4N-ONNX-STRUCT"},
 		},
 		{
 			name: "undefined-data-type",
 			data: tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tbytes(5, tcat(
-				tv(2, 0), tbytes(1, pbLocalVarint(1)), tbytes(9, make([]byte, 4)))))),
+				tv(2, 0), tbytes(1, pbLocalVarint(1)), tbytes(9, make([]byte, 4)),
+			)))),
 			want: []string{"SC4N-ONNX-STRUCT"},
 		},
 		{
@@ -897,7 +965,8 @@ func FuzzONNX(f *testing.F) {
 	f.Add(tinyModel())
 	f.Add(tcat(tv(1, 8), tstr(2, "p"), tbytes(8, toptset("", 17)), tbytes(7, tstr(2, "g"))))
 	f.Add(tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tbytes(5, tcat(
-		tv(2, 1), tbytes(1, pbLocalVarint(2)), tbytes(9, make([]byte, 8)))))))
+		tv(2, 1), tbytes(1, pbLocalVarint(2)), tbytes(9, make([]byte, 8)),
+	)))))
 	f.Add(tcat(tv(1, 8), tbytes(7, tcat(tstr(2, "g"), tbytes(1, tnode("n", "If", "")),
 		tbytes(5, tcat(tstr(1, "body"), tbytes(6, tstr(2, "sub"))))))))
 	f.Add([]byte{0x0b})

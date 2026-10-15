@@ -357,6 +357,86 @@ func nan32() float32 {
 	return z / z
 }
 
+// countRule counts the findings carrying one rule ID. Several of the contracts
+// below are counts rather than ID sets: a defect that fires one rule twice is
+// invisible to an ID-set check, and the whole point of the duplicate-key case is
+// that one defect must produce one finding.
+func countRule(fs []report.Finding, rule string) int {
+	n := 0
+	for _, f := range fs {
+		if f.RuleID == rule {
+			n++
+		}
+	}
+	return n
+}
+
+// TestDuplicateTopLevelKeyIsOneFinding pins the one-fact-one-finding contract for
+// a duplicated tensor name, which the reference loader accepts: it deserialises
+// the header into a map, so {"a":…,"a":…} yields one tensor holding the last
+// value. The decoder records the duplicate as a structural violation, and the
+// surviving entry is the one the rest of the walk uses. Before this was pinned
+// the decoder kept both entries, so the contiguity pass then reported the
+// surviving tensor as overlapping its own shadow and the same defect produced two
+// findings. The contract is the count, so an ID-set check does not cover it.
+func TestDuplicateTopLevelKeyIsOneFinding(t *testing.T) {
+	f32 := func(offs string) string { return `{"dtype":"F32","shape":[2],"data_offsets":` + offs + `}` }
+
+	// Both entries claim the same 8 bytes but disagree on the shape: the first is
+	// 3 F32 elements (12 bytes, a size mismatch) and the last is 2 (8 bytes, the
+	// truth). Only the last one exists for the loader, so which entry survives is
+	// observable -- keeping the shadowed first one would add a size-mismatch
+	// finding on top of the duplicate-key one.
+	dup := st(`{"a":{"dtype":"F32","shape":[3],"data_offsets":[0,8]},"a":`+f32(`[0,8]`)+`}`, make([]byte, 8))
+	got := scan(t, dup)
+	if n := countRule(got, "SC4N-SAFETENSORS-STRUCT"); n != 1 {
+		t.Fatalf("duplicate top-level key produced %d SC4N-SAFETENSORS-STRUCT findings, want exactly 1: %v",
+			n, evidences(got))
+	}
+	if !evidenceContains(got, "SC4N-SAFETENSORS-STRUCT", `duplicate top-level key "a"`) {
+		t.Fatalf("the single finding is not the duplicate-key one: %v", evidences(got))
+	}
+	// The survivor is the last-wins entry, so its extent is the one that covers
+	// the buffer: no hole (the shadowed entry kept instead), no trailing data.
+	for _, rule := range []string{"SC4N-SAFETENSORS-TRAILING-DATA", "SC4N-SAFETENSORS-TRUNCATED"} {
+		if n := countRule(got, rule); n != 0 {
+			t.Errorf("%s fired %d time(s) on the duplicate-key file: %v", rule, n, evidences(got))
+		}
+	}
+
+	// A repeated __metadata__ object obeys the same rule: the header the loader
+	// builds has the last one only, so the shadowed values must not be walked as
+	// if the loader would read them.
+	h, _ := decodeHeader([]byte(`{"__metadata__":{"k":"shadowed"},"__metadata__":{"k":"kept"},"a":` + f32(`[0,8]`) + `}`))
+	if len(h.meta) != 1 || h.meta[0].value != "kept" {
+		t.Errorf("duplicate __metadata__ left %d entries (%+v), want only the last", len(h.meta), h.meta)
+	}
+
+	// Control: two genuinely different tensors whose spans overlap still both
+	// exist for the loader, so the overlap must still be reported -- the fix must
+	// not have collapsed distinct tensors.
+	overlap := st(`{"a":`+f32(`[0,8]`)+`,"b":`+f32(`[4,12]`)+`}`, make([]byte, 12))
+	gotOverlap := scan(t, overlap)
+	if n := countRule(gotOverlap, "SC4N-SAFETENSORS-STRUCT"); n != 1 {
+		t.Fatalf("distinct overlapping tensors produced %d SC4N-SAFETENSORS-STRUCT findings, want 1: %v",
+			n, evidences(gotOverlap))
+	}
+	if !evidenceContains(gotOverlap, "SC4N-SAFETENSORS-STRUCT", "overlapping the previous tensor") {
+		t.Fatalf("the overlap finding is missing: %v", evidences(gotOverlap))
+	}
+}
+
+// evidences returns the rule ID and evidence of every finding, for a failure
+// message that says which findings actually fired and not just how many.
+func evidences(fs []report.Finding) []string {
+	out := make([]string, 0, len(fs))
+	for _, f := range fs {
+		out = append(out, f.RuleID+": "+f.Evidence)
+	}
+	return out
+}
+
+// TestDecodeHeaderDuplicateKeys pins the duplicate-key violation itself.
 func TestDecodeHeaderDuplicateKeys(t *testing.T) {
 	_, viol := decodeHeader([]byte(`{"__metadata__":{"a":"1","a":"2"}}`))
 	found := false

@@ -86,6 +86,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	}
 
 	st := w.walkModel(newReader(s, 0, s.Size()))
+	w.flushDomains()
 	if !st.hasIRVersion {
 		w.structAt(0, "ModelProto has no ir_version field")
 	}
@@ -262,6 +263,56 @@ type walker struct {
 
 	msgDepth   int
 	graphDepth int
+
+	// domains accumulates one entry per distinct non-standard (domain, kind)
+	// pair; domainAt indexes it. The finding is emitted once when the walk ends
+	// rather than once per use, because one node in a foreign domain is the same
+	// fact as the five hundredth and an onnxruntime-optimised model repeats it
+	// hundreds of times.
+	domains  []domainUse
+	domainAt map[string]int
+}
+
+// domainUse is one non-standard domain seen during the walk: the first offset it
+// appeared at and how many times it was used.
+type domainUse struct {
+	domain string
+	kind   string
+	off    int64
+	count  int
+}
+
+// noteDomain records one use of a non-standard domain instead of emitting it.
+// The evidence for a single use is unchanged; a repeated use is reported once,
+// with the count and the first offset, so the aggregate stays verifiable.
+func (w *walker) noteDomain(off int64, domain, kind string) {
+	k := kind + "\x00" + domain
+	if i, ok := w.domainAt[k]; ok {
+		w.domains[i].count++
+		return
+	}
+	if w.domainAt == nil {
+		w.domainAt = make(map[string]int)
+	}
+	w.domainAt[k] = len(w.domains)
+	w.domains = append(w.domains, domainUse{domain: domain, kind: kind, off: off, count: 1})
+}
+
+// flushDomains emits the accumulated non-standard-domain findings, exactly one
+// per distinct (domain, kind) pair, in first-use order.
+func (w *walker) flushDomains() {
+	for i := range w.domains {
+		u := &w.domains[i]
+		ev := u.kind + " uses the non-standard domain " + u.domain
+		if u.count > 1 {
+			ev += " (" + strconv.Itoa(u.count) + " occurrences reported as one finding)"
+		}
+		w.sink.EmitExtra(ruleCustomDomain, u.off, ev, map[string]string{
+			"domain":      u.domain,
+			"kind":        u.kind,
+			"occurrences": strconv.Itoa(u.count),
+		})
+	}
 }
 
 // count consumes one element of the configured element budget. It returns false
@@ -1214,8 +1265,9 @@ func (w *walker) readString(r *reader, off int64, what string) (string, bool) {
 	return string(b), true
 }
 
-// checkDomain reads a domain string and reports it when it is outside the
-// ONNX-defined operator sets.
+// checkDomain reads a domain string and notes it (through noteDomain) when it
+// is outside the ONNX-defined operator sets. The finding itself is emitted once
+// per distinct (domain, kind) after the walk, not once per node.
 func (w *walker) checkDomain(r *reader, off int64, what string) bool {
 	bo, n, ok := r.bytesValue()
 	if !ok {
@@ -1235,8 +1287,7 @@ func (w *walker) checkDomain(r *reader, off int64, what string) bool {
 	}
 	d := string(b)
 	if !standardDomains[d] {
-		w.sink.EmitExtra(ruleCustomDomain, off, what+" uses the non-standard domain "+clip(d),
-			map[string]string{"domain": clip(d), "kind": what})
+		w.noteDomain(off, clip(d), what)
 	}
 	return true
 }
