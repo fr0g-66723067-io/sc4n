@@ -464,31 +464,46 @@ func sniffText(s source.Source, l limits.Limits) (Format, bool) {
 	if err != nil && len(head) == 0 {
 		return FormatUnknown, false
 	}
-	if i := bytes.IndexByte(head, 0); i >= 0 {
-		// A NUL is what disqualifies a text format, but "a text document with
-		// binary appended" is not the same shape as "binary". When the bytes
-		// before the first NUL are a plausible UTF-8 document prefix, claim the
-		// artifact as text anyway: the content layer then reports
-		// SC4N-CONTENT-NOT-UTF8, runs the byte-safe indicators over the whole
-		// buffer, and the reviewer is told which layers did not run. Without this
-		// the artifact was dispatched "unknown" and NOTHING at all was reported
-		// for it, so one appended NUL byte silenced the scan of a config.json, a
-		// model card or a chat template.
-		if !textPrefix(head[:i]) {
-			return FormatUnknown, false
+	if bytes.IndexByte(head, 0) < 0 {
+		trimmed := bytes.TrimLeft(head, " \t\r\n\ufeff")
+		switch {
+		case len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '['):
+			if looksLikeJSON(s) {
+				return FormatJSON, true
+			}
+		case bytes.HasPrefix(trimmed, []byte("#!")):
+			return FormatText, true
 		}
 		return FormatText, true
 	}
-	trimmed := bytes.TrimLeft(head, " \t\r\n\ufeff")
-	switch {
-	case len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '['):
-		if looksLikeJSON(s) {
-			return FormatJSON, true
-		}
-	case bytes.HasPrefix(trimmed, []byte("#!")):
+	// A NUL in the head means binary, with one exception: when the artifact
+	// *opens* as a document — a printable prefix at least minTextPrefix long — it
+	// is text with binary appended, and the content layer reports that as
+	// SC4N-CONTENT-NOT-UTF8 while still running the byte-safe indicators over the
+	// whole buffer. Without the exception, one appended byte silenced the whole
+	// scan: a config.json plus a NUL was dispatched "unknown", and "unknown" has no
+	// parser and no indicator pass, so its finding list was empty and read exactly
+	// like a clean file's.
+	if p := textPrefixLen(head); p >= minTextPrefix {
 		return FormatText, true
 	}
-	return FormatText, true
+	return FormatUnknown, false
+}
+
+// textPrefixLen returns the length of the leading run of bytes a text format can
+// hold: ASCII printable plus tab, newline and carriage return. It stops at the
+// first control byte or NUL, which is what makes "the artifact opens as text"
+// decidable without reading the whole file.
+func textPrefixLen(b []byte) int {
+	for i, c := range b {
+		switch {
+		case c >= 0x20 && c < 0x7f:
+		case c == '\t' || c == '\n' || c == '\r':
+		default:
+			return i
+		}
+	}
+	return len(b)
 }
 
 // textFallbackSniffer is the name of the last-resort classifier: it claims
@@ -501,21 +516,6 @@ const textFallbackSniffer = "text"
 // binary appended" a reading of the file rather than a coincidence: every byte of
 // that prefix must be printable, which one random byte in 256 is not.
 const minTextPrefix = 64
-
-// textPrefix reports whether b is a plausible UTF-8 document prefix: at least
-// minTextPrefix bytes, none of them a control byte other than tab, newline and
-// carriage return.
-func textPrefix(b []byte) bool {
-	if len(b) < minTextPrefix {
-		return false
-	}
-	for _, c := range b {
-		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
-			return false
-		}
-	}
-	return true
-}
 
 // looksLikeJSON reports whether the stream holds exactly one complete JSON value.
 // It deliberately does not validate the whole document: a config.json inside a
