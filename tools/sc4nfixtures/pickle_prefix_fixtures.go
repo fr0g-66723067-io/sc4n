@@ -46,10 +46,13 @@ func init() {
 				"anytext_late_proto.txt": {
 					Expect: []string{"SC4N-CONTENT-NOT-UTF8"},
 					Forbid: []string{"SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"},
-					Notes: "A text document carrying a protocol byte at offset 200, i.e. past the 64-byte " +
-						"prefix probe. The bound is what keeps the widened head test cheap and keeps an " +
-						"ordinary document from being claimed as a pickle; the invalid byte still makes " +
-						"the text-only layers stand down, which is reported.",
+					Notes: "A document (200 \"w\" bytes, not an opcode letter) carrying a protocol byte at " +
+						"offset 200, i.e. past the 64-byte prefix probe, so the pickle sniffer declines it: " +
+						"the bound is what keeps the widened head test cheap and stops an ordinary document " +
+						"from being claimed as a pickle. Before this round the file was dispatched " +
+						"\"unknown\" — the NUL inside the embedded stream would have disqualified the text " +
+						"sniffer anyway — and reported nothing; now the invalid byte makes the text-only " +
+						"layers stand down, which is reported.",
 				},
 			}, map[string]expectation{}
 		},
@@ -74,7 +77,10 @@ func picklePrefixFixtures(f *fixtureSet) {
 
 	doc := make([]byte, 0, 512)
 	for range 200 {
-		doc = append(doc, 'a')
+		// 'w' is not a pickle opcode, so the artifact does not open with one: the
+		// fixture isolates the *bound* (a protocol byte past the prefix probe) from
+		// the separate question of a document that begins with an opcode letter.
+		doc = append(doc, 'w')
 	}
 	doc = append(doc, '\n')
 	f.add("anytext_late_proto.txt", append(doc, gadget(16)...))

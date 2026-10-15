@@ -1,6 +1,29 @@
 {
   "version": 1,
   "fixtures": {
+    "anytemplate_mz_prefix.jinja": {
+      "expect": [
+        "SC4N-JINJA-PY-OBJECT",
+        "SC4N-POLYGLOT-MAGIC-ONLY"
+      ],
+      "notes": "A Jinja template with \"MZ\" in front of it. The magic sniffer claimed the bare PE magic and a native parser ran on a template, so the sandbox-escape rule never fired on a file that is still a template to every reader that looks past the first two bytes. The magic is still reported, at info."
+    },
+    "anytext_late_proto.txt": {
+      "expect": [
+        "SC4N-CONTENT-NOT-UTF8"
+      ],
+      "forbid": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-REDUCE"
+      ],
+      "notes": "A document (200 \"w\" bytes, not an opcode letter) carrying a protocol byte at offset 200, i.e. past the 64-byte prefix probe, so the pickle sniffer declines it: the bound is what keeps the widened head test cheap and stops an ordinary document from being claimed as a pickle. Before this round the file was dispatched \"unknown\" — the NUL inside the embedded stream would have disqualified the text sniffer anyway — and reported nothing; now the invalid byte makes the text-only layers stand down, which is reported."
+    },
+    "anytext_nul.json": {
+      "expect": [
+        "SC4N-CONTENT-NOT-UTF8"
+      ],
+      "notes": "A JSON document with a NUL appended. The bytes are a text document with binary after it, which is how a padded or partially rewritten artifact looks; the finding records that the text-only layers (cards, tokenizer, Jinja) did not run, and the byte-safe indicators still did. Before this round the file was dispatched unknown and reported NOTHING."
+    },
     "archive/training_args_zip64.bin": {
       "expect": [
         "SC4N-PICKLE-GLOBAL-CRITICAL",
@@ -275,6 +298,12 @@
       ],
       "notes": "Well-formed GGUF followed by 512 undeclared bytes that are not an executable. The trailing bytes are invisible to the GGUF reader and are where a second artifact can be smuggled."
     },
+    "gguf_truncated_cascade.gguf": {
+      "expect": [
+        "SC4N-GGUF-STRUCT"
+      ],
+      "notes": "Four aligned, in-declaration-order F32 tensors whose extents (512 bytes) run past the 32-byte data section. One truncation, one fact: the parser reports the first tensor individually and the remaining three as a single aggregate, so this fixture pins the cascade collapse and would catch a regression that emits one finding per tensor (847 per shard over 256 shards in the HF campaign corpus)."
+    },
     "go_template.jinja": {
       "expect": [
         "SC4N-JINJA-DANGEROUS-GLOBAL"
@@ -431,6 +460,12 @@
       ],
       "notes": "a hand-built valid ELF with a second valid ELF appended: the self-extracting payload shape. debug/elf accepts both headers, so this is a dropped executable, not a magic coincidence."
     },
+    "native_fat_magic_only.bin": {
+      "expect": [
+        "SC4N-POLYGLOT-MAGIC-ONLY"
+      ],
+      "notes": "A bare universal (fat) Mach-O magic. The dispatcher recognised the magic but the magic walk did not, so the file produced no finding at all — not even the informational one a thin Mach-O gets from the same bytes. FAT_MAGIC is also the Java class-file magic, so the finding is informational, never 'validated executable'."
+    },
     "notebook_b64.ipynb": {
       "expect": [
         "SC4N-CODE-NOTEBOOK-MAGIC",
@@ -543,6 +578,15 @@
         "SC4N-ONNX-FUNCTION"
       ],
       "notes": "dims [2,3] of FLOAT is 24 bytes of raw_data; the tensor carries 8. A loader that trusts the shape and a scanner that trusts the length see different tensors."
+    },
+    "onnx_dup_domain_aggregate.onnx": {
+      "expect": [
+        "SC4N-ONNX-CUSTOM-DOMAIN"
+      ],
+      "forbid": [
+        "SC4N-ONNX-STRUCT"
+      ],
+      "notes": "Two nodes and one opset import in the runtime-supplied domain com.example. All of it is one fact about the artifact -- the domain needs a native plugin -- so the rule reports one finding per distinct (domain, kind) pair carrying the use count and the first offset, not one per node."
     },
     "onnx_external_attr_injection.onnx": {
       "expect": [
@@ -672,6 +716,21 @@
         "SC4N-PICKLE-REDUCE"
       ],
       "notes": "The protocol-0 gadget b\"cos\\nsystem\\n(S'id'\\ntR.\". A widely deployed scanner starts its opcode scan at index 1 and therefore never sees the GLOBAL at byte 0."
+    },
+    "pickle_prefix_elf_gadget.pkl": {
+      "expect": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-PREFIX",
+        "SC4N-PICKLE-REDUCE"
+      ],
+      "notes": "A protocol-4 stream behind a 4-byte \"\\x7fELF\" prefix, ending in os.system. The prefix is what the nullifAI campaign used; before this round the file was dispatched as native (the prefix is a magic) and then, once a bare magic stopped being a claim, as unknown — both of which report NOTHING for a stream that ends in a system() call."
+    },
+    "pickle_prefix_fat_constant.pkl": {
+      "expect": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-REDUCE"
+      ],
+      "notes": "The same gadget behind a constant larger than the 256 KiB probe budget, with a 4-byte junk prefix. The silent probe walk used to stop inside the constant and refuse the file, so the artifact was unknown and the gadget unreported; the constant's length is the attacker's choice, so this was a one-line evasion."
     },
     "pickle_setitem_target.pkl": {
       "expect": [
@@ -840,6 +899,16 @@
       ],
       "notes": "Two tensors whose spans overlap (b begins at 4, inside a which ends at 8), the offset-contiguity invariant the reference implementation enforces."
     },
+    "safetensors_dup_top_key.safetensors": {
+      "expect": [
+        "SC4N-SAFETENSORS-STRUCT"
+      ],
+      "forbid": [
+        "SC4N-SAFETENSORS-TRAILING-DATA",
+        "SC4N-SAFETENSORS-TRUNCATED"
+      ],
+      "notes": "One accepted file whose header object repeats the tensor key \"a\": the reference loader deserialises the header into a map, so the last value wins and the file loads. The duplicate is a structural violation and must be reported exactly once; keeping both entries made the contiguity pass then report the surviving tensor as overlapping its own shadow."
+    },
     "safetensors_metadata_injection.safetensors": {
       "expect": [
         "SC4N-METADATA-INJECTION",
@@ -900,6 +969,19 @@
       ],
       "notes": "A dtype outside the reference set: reported, and the size equation skipped rather than guessed so no fabricated overlap/trailing finding appears."
     },
+    "secret_assignments.md": {
+      "expect": [
+        "SC4N-STRING-SECRET-VALUE"
+      ],
+      "notes": "Two assignment-shaped credentials with plausible values. The finding redacts the value and names the shape it matched."
+    },
+    "secret_placeholders.md": {
+      "expect": null,
+      "forbid": [
+        "SC4N-STRING-SECRET-VALUE"
+      ],
+      "notes": "The placeholder vocabulary a README uses instead of a credential: EMPTY, none, not-needed, your-api-key, a shell expansion, a bracketed stand-in and `password=password`. None of them is secret material, so the high finding they used to produce was a false positive on documentation."
+    },
     "setup_install_hook/setup.py": {
       "expect": [
         "SC4N-REPO-SETUP-HOOK"
@@ -924,6 +1006,42 @@
         "SC4N-ARCHIVE-LINK"
       ],
       "notes": "A tar with a '../evil.txt' member and a symlink to /etc/passwd."
+    },
+    "text_coverage_above/README.md": {
+      "expect": [
+        "SC4N-METADATA-INJECTION",
+        "SC4N-CARD-INJECTION"
+      ],
+      "notes": "A card carrying \"ignore the above instructions\", the phrasing an instruction uses when it overrides the text before it instead of naming what it overrides. Both tables fire, as they do for every phrase the shared indicator table and the card directives share."
+    },
+    "text_coverage_above/template.jinja": {
+      "expect": [
+        "SC4N-TEMPLATE-INJECTION"
+      ],
+      "notes": "The same phrasing in a chat template. An override directive is the attack's own words, so it is reported at the high severity without needing anything else in the template to corroborate it."
+    },
+    "text_coverage_ip/README.md": {
+      "expect": [
+        "SC4N-STRING-RAW-IP-URL"
+      ],
+      "notes": "A card pointing at the same host in three notations a curl-class client resolves: the hex integer 0x7f000001, the decimal integer 2130706433 and the octal quad 0177.0.0.1. A detector that knows only dotted decimals reads all three as names, and naming the notation in the finding is what lets a reviewer check the address."
+    },
+    "text_coverage_secrets/config.json": {
+      "expect": [
+        "SC4N-STRING-SECRET-VALUE"
+      ],
+      "notes": "A metadata document whose credentials are values rather than assignments: a GitHub token (ghp_), an OpenAI key (sk-) and a password= assignment. The name-based half of SC4N-STRING-SECRET-VALUE cannot see the first two, and the finding must name the shape without reproducing the value."
+    },
+    "text_coverage_tags/README.md": {
+      "expect": [
+        "SC4N-UNICODE-ANOMALY",
+        "SC4N-CARD-INVISIBLE"
+      ],
+      "forbid": [
+        "SC4N-CARD-HIDDEN",
+        "SC4N-CARD-PARSE"
+      ],
+      "notes": "A card whose instruction is spelled in the Unicode Tags block (U+E0000-U+E007F): the characters draw nothing and every renderer drops them, so the reader sees an empty line while a tokeniser reads the whole instruction. No legitimate card carries one, and before this fixture the channel produced no finding at all. The run reorders nothing, so the card channel is the medium SC4N-CARD-INVISIBLE, not the high SC4N-CARD-HIDDEN."
     },
     "tf_checkpoint/variables.index": {
       "expect": [
@@ -1182,6 +1300,10 @@
       ],
       "notes": "a plain print cell must produce no findings"
     },
+    "benign/dup_output_distinct.safetensors": {
+      "expect": [],
+      "notes": "Two genuinely distinct tensors with contiguous, non-overlapping extents. It is the control for the duplicate-top-level-key fixture: a de-duplication implemented by dropping tensors, or by silencing the contiguity pass, has to fail somewhere, and it must not fail here."
+    },
     "benign/empty.bin": {
       "expect": null,
       "forbid": [
@@ -1192,6 +1314,17 @@
     "benign/flax_model.msgpack": {
       "expect": null,
       "notes": "A Flax-style nested string map with no blob payloads; the correct output is no finding at all."
+    },
+    "benign/gguf_complete.gguf": {
+      "expect": null,
+      "forbid": [
+        "SC4N-GGUF-STRUCT",
+        "SC4N-GGUF-TRAILING-DATA",
+        "SC4N-GGUF-POLYGLOT",
+        "SC4N-GGUF-ENDIAN-AMBIGUOUS",
+        "SC4N-GGUF-EXTENT-UNVERIFIED"
+      ],
+      "notes": "A complete model that uses NVFP4 (40), Q1_0 (41) and Q2_0 (42) — the ggml types upstream added after the table was pinned at GGML_TYPE_COUNT = 40 — with exact extents, correct alignment and correct declaration order. A stale type table reports each of them as out-of-range, which is a medium finding on a legitimate current model."
     },
     "benign/h5_model.h5": {
       "expect": null,
@@ -1338,6 +1471,28 @@
     "benign/random.bin": {
       "expect": null,
       "notes": "fixed-seed pseudo-random bytes with no magic at any anchor: the universal layer must stay silent on it, so no magic scan may be driven by a byte pattern that ordinary data satisfies."
+    },
+    "benign/text_coverage_json/config.json": {
+      "expect": null,
+      "forbid": [
+        "SC4N-STRING-SECRET-VALUE",
+        "SC4N-METADATA-INJECTION",
+        "SC4N-CARD-INJECTION"
+      ],
+      "notes": "The false-positive control for the credential shapes: a JSON document with short, non-secret values under the same field names (token, api_key). A short value is not a credential, and the prefix matching must not report one."
+    },
+    "benign/text_coverage_prose/README.md": {
+      "expect": null,
+      "forbid": [
+        "SC4N-STRING-SECRET-VALUE",
+        "SC4N-STRING-RAW-IP-URL",
+        "SC4N-METADATA-INJECTION",
+        "SC4N-CARD-INJECTION",
+        "SC4N-CARD-INVISIBLE",
+        "SC4N-CARD-HIDDEN",
+        "SC4N-UNICODE-ANOMALY"
+      ],
+      "notes": "The false-positive control for every shape above in one ordinary card: \"disk-based\", \"risk-based\" and \"task-force\" contain the OpenAI prefix, \"Asia Pacific\" is a word rather than an AWS key id, \"4096\" is a number rather than a host, and the only URL points at a named host. Nothing may fire."
     },
     "benign/tf_savedmodel/saved_model.pb": {
       "expect": null,
