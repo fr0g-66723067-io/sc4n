@@ -300,10 +300,17 @@ func (w *walker) probePickle(off int) bool {
 		return true
 	}
 	// A huge valid pickle may not reach its STOP inside the probe budget. Accept
-	// it only when the stream declares a protocol (so a protocol-4 file that walks
-	// cleanly for 256 KiB is a pickle) and enough opcodes decoded to rule out a
-	// coincidence.
-	return hasProto && probe.stream.Ops >= 8
+	// it when the stream declares a protocol (so a protocol-4 file that walks
+	// cleanly for 256 KiB is a pickle) and either enough opcodes decoded to rule
+	// out a coincidence or the walk stopped exactly because the budget ran out.
+	// The second case is not a nicety: a single constant larger than the budget
+	// ends the walk after two opcodes, and without it any stream an attacker pads
+	// with one fat constant — or with a junk prefix in front of one — is dispatched
+	// "unknown", which has no parser and no indicator pass, so an os.system gadget
+	// behind it produced an empty finding list. Measured on a 4-byte prefix plus a
+	// 300 KiB constant: 0 findings before, the critical gadget finding after.
+	truncatedByBudget := probe.limit < len(w.data) && probe.stream.Ops > 0
+	return hasProto && (probe.stream.Ops >= 8 || truncatedByBudget)
 }
 
 // segment walks one pickle, from start to its STOP. It returns the offset just

@@ -43,16 +43,16 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if size < 2 || (l.MaxArtifactBytes > 0 && size > l.MaxArtifactBytes) {
 		return artifact.FormatUnknown, false
 	}
-	head, err := s.Bytes(0, 2)
+	n := min(size, int64(prefixProbe))
+	head, err := s.Bytes(0, n)
 	if err != nil && len(head) < 2 {
 		return artifact.FormatUnknown, false
 	}
-	if head[0] != opPROTO {
-		info := opTable[head[0]]
-		if info.name == "" || info.proto > 1 {
-			return artifact.FormatUnknown, false
-		}
-	} else if head[1] < 1 || head[1] > highestProtocol {
+	if !plausibleHead(head) {
+		// The stream does not begin at offset 0 and no protocol byte appears in the
+		// first prefixProbe bytes, so this is not a pickle artifact: a Python source
+		// file opens with the same letters a protocol-0 pickle does, and claiming it
+		// would produce a page of structural findings for every .py in a repository.
 		return artifact.FormatUnknown, false
 	}
 
@@ -85,4 +85,37 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		return artifact.FormatPickle, true
 	}
 	return artifact.FormatUnknown, false
+}
+
+// prefixProbe bounds the search for a protocol byte when the artifact does not
+// start with one. It is deliberately small: the shape it exists for is a few
+// bytes of header in front of a stream (the nullifAI "MZ"/junk prefix), and a
+// longer prefix would make every binary artifact pay for a scan it cannot use.
+const prefixProbe = 64
+
+// plausibleHead reports whether head either starts with a plausible pickle stream
+// or carries a protocol byte inside the prefix.
+//
+// The second case is the fix for a real miss: a two-byte prefix that is not itself
+// an opcode — "MZ", "\x7fELF", a NUL — made the file unclaimable, so a stream that
+// pickle.load-adjacent tooling still reaches was dispatched "unknown" and reported
+// nothing at all. Measured: "MZ" and "junk" prefixes already claimed the stream
+// (their first bytes pass the opcode test) while "\x7fELF" and "\x00\x11" did not,
+// which is the difference between a critical os.system finding and an empty list.
+func plausibleHead(head []byte) bool {
+	if len(head) == 0 {
+		return false
+	}
+	if head[0] == opPROTO {
+		return len(head) > 1 && head[1] >= 1 && head[1] <= highestProtocol
+	}
+	if info := opTable[head[0]]; info.name != "" && info.proto <= 1 {
+		return true
+	}
+	for i := 1; i+1 < len(head); i++ {
+		if head[i] == opPROTO && head[i+1] >= 1 && head[i+1] <= highestProtocol {
+			return true
+		}
+	}
+	return false
 }
