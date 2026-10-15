@@ -301,7 +301,7 @@ func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
 			return st.meta, nil
 		}
 		if typ >= ggmlTypeCount || retiredType(typ) {
-			st.structf(typOff, "tensor %q uses ggml type id %d, which is retired or outside the pinned 0..%d", name, typ, ggmlTypeCount-1)
+			st.structf(typOff, "tensor %q uses ggml type id %d, which is retired or outside the ggml enum's 0..%d (GGML_TYPE_COUNT at the commit this table cites)", name, typ, ggmlTypeCount-1)
 		}
 		offOff := r.off
 		toff, ok := r.u64()
@@ -365,6 +365,22 @@ func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
 		prevOff      int64 = -1
 		prevEnd      int64
 		prevVerified bool
+		// One truncation is one fact. In a truncated file (a partial download,
+		// or the 2 MiB header slices of a download campaign) every tensor that
+		// starts inside the file but extends past it lands in this branch, and
+		// on a real IQ2_XS shard that is ~900 tensors producing ~900 identical
+		// medium findings — 86% of an entire campaign's output for one event.
+		// The first is kept per-tensor (it names the tensor, its extent and
+		// EOF); the rest are folded into a single aggregate after the loop that
+		// states how many further extents run past EOF and where the first and
+		// last of them end. Nothing is silent and the fact stays machine
+		// readable via the finding's extra map. Distinct facts — a misaligned,
+		// out-of-order or overlapping offset, a bad type id — are separate
+		// checks and stay per-tensor.
+		pastEOF         int
+		pastEOFAt       int64
+		pastEOFFirstEnd int64
+		pastEOFLastEnd  int64
 	)
 	for i := range tensors {
 		t := &tensors[i]
@@ -410,7 +426,19 @@ func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
 		}
 		end := t.off + nbytes
 		if end > uint64(size)-uint64(dataStart) {
-			st.structf(t.infoOff, "tensor %q extent ends at %d, past EOF (%d)", t.name, int64(dataStart)+int64(end), size)
+			// t.infoOff is inside the file by construction (the record was read
+			// from it), so every offset reported here is in range.
+			absEnd := int64(dataStart) + int64(end)
+			pastEOF++
+			switch pastEOF {
+			case 1:
+				st.structf(t.infoOff, "tensor %q extent ends at %d, past EOF (%d)", t.name, absEnd, size)
+			case 2:
+				pastEOFAt = t.infoOff
+				pastEOFFirstEnd, pastEOFLastEnd = absEnd, absEnd
+			default:
+				pastEOFLastEnd = absEnd
+			}
 			allVerified = false
 		}
 		if prevVerified && int64(t.off) < prevEnd {
@@ -420,6 +448,16 @@ func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
 			maxEnd = end
 		}
 		prevOff, prevEnd, prevVerified = int64(t.off), int64(end), true
+	}
+	if pastEOF > 1 {
+		st.emitExtra(RuleStruct, pastEOFAt,
+			fmt.Sprintf("%d further tensor extents run past EOF (%d); the first of them ends at %d and the last at %d",
+				pastEOF-1, size, pastEOFFirstEnd, pastEOFLastEnd),
+			map[string]string{
+				"further_tensor_extents": strconv.FormatInt(int64(pastEOF-1), 10),
+				"first_past_eof_end":     strconv.FormatInt(pastEOFFirstEnd, 10),
+				"last_past_eof_end":      strconv.FormatInt(pastEOFLastEnd, 10),
+			})
 	}
 
 	if allVerified {

@@ -58,6 +58,13 @@ var wantTypeTable = map[uint32]struct {
 	34: {"TQ1_0", 256, 54},
 	35: {"TQ2_0", 256, 66},
 	39: {"MXFP4", 32, 17},
+	// Current upstream types (ggml-org/ggml @ a05c9922613c6a2230dbb1d0de679519ecafb4f0):
+	// NVFP4 = QK_NVFP4 64 elements in 4 UE4M3 scales + 64/2 E2M1 bytes = 36,
+	// Q1_0 = QK1_0 128 in ggml_half + 128/8 = 18, Q2_0 = QK2_0 64 in
+	// ggml_half + 64/4 = 18. src/ggml-common.h:185,192,219,227 static_asserts.
+	40: {"NVFP4", 64, 36},
+	41: {"Q1_0", 128, 18},
+	42: {"Q2_0", 64, 18},
 }
 
 var retiredIDs = []uint32{4, 5, 31, 32, 33, 36, 37, 38}
@@ -215,7 +222,9 @@ func TestGGUFTypeTableAgainstFixtures(t *testing.T) {
 			t.Errorf("retired type %d is accepted by the table", id)
 		}
 	}
-	for _, id := range []uint32{40, 41, 42, 200} {
+	// 43 is GGML_TYPE_COUNT itself, so it is the first id past the enum;
+	// 40-42 were out of range only while the table was pinned at COUNT = 40.
+	for _, id := range []uint32{43, 44, 200} {
 		if _, _, _, _, ok := gguf.TypeInfo(id); ok {
 			t.Errorf("out-of-range type %d is accepted by the table", id)
 		}
@@ -671,5 +680,184 @@ func TestEveryArrayElementIsScanned(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the element at index %d was not scanned: %v", late, ids(fs))
+	}
+}
+
+func evidence(fs []report.Finding) string {
+	var b strings.Builder
+	for _, f := range fs {
+		fmt.Fprintf(&b, "%s@%d: %s\n", f.RuleID, f.Offset, f.Evidence)
+	}
+	return b.String()
+}
+
+// TestCurrentUpstreamTypesAreNotViolations is the FP-2a regression. A complete,
+// correctly laid out GGUF that uses the ggml types upstream added after the table
+// was pinned at GGML_TYPE_COUNT = 40 — MXFP4 (39), NVFP4 (40), Q1_0 (41) and
+// Q2_0 (42) — is a legitimate current model and must be reported clean. While the
+// table stopped at 39 every one of them produced a medium SC4N-GGUF-STRUCT
+// ("uses ggml type id 42, which is retired or outside the pinned 0..39"), which on
+// the real IQ2_XS shard in the HF corpus is 35 findings and, on the complete file
+// rather than a 2 MiB header slice, the only finding the model has.
+func TestCurrentUpstreamTypesAreNotViolations(t *testing.T) {
+	ts, dataLen := layout([]tensor{
+		{name: "token_embd.weight", dims: []uint64{32}, typ: 39},              // MXFP4, one block
+		{name: "blk.0.attn_q.weight", dims: []uint64{64}, typ: 40},            // NVFP4, one block
+		{name: "blk.0.attn_k.weight", dims: []uint64{128}, typ: 41},           // Q1_0, one block
+		{name: "blk.0.ffn_down_exps.weight", dims: []uint64{128, 2}, typ: 42}, // Q2_0, two blocks
+	}, 32)
+	data := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "general.architecture", valType: 8, val: strb("qwen3", binary.LittleEndian)}},
+		tensors: ts,
+		dataLen: dataLen,
+	})
+	fs := findingsFor(t, data)
+	if len(fs) != 0 {
+		t.Fatalf("a complete model using the current upstream types produced findings:\n%s", evidence(fs))
+	}
+}
+
+// pastEOFTensors is four contiguous, aligned F32 tensors of 16 bytes each. With a
+// data section shorter than the last extent every one of them runs past EOF: the
+// shape a partial download and a 2 MiB header slice both have.
+func pastEOFTensors() []tensor {
+	return []tensor{
+		{name: "a.weight", dims: []uint64{4}, typ: 0, offset: 0},
+		{name: "b.weight", dims: []uint64{4}, typ: 0, offset: 32},
+		{name: "c.weight", dims: []uint64{4}, typ: 0, offset: 64},
+		{name: "d.weight", dims: []uint64{4}, typ: 0, offset: 96},
+	}
+}
+
+func pastEOFSpec() spec {
+	return spec{
+		version: 3,
+		kvs:     []kv{{key: "general.architecture", valType: 8, val: strb("qwen3", binary.LittleEndian)}},
+		tensors: pastEOFTensors(),
+		// No data section at all: every tensor extent is past EOF. This is the
+		// degenerate end of the truncation scale the campaign's 2 MiB slices sit
+		// on, with four tensors instead of ~900 so the count is checkable.
+		dataLen: 0,
+	}
+}
+
+// TestPastEOFCascadeIsAggregated pins the FP-2b fix: one truncation is one fact.
+// Four tensor extents running past EOF must produce exactly two findings — the
+// first tensor named individually and one aggregate naming how many further
+// extents run past EOF. Before the fix this produced four findings, and on the
+// real corpus 847 per shard over 256 shards (86% of the campaign's output).
+func TestPastEOFCascadeIsAggregated(t *testing.T) {
+	data := build(pastEOFSpec())
+	fs := findingsFor(t, data)
+
+	var first, agg *report.Finding
+	for i := range fs {
+		f := &fs[i]
+		if f.RuleID != "SC4N-GGUF-STRUCT" {
+			continue
+		}
+		switch {
+		case strings.Contains(f.Evidence, "further tensor extents run past EOF"):
+			agg = f
+		case strings.Contains(f.Evidence, "extent ends at"):
+			if first == nil {
+				first = f
+			} else {
+				t.Errorf("more than one per-tensor past-EOF finding was emitted: %q and %q", first.Evidence, f.Evidence)
+			}
+		default:
+			t.Errorf("unexpected structural finding: %q", f.Evidence)
+		}
+	}
+	if first == nil {
+		t.Fatalf("the first past-EOF tensor must keep its own finding:\n%s", evidence(fs))
+	}
+	if !strings.Contains(first.Evidence, `tensor "a.weight" extent ends at`) {
+		t.Errorf("the per-tensor finding must name the first past-EOF tensor, got %q", first.Evidence)
+	}
+	if agg == nil {
+		t.Fatalf("no aggregate finding for the remaining past-EOF extents:\n%s", evidence(fs))
+	}
+	if !strings.Contains(agg.Evidence, "3 further tensor extents run past EOF") {
+		t.Errorf("the aggregate must state how many further extents run past EOF, got %q", agg.Evidence)
+	}
+	if n := len(fs); n != 2 {
+		t.Errorf("one truncation over four tensors produced %d findings, want 2:\n%s", n, evidence(fs))
+	}
+	for _, f := range fs {
+		if f.Offset < 0 || f.Offset >= int64(len(data)) {
+			t.Errorf("%s finding offset %d is outside the file (%d bytes)", f.RuleID, f.Offset, len(data))
+		}
+	}
+}
+
+// TestPastEOFCascadeAggregateEvidence pins the aggregate's evidence text and its
+// machine-readable fields, so the fact cannot be reworded or lost silently.
+func TestPastEOFCascadeAggregateEvidence(t *testing.T) {
+	data := build(pastEOFSpec())
+	size := int64(len(data))
+	// The data section starts exactly at EOF (dataLen 0), so tensor offsets are
+	// relative to a dataStart of size and the absolute ends are size+16, size+48,
+	// size+80 and size+112. The aggregate covers the 2nd to the 4th.
+	want := fmt.Sprintf("3 further tensor extents run past EOF (%d); the first of them ends at %d and the last at %d",
+		size, size+48, size+112)
+
+	fs := findingsFor(t, data)
+	var agg *report.Finding
+	for i := range fs {
+		if strings.Contains(fs[i].Evidence, "further tensor extents") {
+			agg = &fs[i]
+		}
+	}
+	if agg == nil {
+		t.Fatalf("no aggregate finding:\n%s", evidence(fs))
+	}
+	if agg.Evidence != want {
+		t.Errorf("aggregate evidence =\n  %q\nwant\n  %q", agg.Evidence, want)
+	}
+	for k, v := range map[string]string{
+		"further_tensor_extents": "3",
+		"first_past_eof_end":     strconv.FormatInt(size+48, 10),
+		"last_past_eof_end":      strconv.FormatInt(size+112, 10),
+	} {
+		if got := agg.Extra[k]; got != v {
+			t.Errorf("aggregate extra[%q] = %q, want %q", k, got, v)
+		}
+	}
+	if agg.Offset < 0 || agg.Offset >= size {
+		t.Errorf("aggregate offset %d is outside the file (%d bytes)", agg.Offset, size)
+	}
+}
+
+// TestOverlapsStayPerTensor is the other half of the cascade fix: only the
+// past-EOF cascade collapses. Tensors that overlap inside the file are distinct
+// facts — each names its own tensor and its predecessor's end — so each keeps its
+// own finding, and none of them is folded into an aggregate.
+func TestOverlapsStayPerTensor(t *testing.T) {
+	data := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "general.architecture", valType: 8, val: strb("qwen3", binary.LittleEndian)}},
+		tensors: []tensor{
+			{name: "a.weight", dims: []uint64{32}, typ: 0, offset: 0},  // 128 bytes
+			{name: "b.weight", dims: []uint64{32}, typ: 0, offset: 32}, // inside a
+			{name: "c.weight", dims: []uint64{32}, typ: 0, offset: 64}, // inside b
+		},
+		dataLen: 192,
+	})
+	fs := findingsFor(t, data)
+	if len(fs) != 2 {
+		t.Fatalf("want one overlap finding per overlapping tensor (2), got %d:\n%s", len(fs), evidence(fs))
+	}
+	if !strings.Contains(fs[0].Evidence, `tensor "b.weight" offset 32 overlaps the previous tensor's end`) {
+		t.Errorf("want the first overlap to name b.weight and a's end 128, got %q", fs[0].Evidence)
+	}
+	if !strings.Contains(fs[1].Evidence, `tensor "c.weight" offset 64 overlaps the previous tensor's end`) {
+		t.Errorf("want the second overlap to name c.weight and b's end 160, got %q", fs[1].Evidence)
+	}
+	for _, f := range fs {
+		if strings.Contains(f.Evidence, "further tensor extents") {
+			t.Errorf("the past-EOF aggregate must not fire on an in-file overlap: %q", f.Evidence)
+		}
 	}
 }

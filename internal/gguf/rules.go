@@ -21,7 +21,10 @@ var (
 	// magic, an unsupported version, counts beyond the file, an illegal key/name
 	// length, a duplicate key, a retired or out-of-range ggml type, more than
 	// four dimensions, a zero dimension, a misaligned/unsorted/overlapping tensor
-	// offset, or an extent that runs past EOF.
+	// offset, or an extent that runs past EOF. A run of extents past EOF is one
+	// event: the first tensor is reported by name and the remainder as a single
+	// aggregate naming how many and where the first and last of them end, so a
+	// truncated download does not report one finding per tensor.
 	RuleStruct = report.DefineRule(report.Rule{
 		ID:         "SC4N-GGUF-STRUCT",
 		Title:      "GGUF structure violates the format's own header",
@@ -33,8 +36,11 @@ var (
 			"present: absent magic, a version outside {2,3}, a count larger than the file, an illegal key or " +
 			"tensor-name length, a duplicate metadata key, a retired or out-of-range ggml type, more than four " +
 			"dimensions, a zero dimension, a tensor offset that is misaligned, out of declaration order or " +
-			"overlapping its predecessor, or a tensor extent that runs past EOF. These are exactly the checks " +
-			"the llama.cpp GGUF reader performs, and the parser bugs that reached CVEs (CVE-2024-21802, " +
+			"overlapping its predecessor, or a tensor extent that runs past EOF. A run of extents past EOF — " +
+			"what a truncated download or a header slice is — is one event, so the first such tensor is " +
+			"reported by name and extent and the rest are reported once, as an aggregate naming how many " +
+			"further extents run past EOF and where the first and last of them end. These are exactly the " +
+			"checks the llama.cpp GGUF reader performs, and the parser bugs that reached CVEs (CVE-2024-21802, " +
 			"CVE-2024-23496, CVE-2024-23605, CVE-2025-53630 cumulative-size overflow, CVE-2026-33298 " +
 			"ggml_nbytes overflow, GHSA-8wwf-w4qm-gpqr) were triggered by count/offset arithmetic on values " +
 			"like these. A reader that accepts this file is reading a different byte layout than the one the " +
