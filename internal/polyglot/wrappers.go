@@ -173,6 +173,10 @@ func ValidateNativeHeader(s source.Source, size, off int64) (bytescan.NativeKind
 		_ = f.Close()
 		return kind, true
 	case bytescan.NativeMachO:
+		// The universal (fat) container has its own parser; the thin magics —
+		// including the byte-swapped pair — are read by macho.NewFile, which
+		// detects the endianness itself. debug/macho reads FAT_MAGIC only, so the
+		// fat variants it rejects never reach here as a validated header.
 		if bytes.HasPrefix(hdr, []byte("\xca\xfe\xba\xbe")) {
 			f, err := macho.NewFatFile(sr)
 			if err != nil {

@@ -34,6 +34,13 @@ import (
 
 func init() {
 	artifact.RegisterUniversal("polyglot", Scan)
+	// The magic sniffer must not claim a file as native on a bare magic: a chat
+	// template that begins with "MZ" is still a template. This layer owns what
+	// "the header validates" means, so it is the one that answers the question.
+	artifact.RegisterNativeValidator(func(s source.Source, size, off int64) bool {
+		_, ok := ValidateNativeHeader(s, size, off)
+		return ok
+	})
 }
 
 // Scan is the registered universal layer.

@@ -239,6 +239,25 @@ var (
 	sniffers []sniffer
 )
 
+// nativeValidator answers "is the header at off a real one?" for the native
+// magics. It is registered from internal/polyglot (which owns header validation
+// and reports the same verdict at high severity), so this package keeps a single
+// definition of "valid" without importing the layer that reports on it — the
+// dependency runs artifact <- polyglot, and a direct call would close a cycle.
+var nativeValidator func(s source.Source, size, off int64) bool
+
+// RegisterNativeValidator installs the header validator the magic sniffer uses to
+// decide whether a native-shaped prefix is a program or just bytes that look like
+// one. Registering twice is a programmer error and panics.
+func RegisterNativeValidator(fn func(s source.Source, size, off int64) bool) {
+	sniffMu.Lock()
+	defer sniffMu.Unlock()
+	if nativeValidator != nil {
+		panic("artifact: native validator registered twice")
+	}
+	nativeValidator = fn
+}
+
 // RegisterSniffer adds a content sniffer. Higher prio runs first; ties break on
 // name so the order is stable across builds. Registering the same name twice is a
 // programmer error and panics.
@@ -259,10 +278,18 @@ func RegisterSniffer(name string, prio int, fn SniffFunc) {
 // Sniff runs every registered sniffer in priority order and returns the first
 // match, with the name of the sniffer that matched (for -v diagnostics and for
 // SC4N-FORMAT-AMBIGUOUS).
+//
+// A native magic that does not validate is not a claim, it is a prefix: a chat
+// template, a config.json or a pickle that begins with "MZ" or "\x7fELF" is still
+// what its own bytes say it is, and dispatching on the bare magic meant the
+// format parser never ran on it. The bare magic is remembered and returned only
+// when nothing else claims the file, so the universal layer still reports the
+// magic-only polyglot and an APE/OLE/ar header keeps its native dispatch.
 func Sniff(s source.Source, l limits.Limits) (Format, string) {
 	sniffMu.Lock()
 	ordered := make([]sniffer, len(sniffers))
 	copy(ordered, sniffers)
+	validator := nativeValidator
 	sniffMu.Unlock()
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ordered[i].prio != ordered[j].prio {
@@ -270,10 +297,30 @@ func Sniff(s source.Source, l limits.Limits) (Format, string) {
 		}
 		return ordered[i].name < ordered[j].name
 	})
+	bareMagic := ""
 	for _, sn := range ordered {
 		if f, ok := sn.fn(s, l); ok {
+			if f == FormatNative && validator != nil && !validator(s, s.Size(), 0) {
+				if bareMagic == "" {
+					bareMagic = sn.name
+				}
+				continue
+			}
+			if bareMagic != "" && sn.name == textFallbackSniffer {
+				// The generic text fallback does not override a bare native magic:
+				// "\x7fELF" followed by bytes that are not a header is still more
+				// like a program than like a document, and reporting an unvalidated
+				// .so as a text file would be a new false positive. Every sniffer
+				// that names a *specific* format — JSON, Jinja, Markdown, pickle, a
+				// container — still wins, which is the case the fall-through exists
+				// for.
+				return FormatNative, bareMagic
+			}
 			return f, sn.name
 		}
+	}
+	if bareMagic != "" {
+		return FormatNative, bareMagic
 	}
 	return FormatUnknown, ""
 }

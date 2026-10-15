@@ -307,53 +307,97 @@ func init() {
 	RegisterSniffer("magic", 100, sniffMagic)
 	RegisterSniffer("tarkind", 90, sniffTar)
 	RegisterSniffer("pickle-proto", 80, sniffPickleHeader)
-	RegisterSniffer("text", -100, sniffText)
+	RegisterSniffer(textFallbackSniffer, -100, sniffText)
 
-	RegisterFormat(Info{Format: FormatUnknown, Magic: "(none)", Depth: DepthNone,
-		Notes: "no sniffer matched; the file is reported as \"unknown\" and only the format-independent layers run — native magic, the format-versus-extension check, a shebang, and the name-driven rules for .pth, .start, .pyc and Dockerfile. No parser runs and no string indicators: a file that reaches \"unknown\" had no text sniff, so an indicator inside it is not reported."})
-	RegisterFormat(Info{Format: FormatZip, Magic: "PK\\x03\\x04", Depth: DepthStructural, Container: true,
-		Notes: "stored and deflate members (plus zip64) are read; encrypted entries, CRC mismatches, duplicate names, absolute or traversal paths, link members, local-vs-central name disagreements and bomb ratios are reported; members are never extracted to disk."})
-	RegisterFormat(Info{Format: FormatTar, Magic: "ustar at offset 257", Depth: DepthStructural, Container: true,
-		Notes: "ustar and GNU long-name members are read; absolute, traversal and link members are reported."})
-	RegisterFormat(Info{Format: FormatGzip, Magic: "\\x1f\\x8b", Depth: DepthStructural, Container: true,
-		Notes: "single-member streams are unwrapped and the payload re-dispatched, up to MaxDepth; the whole-file ratio is bounded by MaxRatio."})
-	RegisterFormat(Info{Format: FormatZlib, Magic: "\\x78 01|9c|da", Depth: DepthStructural, Container: true,
-		Notes: "zlib streams are unwrapped and re-dispatched; joblib's default compression is zlib, so this is the common path into a joblib payload."})
-	RegisterFormat(Info{Format: FormatBzip2, Magic: "BZh", Depth: DepthStructural, Container: true,
-		Notes: "bzip2 streams are unwrapped and re-dispatched; gzip(bzip2(pickle)) is the published modelscan double-compression bypass, so this wrapper is supported precisely because it is used that way."})
-	RegisterFormat(Info{Format: FormatXz, Magic: "\\xfd7zXZ\\x00", Depth: DepthNone, Container: false,
-		Notes: "NOT DECOMPRESSED: no xz decoder in the Go standard library and sc4n has no third-party dependencies. The presence of xz in a model file is reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION (medium) with the offset, and any pickle or native payload inside it is NOT scanned."})
-	RegisterFormat(Info{Format: FormatLzma, Magic: "\\x5d\\x00\\x00", Depth: DepthNone, Container: false,
-		Notes: "NOT DECOMPRESSED (no stdlib lzma decoder). The 2-byte magic is weak and collides with ordinary data, so it is only reported after a header-shape sanity check. Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION."})
-	RegisterFormat(Info{Format: FormatLz4, Magic: "\\x04\\x22\\x4d\\x18", Depth: DepthNone, Container: false,
-		Notes: "NOT DECOMPRESSED (no stdlib lz4 decoder; joblib lz4 is a documented joblib compression method). Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION."})
-	RegisterFormat(Info{Format: FormatZstd, Magic: "\\x28\\xb5\\x2f\\xfd", Depth: DepthNone, Container: false,
-		Notes: "NOT DECOMPRESSED (no stdlib zstd decoder). Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION."})
-	RegisterFormat(Info{Format: FormatSevenZip, Magic: "7z\\xbc\\xaf\\x27\\x1c", Depth: DepthNone, Container: false,
-		Notes: "NOT DECOMPRESSED. A 7z file named .pt is the February 2025 Hugging Face campaign: the loader (patched torch) still deserialised the payload while every extension-driven scanner saw \"not a zip\". Reported as SC4N-TORCH-7Z (critical) when the name suggests a torch checkpoint, plus SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION."})
-	RegisterFormat(Info{Format: FormatRar, Magic: "Rar!\\x1a\\x07", Depth: DepthNone, Container: false,
-		Notes: "NOT DECOMPRESSED (no stdlib rar decoder). Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION."})
-	RegisterFormat(Info{Format: FormatZlibJoblibLegacy, Magic: "ZF", Depth: DepthNone, Container: false,
-		Notes: "joblib's pre-0.10 z-file framing: a 21-byte header — \"ZF\" plus the uncompressed length as a space-padded 0x-prefixed hex string — followed by a stdlib zlib stream. sc4n recognises the frame (both the header shape and the zlib stream must be plausible) but does not unwrap it, so the payload is not scanned; reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION naming the framing."})
-	RegisterFormat(Info{Format: FormatNative, Magic: "\\x7fELF | MZ | Mach-O | OLE | !<arch>", Depth: DepthShallow,
-		Notes: "header validity is checked with debug/elf, debug/macho and debug/pe; a bare magic match without a valid header is reported at info only. A valid executable inside a model artifact is SC4N-POLYGLOT-NATIVE."})
+	RegisterFormat(Info{
+		Format: FormatUnknown, Magic: "(none)", Depth: DepthNone,
+		Notes: "no sniffer matched; the file is reported as \"unknown\" and only the format-independent layers run — native magic, the format-versus-extension check, a shebang, and the name-driven rules for .pth, .start, .pyc and Dockerfile. No parser runs and no string indicators: a file that reaches \"unknown\" had no text sniff, so an indicator inside it is not reported.",
+	})
+	RegisterFormat(Info{
+		Format: FormatZip, Magic: "PK\\x03\\x04", Depth: DepthStructural, Container: true,
+		Notes: "stored and deflate members (plus zip64) are read; encrypted entries, CRC mismatches, duplicate names, absolute or traversal paths, link members, local-vs-central name disagreements and bomb ratios are reported; members are never extracted to disk.",
+	})
+	RegisterFormat(Info{
+		Format: FormatTar, Magic: "ustar at offset 257", Depth: DepthStructural, Container: true,
+		Notes: "ustar and GNU long-name members are read; absolute, traversal and link members are reported.",
+	})
+	RegisterFormat(Info{
+		Format: FormatGzip, Magic: "\\x1f\\x8b", Depth: DepthStructural, Container: true,
+		Notes: "single-member streams are unwrapped and the payload re-dispatched, up to MaxDepth; the whole-file ratio is bounded by MaxRatio.",
+	})
+	RegisterFormat(Info{
+		Format: FormatZlib, Magic: "\\x78 01|9c|da", Depth: DepthStructural, Container: true,
+		Notes: "zlib streams are unwrapped and re-dispatched; joblib's default compression is zlib, so this is the common path into a joblib payload.",
+	})
+	RegisterFormat(Info{
+		Format: FormatBzip2, Magic: "BZh", Depth: DepthStructural, Container: true,
+		Notes: "bzip2 streams are unwrapped and re-dispatched; gzip(bzip2(pickle)) is the published modelscan double-compression bypass, so this wrapper is supported precisely because it is used that way.",
+	})
+	RegisterFormat(Info{
+		Format: FormatXz, Magic: "\\xfd7zXZ\\x00", Depth: DepthNone, Container: false,
+		Notes: "NOT DECOMPRESSED: no xz decoder in the Go standard library and sc4n has no third-party dependencies. The presence of xz in a model file is reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION (medium) with the offset, and any pickle or native payload inside it is NOT scanned.",
+	})
+	RegisterFormat(Info{
+		Format: FormatLzma, Magic: "\\x5d\\x00\\x00", Depth: DepthNone, Container: false,
+		Notes: "NOT DECOMPRESSED (no stdlib lzma decoder). The 2-byte magic is weak and collides with ordinary data, so it is only reported after a header-shape sanity check. Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION.",
+	})
+	RegisterFormat(Info{
+		Format: FormatLz4, Magic: "\\x04\\x22\\x4d\\x18", Depth: DepthNone, Container: false,
+		Notes: "NOT DECOMPRESSED (no stdlib lz4 decoder; joblib lz4 is a documented joblib compression method). Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION.",
+	})
+	RegisterFormat(Info{
+		Format: FormatZstd, Magic: "\\x28\\xb5\\x2f\\xfd", Depth: DepthNone, Container: false,
+		Notes: "NOT DECOMPRESSED (no stdlib zstd decoder). Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION.",
+	})
+	RegisterFormat(Info{
+		Format: FormatSevenZip, Magic: "7z\\xbc\\xaf\\x27\\x1c", Depth: DepthNone, Container: false,
+		Notes: "NOT DECOMPRESSED. A 7z file named .pt is the February 2025 Hugging Face campaign: the loader (patched torch) still deserialised the payload while every extension-driven scanner saw \"not a zip\". Reported as SC4N-TORCH-7Z (critical) when the name suggests a torch checkpoint, plus SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION.",
+	})
+	RegisterFormat(Info{
+		Format: FormatRar, Magic: "Rar!\\x1a\\x07", Depth: DepthNone, Container: false,
+		Notes: "NOT DECOMPRESSED (no stdlib rar decoder). Reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION.",
+	})
+	RegisterFormat(Info{
+		Format: FormatZlibJoblibLegacy, Magic: "ZF", Depth: DepthNone, Container: false,
+		Notes: "joblib's pre-0.10 z-file framing: a 21-byte header — \"ZF\" plus the uncompressed length as a space-padded 0x-prefixed hex string — followed by a stdlib zlib stream. sc4n recognises the frame (both the header shape and the zlib stream must be plausible) but does not unwrap it, so the payload is not scanned; reported as SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION naming the framing.",
+	})
+	RegisterFormat(Info{
+		Format: FormatNative, Magic: "\\x7fELF | MZ | Mach-O | OLE | !<arch>", Depth: DepthShallow,
+		Notes: "header validity is checked with debug/elf, debug/macho and debug/pe; a bare magic match without a valid header is reported at info only. A valid executable inside a model artifact is SC4N-POLYGLOT-NATIVE.",
+	})
 
-	RegisterFormat(Info{Format: FormatJSON, Magic: "leading { or [", Depth: DepthStructural,
-		Notes: "routing is name-dependent. The Hugging Face metadata names (config.json, adapter_config.json, modules.json, model_index.json, dataset_info.json) and the tokenizer files (tokenizer.json, tokenizer_config.json, special_tokens_map.json) are decoded with encoding/json and the metadata, tokenizer, chat-template and card-injection rule families run over the decoded document — every JSON value in the stream, not just the first. Any other JSON is scanned as raw text by the shared indicator engine."})
-	RegisterFormat(Info{Format: FormatJSONLines, Magic: "one JSON value per line", Depth: DepthShallow,
-		Notes: "no per-line decoder: the file is scanned as text by the shared indicator engine, so an indicator anywhere in it is found, while a malformed line is not reported and no per-line structure is decoded."})
-	RegisterFormat(Info{Format: FormatPython, Magic: "text; extension .py", Depth: DepthStructural,
-		Notes: "hand-written Python 3.14 lexer plus a statement-level taint engine over the source/sink pairs listed in internal/pysrc/rules.go (isSourceDotted, isShellSink, isDeserializeSink, isNetworkSink and the standalone-construct predicates); there is no type inference, so taint is intra-statement and intra-function."})
-	RegisterFormat(Info{Format: FormatNotebook, Magic: "JSON with a \"cells\" array", Depth: DepthStructural,
-		Notes: "code cells are mapped back to their original line numbers in the .ipynb file; IPython magics and shell escapes are reported separately from ordinary Python findings."})
-	RegisterFormat(Info{Format: FormatJinja, Magic: "text containing {{ }} or {% %}", Depth: DepthStructural,
-		Notes: "Jinja2 lexer plus an introspection/dynamic-name analyzer, applied to .jinja/.j2/.tmpl files, chat_template.jinja, tokenizer_config.json:chat_template, config.json-embedded templates and GGUF tokenizer.chat_template."})
-	RegisterFormat(Info{Format: FormatMarkdown, Magic: "text; extension .md", Depth: DepthStructural,
-		Notes: "YAML frontmatter (subset reader) plus the prompt-injection and Unicode-anomaly detectors, applied to model and dataset cards."})
-	RegisterFormat(Info{Format: FormatYAML, Magic: "text; extension .yml/.yaml", Depth: DepthShallow,
-		Notes: "no YAML library is linked, so YAML is scanned as text for string indicators, prompt-injection content and the GitHub Actions pull_request_target pattern; it is not parsed into a document tree."})
-	RegisterFormat(Info{Format: FormatText, Magic: "(fallback)", Depth: DepthShallow,
-		Notes: "any file with no NUL byte in its first kilobyte and no structural sniffer match is scanned with the string-indicator engine at depth shallow. Extension-specific rules (.pth, .start, .pyc, Dockerfile) still apply."})
+	RegisterFormat(Info{
+		Format: FormatJSON, Magic: "leading { or [", Depth: DepthStructural,
+		Notes: "routing is name-dependent. The Hugging Face metadata names (config.json, adapter_config.json, modules.json, model_index.json, dataset_info.json) and the tokenizer files (tokenizer.json, tokenizer_config.json, special_tokens_map.json) are decoded with encoding/json and the metadata, tokenizer, chat-template and card-injection rule families run over the decoded document — every JSON value in the stream, not just the first. Any other JSON is scanned as raw text by the shared indicator engine.",
+	})
+	RegisterFormat(Info{
+		Format: FormatJSONLines, Magic: "one JSON value per line", Depth: DepthShallow,
+		Notes: "no per-line decoder: the file is scanned as text by the shared indicator engine, so an indicator anywhere in it is found, while a malformed line is not reported and no per-line structure is decoded.",
+	})
+	RegisterFormat(Info{
+		Format: FormatPython, Magic: "text; extension .py", Depth: DepthStructural,
+		Notes: "hand-written Python 3.14 lexer plus a statement-level taint engine over the source/sink pairs listed in internal/pysrc/rules.go (isSourceDotted, isShellSink, isDeserializeSink, isNetworkSink and the standalone-construct predicates); there is no type inference, so taint is intra-statement and intra-function.",
+	})
+	RegisterFormat(Info{
+		Format: FormatNotebook, Magic: "JSON with a \"cells\" array", Depth: DepthStructural,
+		Notes: "code cells are mapped back to their original line numbers in the .ipynb file; IPython magics and shell escapes are reported separately from ordinary Python findings.",
+	})
+	RegisterFormat(Info{
+		Format: FormatJinja, Magic: "text containing {{ }} or {% %}", Depth: DepthStructural,
+		Notes: "Jinja2 lexer plus an introspection/dynamic-name analyzer, applied to .jinja/.j2/.tmpl files, chat_template.jinja, tokenizer_config.json:chat_template, config.json-embedded templates and GGUF tokenizer.chat_template.",
+	})
+	RegisterFormat(Info{
+		Format: FormatMarkdown, Magic: "text; extension .md", Depth: DepthStructural,
+		Notes: "YAML frontmatter (subset reader) plus the prompt-injection and Unicode-anomaly detectors, applied to model and dataset cards.",
+	})
+	RegisterFormat(Info{
+		Format: FormatYAML, Magic: "text; extension .yml/.yaml", Depth: DepthShallow,
+		Notes: "no YAML library is linked, so YAML is scanned as text for string indicators, prompt-injection content and the GitHub Actions pull_request_target pattern; it is not parsed into a document tree.",
+	})
+	RegisterFormat(Info{
+		Format: FormatText, Magic: "(fallback)", Depth: DepthShallow,
+		Notes: "any file with no NUL byte in its first kilobyte and no structural sniffer match is scanned with the string-indicator engine at depth shallow. Extension-specific rules (.pth, .start, .pyc, Dockerfile) still apply.",
+	})
 }
 
 func sniffMagic(s source.Source, l limits.Limits) (Format, bool) {
@@ -420,8 +464,20 @@ func sniffText(s source.Source, l limits.Limits) (Format, bool) {
 	if err != nil && len(head) == 0 {
 		return FormatUnknown, false
 	}
-	if bytes.IndexByte(head, 0) >= 0 {
-		return FormatUnknown, false
+	if i := bytes.IndexByte(head, 0); i >= 0 {
+		// A NUL is what disqualifies a text format, but "a text document with
+		// binary appended" is not the same shape as "binary". When the bytes
+		// before the first NUL are a plausible UTF-8 document prefix, claim the
+		// artifact as text anyway: the content layer then reports
+		// SC4N-CONTENT-NOT-UTF8, runs the byte-safe indicators over the whole
+		// buffer, and the reviewer is told which layers did not run. Without this
+		// the artifact was dispatched "unknown" and NOTHING at all was reported
+		// for it, so one appended NUL byte silenced the scan of a config.json, a
+		// model card or a chat template.
+		if !textPrefix(head[:i]) {
+			return FormatUnknown, false
+		}
+		return FormatText, true
 	}
 	trimmed := bytes.TrimLeft(head, " \t\r\n\ufeff")
 	switch {
@@ -433,6 +489,32 @@ func sniffText(s source.Source, l limits.Limits) (Format, bool) {
 		return FormatText, true
 	}
 	return FormatText, true
+}
+
+// textFallbackSniffer is the name of the last-resort classifier: it claims
+// anything that reads as text and nothing more specific did. Sniff treats a claim
+// from it as weaker than a bare native magic, which is the one place this name
+// matters.
+const textFallbackSniffer = "text"
+
+// minTextPrefix is how many bytes of a NUL-free printable prefix make "text with
+// binary appended" a reading of the file rather than a coincidence: every byte of
+// that prefix must be printable, which one random byte in 256 is not.
+const minTextPrefix = 64
+
+// textPrefix reports whether b is a plausible UTF-8 document prefix: at least
+// minTextPrefix bytes, none of them a control byte other than tab, newline and
+// carriage return.
+func textPrefix(b []byte) bool {
+	if len(b) < minTextPrefix {
+		return false
+	}
+	for _, c := range b {
+		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+			return false
+		}
+	}
+	return true
 }
 
 // looksLikeJSON reports whether the stream holds exactly one complete JSON value.

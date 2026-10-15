@@ -95,7 +95,14 @@ func MagicAt(b []byte) NativeKind {
 		}
 		return NativePE
 	case bytes.HasPrefix(b, []byte("\xfe\xed\xfa\xce")), bytes.HasPrefix(b, []byte("\xfe\xed\xfa\xcf")),
-		bytes.HasPrefix(b, []byte("\xce\xfa\xed\xfe")), bytes.HasPrefix(b, []byte("\xcf\xfa\xed\xfe")):
+		bytes.HasPrefix(b, []byte("\xce\xfa\xed\xfe")), bytes.HasPrefix(b, []byte("\xcf\xfa\xed\xfe")),
+		// The universal (fat) container, FAT_MAGIC. It is shared with the Java
+		// class-file magic and with the two fat variants Go's debug/macho cannot
+		// read (FAT_CIGAM, FAT_MAGIC_64), so a claim on it means "a header of this
+		// shape starts here", never "this is a program": the validator separates a
+		// universal binary from a .class file, and a fat variant the standard
+		// library refuses simply falls through to the content sniffers.
+		bytes.HasPrefix(b, []byte("\xca\xfe\xba\xbe")):
 		return NativeMachO
 	case bytes.HasPrefix(b, []byte("!<arch>\n")):
 		return NativeArchive
@@ -131,12 +138,16 @@ func ValidNative(b []byte) (NativeKind, bool) {
 		return NativePE, false
 	case NativeMachO:
 		switch {
-		case bytes.HasPrefix(b, []byte("\xfe\xed\xfa\xce")), bytes.HasPrefix(b, []byte("\xfe\xed\xfa\xcf")):
+		case bytes.HasPrefix(b, []byte("\xfe\xed\xfa\xce")), bytes.HasPrefix(b, []byte("\xfe\xed\xfa\xcf")),
+			bytes.HasPrefix(b, []byte("\xce\xfa\xed\xfe")), bytes.HasPrefix(b, []byte("\xcf\xfa\xed\xfe")):
 			if f, err := macho.NewFile(bytes.NewReader(b)); err == nil {
 				_ = f.Close()
 				return NativeMachO, true
 			}
 		default:
+			// FAT_MAGIC: the universal container. debug/macho reads this one and
+			// rejects FAT_CIGAM and FAT_MAGIC_64, so those stay unclaimed rather
+			// than being called a program without a header the linker would take.
 			f, err := macho.NewFatFile(bytes.NewReader(b))
 			if err == nil {
 				_ = f.Close()
