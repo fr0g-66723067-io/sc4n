@@ -43,6 +43,7 @@ func scan(b []byte) []Hit {
 func scanInto(b []byte, hits []Hit) []Hit {
 	hits = automaton.scanLiterals(b, hits)
 	hits = dropUncorroborated(hits)
+	hits = dropPlaceholderAssignments(b, hits)
 	hits = scanRawIPURLs(b, hits)
 	hits = scanSecretTokens(b, hits)
 	hits = scanOpaqueLiterals(b, hits)
@@ -546,6 +547,119 @@ func tokenRun(b []byte, a tokenAlphabet) int {
 		n++
 	}
 	return n
+}
+
+// dropPlaceholderAssignments removes the `NAME=` hits whose value is a documented
+// placeholder rather than secret material.
+//
+// The literal table cannot see the value, so `api_key=` fires on
+// `api_key="EMPTY"` and `password=password` alike. Measured on the Hugging Face
+// corpus: widening the assignment shapes to api_key/password/secret added 15 high
+// findings, and every one of them was a local-server example in a README
+// (`api_key="EMPTY"`, `api_key="none"`, `api_key="not-needed"`,
+// `api_key='your-api-key'`, `password=password`) — a documentation convention, not
+// a hard-coded credential. The rule keeps its severity for values that could be a
+// credential and drops only the ones a reader can see are not.
+func dropPlaceholderAssignments(b []byte, hits []Hit) []Hit {
+	out := hits[:0]
+	for _, h := range hits {
+		if h.Extra["kind"] != "secret-assignment" || !h.Redacted {
+			out = append(out, h)
+			continue
+		}
+		if assignmentValueIsPlaceholder(b, h) {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// assignmentValueIsPlaceholder reports whether the value that follows the matched
+// assignment is a placeholder.
+//
+// The value is read the way every consumer of the file would read it: leading
+// space and one opening quote are skipped, and the run ends at anything that
+// cannot be inside a bare credential (space, quote, comma, bracket, comment).
+func assignmentValueIsPlaceholder(b []byte, h Hit) bool {
+	at := int(h.Off) + len(h.Match)
+	if at >= len(b) {
+		return true
+	}
+	for at < len(b) && (b[at] == ' ' || b[at] == '\t' || b[at] == '"' || b[at] == '\'') {
+		at++
+	}
+	end := at
+	for end < len(b) && isCredentialByte(b[end]) {
+		end++
+	}
+	value := string(b[at:end])
+	name := strings.TrimSuffix(h.Match, "=")
+	if value == "" || len(value) < 4 {
+		return true
+	}
+	// An expansion or a bracketed stand-in is a template, not a value.
+	switch value[0] {
+	case '<', '$', '{', '%', '@', '*', '.':
+		return true
+	}
+	nv := normaliseCredential(value)
+	nn := normaliseCredential(name)
+	if nv == nn {
+		// `password=password`, `api_key=api_key`: the name standing in for a value.
+		return true
+	}
+	switch {
+	case strings.HasPrefix(nv, "your"):
+		return true
+	case credentialPlaceholders[nv]:
+		return true
+	}
+	return false
+}
+
+// isCredentialByte reports whether c can appear inside an unquoted credential
+// value.
+func isCredentialByte(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n', '"', '\'', ',', ';', '(', ')', '[', ']', '{', '}',
+		'#', '<', '>', '\\', '`':
+		return false
+	}
+	return c >= 0x21 && c < 0x7f
+}
+
+// normaliseCredential lowercases a name or value and drops the separators that
+// spellings vary in, so `your-api-key`, `your_api_key` and `YOURAPIKEY` compare
+// equal.
+func normaliseCredential(s string) string {
+	var out []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			out = append(out, c+32)
+		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'):
+			out = append(out, c)
+		}
+	}
+	return string(out)
+}
+
+// credentialPlaceholders is the vocabulary of values that are visibly not a
+// credential. It is deliberately short and specific: every entry is a word a
+// document uses in place of a value.
+var credentialPlaceholders = map[string]bool{
+	"empty": true, "none": true, "null": true, "nil": true, "nada": true,
+	"notneeded": true, "notrequired": true, "changeme": true, "replaceme": true,
+	"placeholder": true, "redacted": true, "dummy": true, "fake": true,
+	"example": true, "sample": true, "test": true, "testing": true, "todo": true,
+	"unknown": true, "undefined": true, "default": true, "unset": true,
+	"secret": true, "password": true, "passwd": true, "token": true,
+	"apikey": true, "key": true, "value": true, "string": true, "xxx": true,
+	"xxxx": true, "xxxxx": true, "xxxxxxxx": true, "abc": true, "abcdef": true,
+	"1234": true, "12345": true, "123456": true, "1234567": true, "12345678": true,
+	"localhost": true, "local": true,
 }
 
 // secretTokenHit builds the redacted hit for a token shape. Match carries the
