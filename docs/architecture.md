@@ -86,13 +86,40 @@ func ScanMemberBytes(parent *Ctx, name string, data []byte) (Format, error)
 ```
 
 Registration, from a format package's `init`:
-
 ```go
 artifact.RegisterFormat(artifact.Info{Format: ..., Magic: ..., Depth: ..., Container: ..., Notes: ...})
 artifact.RegisterSniffer("name", priority, func(s source.Source, l limits.Limits) (artifact.Format, bool))
 artifact.RegisterParser(artifact.FormatX, parser{})
 artifact.RegisterUniversal("polyglot", func(ctx *artifact.Ctx, s source.Source, f artifact.Format) { ... })
 ```
+
+Three rules govern what a sniffer may claim, and each exists because the
+alternative was a silent miss: an artifact whose format nothing claimed has no
+parser and no indicator pass, so its finding list is empty and reads exactly like
+a clean file's.
+
+- **A bare native magic is not a program.** The magic sniffer asks the validator
+  `internal/polyglot` registers (`artifact.RegisterNativeValidator`); when the
+  header does not validate, the claim is remembered and the next sniffer gets its
+  turn, so a chat template or a `config.json` that begins with `MZ` is still parsed
+  as what it is, and the bare magic is reported at info
+  (`SC4N-POLYGLOT-MAGIC-ONLY`). The last-resort text classifier does not override
+  that claim, because an unvalidated `.so` is closer to a program than to a
+  document. `FAT_MAGIC` is recognised (debug/macho reads that variant);
+  `FAT_CIGAM` and `FAT_MAGIC_64` are not, because the standard library cannot read
+  them and calling a file a program with no header to check would be a lie.
+- **A text artifact with binary appended is still text.** A NUL in the first
+  kilobyte disqualifies the text classifier *unless* the artifact opens as a
+  document (64 or more printable bytes), in which case it is claimed as text and
+  the content layer reports `SC4N-CONTENT-NOT-UTF8` while still running the
+  byte-safe indicators over the whole buffer. Binary content that starts
+  immediately, and random bytes, stay unclaimed.
+- **A claim must survive the walk it promises.** The pickle sniffer accepts a
+  stream after a silent probe walk reaches STOP, after 8 or more opcodes of a
+  protocol-bearing stream, or when the walk ran cleanly up to the 256 KiB probe
+  budget — and it also looks for a protocol byte inside a 64-byte prefix, because
+  a prefix in front of a stream is the nullifAI shape. A probe that refuses a file
+  it could have walked is indistinguishable from a clean file.
 
 Rules are declared once and referenced by pointer, so a rule's severity, CWE and
 help text cannot disagree between `sc4n rules`, the JSON report and the SARIF
@@ -260,3 +287,39 @@ measurements rather than opinions:
 `make test-simd` remains in the tree: it proves the whole module still builds and
 passes under `GOEXPERIMENT=simd` (and under the emulated `GODEBUG=simd=0` pass),
 which is where a future kernel would have to live.
+
+## Calibration against a real corpus
+
+Every calibration claim in this document and in the threat model is meant to be
+re-measurable, so the method is recorded here with the numbers of the round that
+produced them. The corpus is the Hugging Face campaign of 2026-10-10 (273 models,
+2688 fetched artifacts, 1209.8 MiB; the harness is in
+`local://sc4n-hf-campaign-2026-10-10.md` — re-fetch into a scratch directory, scan
+that directory with both binaries, and diff the raw JSON per
+`(artifact, ruleId, offset, evidence)`).
+
+Round of 2026-10-15, the same corpus and the same 2688 artifacts:
+
+| rule | before | after | why it changed |
+|---|---|---|---|
+| `SC4N-GGUF-STRUCT` | 9270 | 287 | one truncation, one fact: the first past-EOF tensor is reported by name, the remaining 881 are one aggregate finding (truncated files are 256 of the 2688 artifacts) |
+| `SC4N-ONNX-CUSTOM-DOMAIN` | 100 | 5 | one finding per distinct `(domain, kind)` instead of one per node |
+| `SC4N-STRING-SECRET-VALUE` | 11 | 0 | every hit was an assignment-shaped placeholder in a model card (`OPENAI_API_KEY="EMPTY"`, `'your-api-key'`, `$HF_TOKEN`), each verified by reading its context |
+| `SC4N-STRING-RAW-IP-URL` | 10 | 10 | unchanged count, evidence now names the notation (dotted-decimal, hex, octal, integer) |
+| **all rules** | **10733** | **1644** | 14 critical → 14, 107 high → 96, 9966 medium → 888, 53 low → 53, 593 info → 593 |
+
+Two properties are asserted rather than eyeballed: the report is byte-identical
+across two consecutive scans of the corpus (determinism), and no `high` or
+`critical` finding disappears except the class named in the table — the round's own
+differential prints that check, and it is why the removed set is small enough to
+read.
+
+The false negatives fixed in the same round cannot be seen in a before/after of a
+corpus that contains none of those shapes, so they are pinned by fixtures instead:
+a text artifact with a NUL appended (dispatched `unknown`, empty finding list
+before; text, `SC4N-CONTENT-NOT-UTF8` plus the byte-safe indicators after), a chat
+template behind a bare `MZ` magic (native, no template analysis before; the
+template's own rules after), and a pickle behind a prefix or behind a constant
+larger than the probe budget (no finding before; the critical gadget finding
+after). Each has a fixture in `testdata/fixtures/` whose `expect` list is the
+contract.

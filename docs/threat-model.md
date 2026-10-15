@@ -380,6 +380,13 @@ same calibration as every other path-escape rule),
 `SC4N-ONNX-CUSTOM-DOMAIN`, `SC4N-ONNX-FUNCTION`, `SC4N-ONNX-STRUCT`, and
 `SC4N-PATH-ESCAPE` when containment (`os.Root`) rejects a resolved path.
 
+`SC4N-ONNX-CUSTOM-DOMAIN` is reported once per distinct `(domain, kind)` per
+artifact, with the number of uses in the extra fields, not once per node: an
+onnxruntime-optimised model binds every one of its nodes to `com.microsoft`, and
+per-node reporting turned one fact into a hundred findings (measured on the
+corpus: 100 → 5). Every node still counts towards the number in the evidence, so
+nothing is hidden; what changed is how many times the same fact is stated.
+
 **Residual risk.** Only the whitelisted `external_data` keys are resolved at all;
 a legitimate-but-unusual layout may therefore be reported rather than followed,
 and a file that is *not* present at scan time cannot be judged.
@@ -407,10 +414,26 @@ alignment padding, misaligned/unsorted/overlapping tensor offsets),
 pinned type table — reported rather than guessed), plus the template rules and the
 shared indicator engine over every metadata string.
 
+Two calibrations matter for reading this rule's output. The type table is
+transcribed from the upstream `enum ggml_type` and cross-checked against the
+`static_assert`s on the block structs; it is pinned at `GGML_TYPE_COUNT = 43`
+(MXFP4, NVFP4, Q1_0, Q2_0 are the last four verified entries), and an id beyond
+that is reported as a violation. A *truncated* file (a partial download, or a
+header-only slice) is the shape the aggregate covers: every tensor whose extent
+runs past EOF is the same fact — the file ends — so the first such tensor is
+reported by name and the rest are one finding whose extra fields carry
+`further_tensor_extents`, `first_past_eof_end` and `last_past_eof_end`. On the
+corpus that turned 9270 findings over 256 artifacts into 287, while misalignment,
+out-of-order offsets, in-file overlaps and unknown type ids stay per tensor
+because each of those is a fact about that tensor alone.
+
 **Residual risk.** The ggml type table is a transcription; a type whose
 `block_size`/`type_size` cannot be confirmed is marked unverified and its extent
 check is skipped, so a wrong table entry can never manufacture an "overlap"
-finding — but it also means an unverified type is not geometry-checked.
+finding — but it also means an unverified type is not geometry-checked. An id
+above the pinned `COUNT` is a violation, and a *new* upstream type therefore
+reports until the table is re-transcribed; the evidence names the id so the
+difference is visible.
 
 ## 6. Weight-level backdoors (out of band, never a gate)
 
@@ -469,6 +492,30 @@ that *declare* the tokenizer's tokens (`tokenizer.json`, `tokenizer_config.json`
 defines `<|im_start|>` is naming its own token, not smuggling text into a model's
 input. The instruction phrases, the secrets and the endpoints are still reported
 there, and the same bytes under any other name are scanned as ordinary text.
+
+Three details of that set are worth reading, because each is a channel that was
+invisible until it was measured:
+
+- **The Unicode Tags block (U+E0000–U+E007F)** is part of the anomaly walk and of
+  the card analyser's invisible runs. The characters draw nothing in any renderer
+  and a tokenizer still reads them, which makes them the purest form of a hidden
+  instruction; an enumerated list of zero-width and bidi code points missed them
+  entirely.
+- **The above-anaphora phrasings** (`ignore the above`, `ignore all previous`,
+  `disregard the above`, `forget the above`) are in the phrase table, the template
+  table and the card directives. The tables had "ignore previous instructions" and
+  "disregard previous instructions", which a document that says "ignore the above"
+  never contains — the classic card/template override went unreported.
+- **A credential value is reported on its shape, and a placeholder is not
+  reported at all.** `SC4N-STRING-SECRET-VALUE` matches vendor token shapes
+  (`ghp_`, `github_pat_`, `sk-`, `AKIA`/`ASIA`, `AIza`, `xoxb-`, a JWT) as well as
+  `NAME=value` assignments, and redacts whatever it matched. Because the literal
+  table cannot see the value, the assignment half drops the ones a reader can see
+  are not credentials: `api_key="EMPTY"`, `api_key="none"`, `api_key='your-api-key'`,
+  `${VAR}`, `<your-key>`, `password=password`. Measured on the corpus, every
+  assignment-shaped hit it had was one of those — the local-server example a model
+  card ships — so the filter removed 11 false positives there while the token shapes
+  kept firing wherever a value actually has a credential's shape.
 
 **Mitigation.** Treat card text as untrusted input, never as documentation to be
 obeyed. Datamarking/spotlighting reduces (does not eliminate) injection success.
@@ -573,6 +620,18 @@ unsigned.
    `sc4n hash` is the command that computes a full sha256 when you need one.
 7. **A file the scanner cannot open is exit code 3**, not a finding: "the mount
    is missing" and "your model is malicious" must never be confusable in CI.
+8. **An artifact no sniffer claims is still silent about its content.** It is
+   recorded as `unknown`, only the format-independent layers run, and no finding
+   says so. The exception is the text shape above (a document with a binary tail is
+   now claimed as text and reported through `SC4N-CONTENT-NOT-UTF8`); a binary
+   artifact with no recognisable header, and a document whose binary content begins
+   within its first 64 bytes, remain in that class.
+9. **The pickle prefix search is 64 bytes.** A pickle stream that starts more than
+   64 bytes into an artifact is found only by the container that exists around it
+   (a zip member, a framework's own reader), never by the top-level sniffer.
+10. **The fat Mach-O variants the standard library cannot read** (`FAT_CIGAM`,
+    `FAT_MAGIC_64`) are not claimed as native and therefore not reported as
+    validated executables.
 
 ## 12. Mapping from rule to fixture
 
@@ -584,9 +643,16 @@ disjoint from `forbid` for every file on disk. The benign set
 (`testdata/fixtures/benign/`) is the false-positive gate: it must produce no
 `high` or `critical` finding at all.
 
-The gate covers the fixtures that exist, not the rule catalogue: 135 of the 190
-rules are named in `expectations.json`, and the other 55 — the limit rules, the
+The gate covers the fixtures that exist, not the rule catalogue: 142 of the 189
+rules are named in `expectations.json`, and the rest — the limit rules, the
 parse-failure rules and the hf-cache collector rules, which need a crafted input or
 a crafted cache to reach — are covered by Go tests only. `sc4n rules` prints the
 live catalogue with each rule's CWE, and `sc4n formats` prints the per-format depth
 of analysis and the deliberate gaps.
+
+A fixture whose contract is a *count* rather than an ID set (one aggregate finding
+instead of N, exactly one finding for a duplicate key) cannot be expressed by
+`expect`/`forbid`, so those live in the owning package's Go tests — see
+`TestPastEOFCascadeIsAggregated`, `TestCustomDomainIsAggregated` and
+`TestDuplicateTopLevelKeyIsOneFinding` — and are proven by running them against the
+tree at the commit before the fix.
