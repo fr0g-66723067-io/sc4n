@@ -568,6 +568,12 @@ file as code.
 **Residual risk.** Name- and shape-based: `SC4N-REPO-SPACE-APP` fires on any
 `app.py` because one file cannot prove the tree is a Space, and a `setup.py`
 whose hook is spelled unusually is reported at lower confidence.
+`SC4N-REPO-WHEEL-IN-MODEL` is in that group deliberately: `.whl`, `.tar.gz` and
+`.tgz` are matched by *name*, and a name cannot tell `dataset.tar.gz` from an sdist,
+so it is reported at medium severity and low confidence as a pointer to the archive
+walk that actually reads the members — at high severity it made `-fail-on high` fail
+on any repository that ships a data tarball, while the same bytes named `.zip`
+produced nothing. The content rules in this section are the ones that decide.
 
 ## 10. Provenance and supply chain
 

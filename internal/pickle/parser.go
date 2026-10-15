@@ -93,6 +93,29 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 // longer prefix would make every binary artifact pay for a scan it cannot use.
 const prefixProbe = 64
 
+// OpensAsPickle reports whether b opens as a pickle stream: PROTO with an
+// in-range version, or an opcode a protocol-0/1 stream may begin with.
+//
+// It is stricter than the sniffer's own head test, which also accepts a protocol
+// byte inside a 64-byte prefix (the nullifAI prefix shape). A package that claims
+// a *specific* framing — joblib's, whose file is a pickle from byte 0 — has to
+// match the opening rather than merely contain a protocol byte somewhere: a
+// zlib-compressed joblib carries the wrapper name and a PROTO byte verbatim in its
+// stored blocks, and walking those compressed bytes as opcodes reported seven bytes
+// of framing as SC4N-PICKLE-PREFIX (high) on a benign file.
+func OpensAsPickle(b []byte) bool {
+	if len(b) < 2 {
+		return false
+	}
+	if b[0] == opPROTO {
+		return b[1] >= 1 && b[1] <= highestProtocol
+	}
+	if info := opTable[b[0]]; info.name != "" && info.proto <= 1 {
+		return true
+	}
+	return false
+}
+
 // plausibleHead reports whether head either starts with a plausible pickle stream
 // or carries a protocol byte inside the prefix.
 //
@@ -111,6 +134,16 @@ func plausibleHead(head []byte) bool {
 	}
 	if info := opTable[head[0]]; info.name != "" && info.proto <= 1 {
 		return true
+	}
+	// Not a plausible start at offset 0. A payload may still precede the stream —
+	// the nullifAI shape — so a protocol byte inside the prefix is looked for, but
+	// not when the artifact begins with a magic a container parser unwraps: a zlib
+	// stream that carries a pickle verbatim in a stored block has a PROTO byte a few
+	// bytes in, and claiming it here walked compressed bytes as opcodes. The
+	// container route unwraps the stream and walks the pickle as a member, which is
+	// the same bytes judged by the parser that understands them.
+	if artifact.LeadingContainerMagic(head) {
+		return false
 	}
 	for i := 1; i+1 < len(head); i++ {
 		if head[i] == opPROTO && head[i+1] >= 1 && head[i+1] <= highestProtocol {

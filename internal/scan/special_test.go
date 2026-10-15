@@ -104,3 +104,37 @@ func TestSymlinkToPipeIsReportedNotOpened(t *testing.T) {
 		t.Fatal("the scan did not return: the link's target is a pipe")
 	}
 }
+
+// TestSymlinkedDirectoryIsNotUnreadable pins the exit-code contract at its boundary.
+// The contract is "a path the user named could not be opened", and a directory
+// symlink inside the tree is not one: filepath.WalkDir does not follow it, so the
+// link itself is not an artifact and the directory's contents are scanned through
+// their real path. Reporting the link made a completely readable tree exit 3 on a
+// benign `models/current -> models/v3`.
+func TestSymlinkedDirectoryIsNotUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "models", "v3")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "f.bin"), []byte("plain text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The link is a sibling of its target, as a `current -> v3` pointer is.
+	if err := os.Symlink("v3", filepath.Join(dir, "models", "current")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	res, err := scan.Run(context.Background(), scan.Config{Paths: []string{dir}, Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if res.Unreadable != 0 {
+		t.Fatalf("unreadable paths = %d, want 0: a symlinked directory is not an artifact", res.Unreadable)
+	}
+	for _, a := range res.Artifacts {
+		if a.Path == filepath.Join(dir, "models", "current") {
+			t.Fatalf("the directory link was reported as an artifact: %+v", a)
+		}
+	}
+}

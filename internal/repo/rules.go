@@ -135,14 +135,19 @@ var (
 	ruleWheelInModel = report.DefineRule(report.Rule{
 		ID:         "SC4N-REPO-WHEEL-IN-MODEL",
 		Title:      "Python package archive found in the scanned tree",
-		Severity:   report.SeverityHigh,
-		Confidence: report.ConfidenceHigh,
+		Severity:   report.SeverityMedium,
+		Confidence: report.ConfidenceLow,
 		CWE:        []string{"CWE-506"},
 		Class:      "repo",
-		Description: "A .whl or .tar.gz package archive sits in the scanned tree. A package archive " +
-			"installs code: it can ship a setup.py build hook, a .pth file or a .pyc. Its members are " +
-			"scanned separately as an archive, so this finding is the pointer to that scan, not a " +
-			"substitute for it.",
+		Description: "A .whl, .tar.gz or .tgz package archive sits in the scanned tree. A package " +
+			"archive installs code: it can ship a setup.py build hook, a .pth file or a .pyc. Its " +
+			"members are scanned separately as an archive, so this finding is the pointer to that scan, " +
+			"not a substitute for it — and the pointer is name-only, because telling an sdist from a " +
+			"dataset tarball needs the archive's members (a dataset.tar.gz and a diffsynth-1.0.tar.gz " +
+			"are the same bytes to a name test). Medium severity and low confidence for that reason: the " +
+			"same calibration as the name-driven Dockerfile and app.py pointers, where the content rules " +
+			"elsewhere in this package (a .pth line, a setup.py hook, a sitecustomize module) are the " +
+			"high and critical ones.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/506.html"},
 		Tags: []string{"supply-chain", "install-time"},
 	})

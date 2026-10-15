@@ -2,9 +2,10 @@ package repo
 
 import (
 	"bytes"
-	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"os"
 	"strings"
+
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
@@ -88,7 +89,8 @@ func caresAbout(path string) bool {
 		strings.HasSuffix(base, ".start"),
 		strings.HasSuffix(base, ".pyc"),
 		strings.HasSuffix(base, ".whl"),
-		strings.HasSuffix(base, ".tar.gz"):
+		strings.HasSuffix(base, ".tar.gz"),
+		strings.HasSuffix(base, ".tgz"):
 		return true
 	}
 	return isWorkflow(path)
@@ -141,7 +143,7 @@ func AnalyzeFile(ctx *artifact.Ctx, path string, data []byte) {
 		startRule(ctx, data)
 	case strings.HasSuffix(base, ".pyc"):
 		pycOrphanRule(ctx, path)
-	case strings.HasSuffix(base, ".whl") || strings.HasSuffix(base, ".tar.gz"):
+	case strings.HasSuffix(base, ".whl"), strings.HasSuffix(base, ".tar.gz"), strings.HasSuffix(base, ".tgz"):
 		// Only a package archive in the scanned tree, not one nested inside another
 		// archive: at depth > 0 it is a member and its own container walk covers it.
 		if ctx.Depth == 0 {
@@ -235,8 +237,10 @@ func setupHookRule(ctx *artifact.Ctx, data []byte) {
 		if strings.HasPrefix(t, "#") {
 			continue
 		}
-		for _, sink := range []string{"os.system", "os.popen", "subprocess.", "urllib.request", "requests.",
-			"socket.", "shutil.rmtree", "exec(", "eval(", "__import__(", "compile("} {
+		for _, sink := range []string{
+			"os.system", "os.popen", "subprocess.", "urllib.request", "requests.",
+			"socket.", "shutil.rmtree", "exec(", "eval(", "__import__(", "compile(",
+		} {
 			if strings.HasPrefix(t, sink) {
 				ctx.Sink.Emit(ruleSetupHook, ln.off, "module-scope call runs during install: "+report.TruncateEvidence(t, 120))
 			}

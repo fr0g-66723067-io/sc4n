@@ -1,6 +1,8 @@
 package numpy
 
 import (
+	"bytes"
+	"compress/zlib"
 	"strings"
 	"testing"
 
@@ -388,4 +390,58 @@ func TestJoblibInlineMaskDoesNotHideRealUnsafeOpcodes(t *testing.T) {
 	st = append(st[:len(st)-1], 0x31, 0x2e)
 	fs := parseJoblib(t, st)
 	want(t, fs, []string{"SC4N-PICKLE-REQUIRES-UNSAFE-LOADER"}, nil)
+}
+
+// TestSniffJoblibRequiresAPickleOpening pins the gate that a compressed joblib
+// exposed. joblib's file is a pickle from byte 0, but joblib.dump's default is zlib
+// compression, and a zlib stream that stores its blocks verbatim (level 0) contains
+// both the wrapper class name and a PROTO byte close to the start. Claiming such a
+// file as joblib made the joblib parser walk compressed bytes as opcodes, which
+// reported the container's own framing as findings — measured on the committed
+// benign fixture: SC4N-PICKLE-PREFIX (high, "7 bytes precede the first pickle
+// opcode") and SC4N-PICKLE-TRAILING (high). The compressed case must fall through to
+// the zlib sniffer, which unwraps the stream and walks the pickle as a member.
+func TestSniffJoblibRequiresAPickleOpening(t *testing.T) {
+	wrapper := []byte("\x80\x02cjoblib.numpy_pickle\nNumpyArrayWrapper\n")
+	compressed := zlibCompress(wrapper)
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{"uncompressed joblib pickle", wrapper, true},
+		{"zlib-compressed joblib", compressed, false},
+		{"zlib-compressed joblib with a wrapper name only", append([]byte("\x78\x9c"), wrapper...), false},
+		// The name alone is not enough and the opening test is what rejects it: a
+		// document that merely mentions the wrapper class is not a joblib file. (A
+		// document whose *first byte* is an opcode letter is still claimed — the
+		// pre-existing looseness of a name-based sniffer, unchanged here.)
+		{"prose naming a wrapper", []byte("Docs: joblib.numpy_pickle.NumpyArrayWrapper\n"), false},
+	} {
+		s := source.Mem(tc.name, tc.data)
+		got, ok := sniffJoblib(s, limits.Default())
+		s.Close()
+		if ok != tc.want {
+			t.Errorf("sniffJoblib(%s) = %v, %s; want claimed=%v", tc.name, ok, got, tc.want)
+		}
+	}
+}
+
+// zlibCompress is zlib's level-0 framing: stored blocks, so the payload is verbatim
+// in the stream. It is the shape that made the wrapper name and a PROTO byte both
+// visible to a sniffer that only searched the head.
+func zlibCompress(b []byte) []byte {
+	var buf bytes.Buffer
+	w, err := zlib.NewWriterLevel(&buf, zlib.NoCompression)
+	if err != nil {
+		panic(err)
+	}
+	if _, err := w.Write(b); err != nil {
+		panic(err)
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
 }

@@ -81,8 +81,19 @@ func sniffJoblibLegacy(s source.Source, l limits.Limits) (artifact.Format, bool)
 	return artifact.FormatZlibJoblibLegacy, true
 }
 
-// sniffJoblib claims a stream that names a joblib wrapper class. It scans only
-// the first sniffWindow bytes and never allocates from file-controlled lengths.
+// sniffJoblib claims a stream that names a joblib wrapper class and opens as a
+// pickle. It scans only the first sniffWindow bytes and never allocates from
+// file-controlled lengths.
+//
+// The opening test is not decoration: joblib's own format is a pickle from byte 0,
+// while a *compressed* joblib (joblib.dump's default is zlib) opens with 78 9c and
+// still contains the wrapper name and a PROTO byte verbatim inside its stored
+// blocks. Without the test, this sniffer claimed such a file at priority 97 and the
+// joblib parser walked the compressed bytes as opcodes: measured on the committed
+// benign fixture, the result was a high SC4N-PICKLE-PREFIX ("7 bytes precede the
+// first pickle opcode") on a file that is a perfectly ordinary compressed joblib.
+// The zlib sniffer unwraps it and walks the real pickle, which is why the compressed
+// case must fall through to it.
 func sniffJoblib(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	size := s.Size()
 	if size < 8 {
@@ -94,6 +105,9 @@ func sniffJoblib(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	}
 	head, err := s.Bytes(0, n)
 	if err != nil && int64(len(head)) == 0 {
+		return artifact.FormatUnknown, false
+	}
+	if !pickle.OpensAsPickle(head) {
 		return artifact.FormatUnknown, false
 	}
 	for _, name := range joblibWrapperNames {

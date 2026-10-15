@@ -2,6 +2,7 @@ package artifact_test
 
 import (
 	"bytes"
+	"compress/zlib"
 	"testing"
 
 	// Imported for their inits: internal/formats pulls in every parser package,
@@ -81,5 +82,71 @@ func TestSniffBareNativeMagicIsNotAClaim(t *testing.T) {
 	class := append([]byte("\xca\xfe\xba\xbe\x00\x00\x00\x41"), bytes.Repeat([]byte{0x0a, 0x00}, 40)...)
 	if got, _ := artifact.Sniff(source.Mem("Thing.class", class), limits.Default()); got != artifact.FormatNative {
 		t.Fatalf("class file dispatched as %v, want native (bare magic, unclaimed)", got)
+	}
+}
+
+// TestWeakMagicDoesNotOutrankAModel pins the zlib/lzma magic demotion. A
+// safetensors file's first eight bytes are a little-endian header length, the
+// official writer pads the header to a multiple of 8, and a header of 376, 40056 or
+// 55928 bytes puts 78 01, 78 9c or 78 da at offset 0 — the zlib magic. Claimed at
+// the magic sniffer's priority, such a file was dispatched as zlib: two medium
+// findings about a zlib stream that was not there, and *no* SC4N-SAFETENSORS-* at
+// all, because the parser that understands the file never ran.
+func TestWeakMagicDoesNotOutrankAModel(t *testing.T) {
+	body := []byte(`{"__metadata__":{"format":"pt"},"a":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}}`)
+	for len(body) < 376 {
+		body = append(body, ' ')
+	}
+	if len(body) != 0x178 || body[0] != '{' {
+		t.Fatalf("fixture header is %d bytes, want 376", len(body))
+	}
+	sf := append([]byte{0x78, 0x01, 0, 0, 0, 0, 0, 0}, body...)
+	sf = append(sf, make([]byte, 8)...)
+	got, sniffer := artifact.Sniff(source.Mem("model.safetensors", sf), limits.Default())
+	if got != artifact.FormatSafetensors {
+		t.Fatalf("a safetensors file whose header length starts 78 01 dispatched as %v (by %q); the "+
+			"weak magic must not outrank a structured format", got, sniffer)
+	}
+
+	// The demotion must not cost the weak magics their own files: a real zlib stream
+	// still dispatches as zlib, below every structured sniffer and above the text
+	// fallback.
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	if _, err := w.Write([]byte("{\"a\": 1}")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := artifact.Sniff(source.Mem("blob.bin", buf.Bytes()), limits.Default()); got != artifact.FormatZlib {
+		t.Fatalf("a real zlib stream dispatched as %v, want zlib", got)
+	}
+}
+
+// TestLeadingContainerMagic is the predicate the pickle sniffer consults before
+// claiming a stream found behind a prefix: a file that opens with a magic a
+// container parser unwraps is that container, not a prefixed pickle, even when the
+// container's bytes carry a pickle verbatim (zlib's stored blocks do).
+func TestLeadingContainerMagic(t *testing.T) {
+	yes := [][]byte{
+		[]byte("PK\x03\x04"), []byte("\x1f\x8b\x08"), []byte("\x78\x9c"), []byte("\x78\x01"),
+		[]byte("\x78\xda"), []byte("BZh9"), []byte("\xfd7zXZ\x00"), []byte("\x5d\x00\x00"),
+		[]byte("\x04\x22\x4d\x18"), []byte("\x28\xb5\x2f\xfd"), []byte("7z\xbc\xaf\x27\x1c"),
+		[]byte("Rar!\x1a\x07"),
+	}
+	for _, b := range yes {
+		if !artifact.LeadingContainerMagic(b) {
+			t.Errorf("LeadingContainerMagic(%q) = false, want true", b)
+		}
+	}
+	no := [][]byte{
+		[]byte("\x80\x04"), []byte("junk"), []byte("MZ"), []byte("\x7fELF"),
+		[]byte(`{"a": 1}`), nil,
+	}
+	for _, b := range no {
+		if artifact.LeadingContainerMagic(b) {
+			t.Errorf("LeadingContainerMagic(%q) = true, want false", b)
+		}
 	}
 }

@@ -268,6 +268,30 @@ func emitLimitDepth(ctx *Ctx, name string) {
 // xz magics) plus the TFLite identifier at offset 4.
 const maxMagicProbe = 512
 
+// containerMagics are the leading magics whose format is a container the archive
+// layer unwraps, in one place because two callers need the same list: the magic
+// sniffer (through magicSniffer) and artifact.LeadingContainerMagic.
+var containerMagics = []struct {
+	magic  []byte
+	format Format
+	at     int
+}{
+	{[]byte("PK\x03\x04"), FormatZip, 0},
+	{[]byte("PK\x05\x06"), FormatZip, 0},
+	{[]byte("PK\x07\x08"), FormatZip, 0},
+	{[]byte("\x1f\x8b"), FormatGzip, 0},
+	{[]byte("BZh"), FormatBzip2, 0},
+	{[]byte("\x78\x01"), FormatZlib, 0},
+	{[]byte("\x78\x9c"), FormatZlib, 0},
+	{[]byte("\x78\xda"), FormatZlib, 0},
+	{[]byte("\xfd7zXZ\x00"), FormatXz, 0},
+	{[]byte("\x5d\x00\x00"), FormatLzma, 0},
+	{[]byte("\x04\x22\x4d\x18"), FormatLz4, 0},
+	{[]byte("\x28\xb5\x2f\xfd"), FormatZstd, 0},
+	{[]byte("7z\xbc\xaf\x27\x1c"), FormatSevenZip, 0},
+	{[]byte("Rar!\x1a\x07"), FormatRar, 0},
+}
+
 var magicSniffer = []struct {
 	magic  []byte
 	format Format
@@ -297,6 +321,23 @@ var magicSniffer = []struct {
 	{[]byte("\xca\xfe\xba\xbe"), FormatNative, 0},
 	{[]byte("\xd0\xcf\x11\xe0"), FormatNative, 0},
 	{[]byte("!<arch>\n"), FormatNative, 0},
+}
+
+// weakMagicSniffer holds the signatures that are too short to be an identity on
+// their own: a two-byte zlib header and a three-byte lzma one. They are claimed at
+// a priority *below* every structured content sniffer, because a stream that merely
+// starts with those bytes is common in files that are something else — a
+// safetensors file's first eight bytes are a little-endian header length, the
+// official writer pads the header to a multiple of 8, and a header of 376, 40056 or
+// 55928 bytes puts 78 01, 78 9c or 78 da at offset 0. Claimed at magic priority, a
+// perfectly valid model.safetensors was dispatched as zlib and its own parser never
+// ran: two medium findings about a zlib stream that was not there, and no
+// SC4N-SAFETENSORS-* at all.
+var weakMagicSniffer = []struct {
+	magic  []byte
+	format Format
+	at     int
+}{
 	{[]byte("\x78\x01"), FormatZlib, 0},
 	{[]byte("\x78\x9c"), FormatZlib, 0},
 	{[]byte("\x78\xda"), FormatZlib, 0},
@@ -305,6 +346,10 @@ var magicSniffer = []struct {
 
 func init() {
 	RegisterSniffer("magic", 100, sniffMagic)
+	// Below every structured sniffer (the lowest of those is msgpack at 50) and
+	// above the text fallback, so a zlib-shaped prefix cannot outrank a file that
+	// is really a model: see weakMagicSniffer.
+	RegisterSniffer("magic-weak", 55, sniffWeakMagic)
 	RegisterSniffer("tarkind", 90, sniffTar)
 	RegisterSniffer("pickle-proto", 80, sniffPickleHeader)
 	RegisterSniffer(textFallbackSniffer, -100, sniffText)
@@ -400,12 +445,48 @@ func init() {
 	})
 }
 
+// LeadingContainerMagic reports whether b begins with a magic that a container
+// parser unwraps (zip, tar, gzip, zlib, bzip2, xz, lz4, zstd, 7z, rar).
+//
+// It exists for the pickle sniffer's prefix search: a stream that opens with a
+// compression magic and carries a pickle verbatim inside a stored block (zlib's
+// level-0 framing does exactly that) contains a PROTO byte a few bytes in, so a
+// prefix search would claim the file as a pickle and walk compressed bytes as
+// opcodes — reporting the container's own framing as SC4N-PICKLE-PREFIX and
+// SC4N-PICKLE-TRAILING instead of dispatching the file as the container it is. The
+// caller that cares is the one that would otherwise look past the magic.
+func LeadingContainerMagic(b []byte) bool {
+	for _, m := range containerMagics {
+		if len(b) >= m.at+len(m.magic) && bytes.HasPrefix(b[m.at:], m.magic) {
+			return true
+		}
+	}
+	return false
+}
+
 func sniffMagic(s source.Source, l limits.Limits) (Format, bool) {
+	return sniffTable(s, magicSniffer)
+}
+
+// sniffWeakMagic claims the short signatures, at a priority below every structured
+// sniffer; see weakMagicSniffer.
+func sniffWeakMagic(s source.Source, l limits.Limits) (Format, bool) {
+	return sniffTable(s, weakMagicSniffer)
+}
+
+// sniffTable runs one magic table against the artifact's head. Both tables hold the
+// same struct type, so the scan is written once.
+func sniffTable(s source.Source, table []struct {
+	magic  []byte
+	format Format
+	at     int
+},
+) (Format, bool) {
 	head, err := s.Bytes(0, min64(s.Size(), maxMagicProbe))
 	if err != nil && (len(head) < 8) {
 		return FormatUnknown, false
 	}
-	for _, m := range magicSniffer {
+	for _, m := range table {
 		if len(head) < m.at+len(m.magic) {
 			continue
 		}

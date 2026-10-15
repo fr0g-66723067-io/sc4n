@@ -177,3 +177,34 @@ func TestCaresAbout(t *testing.T) {
 		t.Error("a .pth inside a wheel must be recognised via its last segment")
 	}
 }
+
+// TestPackageArchivePointerIsNotAHighFinding pins the calibration of
+// SC4N-REPO-WHEEL-IN-MODEL: its basis is the file *name*, and a name cannot tell an
+// sdist from dataset.tar.gz. At high severity it made `-fail-on high` fail on a
+// repository that merely ships a data tarball, while the identical bytes named
+// .tgz produced nothing — a verdict that depends on the suffix is the reasoning this
+// package's own sibling rules (Dockerfile, app.py) explicitly do not use for a high
+// finding.
+func TestPackageArchivePointerIsNotAHighFinding(t *testing.T) {
+	ctx, c := newTestCtx(t, 0)
+	AnalyzeFile(ctx, "dataset.tar.gz", []byte("not a package archive\n"))
+	AnalyzeFile(ctx, "dataset.tgz", []byte("not a package archive\n"))
+	var seen int
+	for _, f := range c.Findings() {
+		if f.RuleID != ruleWheelInModel.ID {
+			continue
+		}
+		seen++
+		if f.Severity >= report.SeverityHigh {
+			t.Errorf("%s reported at %v; a name-only pointer must not reach the default -fail-on threshold",
+				f.Artifact, f.Severity)
+		}
+		if f.Confidence >= report.ConfidenceMedium {
+			t.Errorf("%s reported at %v confidence; the basis is the file name", f.Artifact, f.Confidence)
+		}
+	}
+	if seen != 2 {
+		t.Errorf("the pointer fired %d time(s) for the two spellings, want 2: a .tgz is the same package "+
+			"archive as a .tar.gz", seen)
+	}
+}

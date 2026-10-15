@@ -443,6 +443,12 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	if fi.Mode()&os.ModeSymlink != 0 {
 		if st, serr := os.Stat(e.Path); serr == nil {
 			size = st.Size()
+			if st.IsDir() {
+				// A directory reached through an entry list is not an artifact;
+				// there is nothing to read and the contents are walked under their
+				// own path.
+				return sum
+			}
 			// A link that resolves to a pipe, a socket or a device node is the
 			// same hang as a pipe found directly: report it instead of opening it.
 			if !st.Mode().IsRegular() {
@@ -748,6 +754,16 @@ func expand(cfg Config) ([]Entry, error) {
 			if !d.Type().IsRegular() && d.Type()&os.ModeSymlink == 0 {
 				out = append(out, Entry{Path: path, Display: path, Skip: notRegular(path, d.Type())})
 				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				// A link that resolves to a directory is not an artifact. The walk
+				// does not descend into it (filepath.WalkDir does not follow links)
+				// and the directory's own contents are scanned through their real
+				// path, so reporting the link as an unreadable path made a completely
+				// readable tree exit 3 on a benign `models/current -> models/v3`.
+				if st, err := os.Stat(path); err == nil && st.IsDir() {
+					return nil
+				}
 			}
 			out = append(out, Entry{Path: path, Display: path})
 			return nil
