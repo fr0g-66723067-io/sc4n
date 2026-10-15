@@ -584,6 +584,13 @@ func TestRealVocabGGUFsUnchanged(t *testing.T) {
 	if base == "" {
 		base = "../../../gh33p1n7-projects/cpp-trending-2026-09/analysis/llama-cpp/index-src/models"
 	}
+	// The corpus is external state (a llama.cpp checkout this repository does not
+	// ship), so its absence is a skip rather than a failure: a red suite on a stock
+	// host hides the regressions this gate exists to catch. Set SC4N_LLAMA_MODELS to
+	// point at a checkout to run it.
+	if _, err := os.Stat(base); err != nil {
+		t.Skipf("real vocab GGUF corpus absent: %v (set SC4N_LLAMA_MODELS)", err)
+	}
 	found := 0
 	for _, name := range vocabGGUFs {
 		data, err := os.ReadFile(filepath.Join(base, name))
