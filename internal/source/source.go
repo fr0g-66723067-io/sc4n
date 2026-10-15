@@ -66,8 +66,11 @@ type Source interface {
 // On unix, a regular file of at least l.MmapThreshold bytes is memory-mapped;
 // smaller files and character devices are read into memory (capped at
 // l.MaxArtifactBytes) with os.ReadFile so that a pipe or /dev/* path still
-// works. On other platforms the file is read into memory. The returned Source
-// owns its bytes and MUST be closed by the caller.
+// works. That applies to a path the caller named: a directory walk must not hand
+// a FIFO here, because open(2) on a pipe with no writer blocks inside the
+// syscall, which no deadline can interrupt — internal/scan records such an entry
+// instead (Entry.Skip). On other platforms the file is read into memory. The
+// returned Source owns its bytes and MUST be closed by the caller.
 func Open(path string, l limits.Limits) (Source, error) {
 	f, err := os.Open(path)
 	if err != nil {

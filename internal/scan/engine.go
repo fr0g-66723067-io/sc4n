@@ -51,6 +51,15 @@ type Entry struct {
 	// reads them from refs/). It reaches the report so a finding can be
 	// attributed to the revision the user was actually using.
 	Revision string
+	// Skip, when set, is why this entry is reported instead of read. It exists
+	// for the entry an expander already knows cannot be opened as an artifact: a
+	// directory walk that meets a FIFO, a socket or a device node. os.Open on a
+	// FIFO blocks until a writer appears, and a blocked syscall is not
+	// interruptible by the scan deadline, so one pipe in a scanned tree hung the
+	// whole run with no finding and no exit code — the one outcome a scanner must
+	// never produce. The error text reaches the artifact summary and the
+	// unreadable-path count.
+	Skip error
 }
 
 // Config is the scan request.
@@ -417,6 +426,11 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	}
 	sum := report.ArtifactSummary{Path: name, Format: artifact.FormatUnknown.String()}
 
+	if e.Skip != nil {
+		sum.Error = e.Skip.Error()
+		return sum
+	}
+
 	fi, err := os.Lstat(e.Path)
 	if err != nil {
 		sum.Error = err.Error()
@@ -429,6 +443,12 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	if fi.Mode()&os.ModeSymlink != 0 {
 		if st, serr := os.Stat(e.Path); serr == nil {
 			size = st.Size()
+			// A link that resolves to a pipe, a socket or a device node is the
+			// same hang as a pipe found directly: report it instead of opening it.
+			if !st.Mode().IsRegular() {
+				sum.Error = notRegular(e.Path, st.Mode()).Error()
+				return sum
+			}
 		} else {
 			sum.Error = serr.Error()
 			return sum
@@ -658,6 +678,25 @@ func digestBytes(b []byte) string {
 // skipDirs are directory names that never hold scan targets. Everything else is
 // walked, including dotfiles, because .pth and .start files (the site-packages
 // startup vectors) are dot-prefixed.
+// notRegular is the reason an entry that is not a regular file is reported rather
+// than read. The kind is spelled out because "unreadable" tells a reviewer the
+// wrong thing: this is a file the scanner deliberately did not open, not one it
+// failed to open.
+func notRegular(path string, mode os.FileMode) error {
+	kind := "special file"
+	switch {
+	case mode&os.ModeNamedPipe != 0:
+		kind = "named pipe"
+	case mode&os.ModeSocket != 0:
+		kind = "socket"
+	case mode&os.ModeDevice != 0:
+		kind = "device node"
+	case mode&os.ModeSymlink != 0:
+		kind = "symlink"
+	}
+	return fmt.Errorf("%s is a %s, not a regular file: it was not opened, because reading it can block the scan", path, kind)
+}
+
 var skipDirs = map[string]bool{
 	".git":         true,
 	"node_modules": true,
@@ -700,6 +739,14 @@ func expand(cfg Config) ([]Entry, error) {
 				if path != p && skipDirs[d.Name()] {
 					return filepath.SkipDir
 				}
+				return nil
+			}
+			// A symlink is followed by scanOne (the hf-cache layout is built out
+			// of them), so it is not skipped here; anything else that is not a
+			// regular file is recorded, never opened: reading a FIFO blocks until
+			// a writer appears, which hangs the scan rather than failing it.
+			if !d.Type().IsRegular() && d.Type()&os.ModeSymlink == 0 {
+				out = append(out, Entry{Path: path, Display: path, Skip: notRegular(path, d.Type())})
 				return nil
 			}
 			out = append(out, Entry{Path: path, Display: path})

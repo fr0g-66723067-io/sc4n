@@ -632,6 +632,13 @@ unsigned.
 10. **The fat Mach-O variants the standard library cannot read** (`FAT_CIGAM`,
     `FAT_MAGIC_64`) are not claimed as native and therefore not reported as
     validated executables.
+11. **A named pipe, socket or device node in a scanned tree is reported, not
+    opened.** A directory walk records it as an unreadable path (exit code 3) with
+    the reason, because `open(2)` on a FIFO with no writer blocks inside the
+    syscall: the worker never returns, and neither the deadline nor context
+    cancellation can interrupt it. An explicitly named FIFO is still opened, which
+    is what makes `sc4n scan <(producer)` and a `mkfifo`-fed path work; a symlink
+    whose target is one of these is reported like the target itself.
 
 ## 12. Mapping from rule to fixture
 
