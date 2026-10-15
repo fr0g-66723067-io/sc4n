@@ -26,6 +26,13 @@ var cardDirectives = []string{
 	"never reveal", "never mention", "do not disclose", "do not reveal this",
 	"do not output", "do not echo", "under no circumstances",
 	"the assistant must", "the model must", "system prompt is", "hidden instruction",
+	// The above-anaphora family. "Ignore the above" and its variants carry no
+	// noun of their own, which is exactly why they are the phrasing a card that
+	// has been asked to override the text before it uses; the shared table
+	// carries the same literals so one card reports both the metadata and the
+	// card verdict.
+	"ignore the above", "ignore all previous", "disregard the above",
+	"forget the above", "forget all previous",
 }
 
 // decodedDirectives are the strings looked for inside a base64 blob that
@@ -375,7 +382,10 @@ func containsDirective(s string) bool {
 
 // invisible reports the zero-width and bidirectional control set: characters a
 // reader does not see and, for the bidi overrides, characters that reorder what
-// they do see.
+// they do see. The Unicode Tags block (U+E0000-U+E007F) is in the set for the
+// same reason the zero-width class is: a card carrying it reads as ordinary
+// prose to the person the card is written for, while a tokeniser sees the
+// text-tag characters it spells.
 func invisible(r rune) bool {
 	switch r {
 	case 0x00AD, // soft hyphen
@@ -390,5 +400,5 @@ func invisible(r rune) bool {
 		0xFEFF: // zero-width no-break space / BOM
 		return true
 	}
-	return r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069
+	return r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069 || r >= 0xE0000 && r <= 0xE007F
 }

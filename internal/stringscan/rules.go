@@ -61,12 +61,15 @@ var (
 		CWE:        []string{"CWE-798", "CWE-540"},
 		Class:      "content",
 		Description: "A string in the artifact assigns a value to a credential variable " +
-			"(AWS_SECRET_ACCESS_KEY=, GITHUB_TOKEN=, OPENAI_API_KEY=, HF_TOKEN=, …) or contains a PEM " +
-			"private-key header. The matched value is masked: the finding records that a secret-shaped " +
-			"string is present and where, without reproducing it into a log, a SARIF upload or a baseline " +
-			"file. Note the direction of the risk this does not cover: a secret committed by an honest " +
-			"author is a leak, while a secret read by a malicious one is exfiltration, and this rule " +
-			"cannot tell them apart.",
+			"(AWS_SECRET_ACCESS_KEY=, GITHUB_TOKEN=, OPENAI_API_KEY=, HF_TOKEN=, password=, " +
+			"api_key=, …), contains a PEM private-key header, or carries a credential that announces " +
+			"its own vendor: a GitHub token (ghp_, github_pat_), an OpenAI key (sk-), an AWS access " +
+			"key id (AKIA, ASIA), a Google API key (AIza), a Slack token (xoxb-) or a JSON Web Token " +
+			"(eyJ… with three dot-separated segments). The matched value is masked: the finding " +
+			"records that a secret-shaped string is present and where, without reproducing it into a " +
+			"log, a SARIF upload or a baseline file. Note the direction of the risk this does not " +
+			"cover: a secret committed by an honest author is a leak, while a secret read by a " +
+			"malicious one is exfiltration, and this rule cannot tell them apart.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/798.html"},
 		Tags: []string{"secret"},
 	})
@@ -133,12 +136,15 @@ var (
 		CWE:        []string{"CWE-1426"},
 		Class:      "metadata",
 		Description: "A string in the artifact contains instruction-like text aimed at a model rather than " +
-			"at a reader: \"ignore previous instructions\", \"do not tell the user\", " +
-			"\"override your instructions\", an exfiltration instruction, or a chat pseudo-tag " +
+			"at a reader: \"ignore previous instructions\", \"ignore the above\", \"do not tell the " +
+			"user\", \"override your instructions\", an exfiltration instruction, or a chat pseudo-tag " +
 			"([INST], <|im_start|>, <system>, ### Instruction:). Model cards, dataset cards and metadata " +
 			"are read by agents and are pasted into prompts, so text in them is an input channel into " +
-			"whatever consumes the artifact (OWASP LLM01). The rule is medium because a document that " +
-			"quotes an injection, or a legitimate chat template, contains the same literals.",
+			"whatever consumes the artifact (OWASP LLM01). The above-anaphora family (\"ignore the above " +
+			"instructions\", \"disregard the above\", \"forget the above\") is what an instruction that " +
+			"overrides the text before it looks like when it is prepended to a prompt. The rule is " +
+			"medium because a document that quotes an injection, or a legitimate chat template, " +
+			"contains the same literals.",
 		Refs: []string{
 			"https://owasp.org/www-project-top-10-for-large-language-model-applications/",
 			"https://cwe.mitre.org/data/definitions/1426.html",
@@ -190,24 +196,30 @@ var (
 			"address rather than a name (http://192.0.2.10:8080/payload). Legitimate model metadata " +
 			"points at named hosts: a raw IP in a data file means either an ad-hoc server or an attempt " +
 			"to bypass name-based blocking, and it is one of the few endpoint shapes a domain " +
-			"denylist cannot cover.",
+			"denylist cannot cover. Every notation a client resolves counts, not only the dotted " +
+			"decimal one: hex octets (http://0x7f.0.0.1/), octal octets (http://0177.0.0.1/) and a " +
+			"single 32-bit number in decimal, octal or hex (http://2130706433/, http://017700000001/, " +
+			"http://0x7f000001/) all reach a host, and the finding's form names the notation it saw.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/506.html"},
 		Tags: []string{"exfiltration"},
 	})
 
 	ruleUnicode = report.DefineRule(report.Rule{
 		ID:         "SC4N-UNICODE-ANOMALY",
-		Title:      "Text contains zero-width, bidi-control or homoglyph characters",
+		Title:      "Text contains zero-width, Tags-block, bidi-control or homoglyph characters",
 		Severity:   report.SeverityMedium,
 		Confidence: report.ConfidenceHigh,
 		CWE:        []string{"CWE-1007", "CWE-838"},
 		Class:      "content",
 		Description: "A string in the artifact contains characters that are invisible or that reverse text " +
-			"order: zero-width space/joiner/non-joiner, the bidi control set, or a homoglyph mix of " +
-			"scripts in one identifier. These are how a card hides an instruction from a reader while a " +
-			"tokeniser still sees it, and how an identifier is made to look like an allowlisted one. " +
-			"Confidence is high because the characters are unambiguous; the severity is medium because " +
-			"the intent is not.",
+			"order: zero-width space/joiner/non-joiner, a character from the Unicode Tags block " +
+			"(U+E0000-U+E007F, the channel that spells an instruction a renderer drops and a tokeniser " +
+			"reads), the bidi control set, or a homoglyph mix of scripts in one identifier. These are " +
+			"how a card hides an instruction from a reader while a tokeniser still sees it, and how an " +
+			"identifier is made to look like an allowlisted one. Confidence is high because the " +
+			"characters are unambiguous; the severity is medium because the intent is not. Where the " +
+			"character is invisible the evidence names the rune or the block, because the character " +
+			"itself cannot be read in the report.",
 		Refs: []string{
 			"https://cwe.mitre.org/data/definitions/1007.html",
 			"https://trojansource.codes/",

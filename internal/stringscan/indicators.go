@@ -205,6 +205,13 @@ func emit(sink *report.Sink, base int64, h Hit) {
 	ev := h.Match
 	if h.Rule.Class == "metadata" || h.Rule.Class == "content" {
 		ev = "indicator " + strconv.Quote(report.TruncateEvidence(h.Match, 120)) + " in a data string"
+		// A raw-IP URL carries the notation its host was written in ("0x7f000001"
+		// is a hex integer, "2130706433" a decimal one). The URL is in the
+		// evidence above, but reading it as an address needs the notation, so the
+		// finding names it.
+		if form := h.Extra["form"]; form != "" {
+			ev += " (" + formPhrase(form) + " host)"
+		}
 	}
 	if h.Redacted {
 		sink.EmitRedacted(h.Rule, base+h.Off,
@@ -212,6 +219,17 @@ func emit(sink *report.Sink, base int64, h Hit) {
 		return
 	}
 	sink.EmitExtra(h.Rule, base+h.Off, ev, h.Extra)
+}
+
+// formPhrase renders a host notation for evidence, with its article: the
+// notations are "hex", "octal", "integer" and "dotted-decimal", so a plain
+// concatenation produced "a octal host".
+func formPhrase(form string) string {
+	switch form {
+	case "octal", "integer":
+		return "an " + form
+	}
+	return "a " + form
 }
 
 // sortedHits orders hits deterministically.
@@ -281,7 +299,8 @@ func buildIndicatorTable() []indicator {
 
 	// Command-and-control and exfiltration endpoints. These are the URLs a payload
 	// actually posts to; a model artifact has no business containing one.
-	add(ruleC2, "c2-webhook", false,
+	add(
+		ruleC2, "c2-webhook", false,
 		"discord.com/api/webhooks", "discordapp.com/api/webhooks",
 		"api.telegram.org", "hooks.slack.com", "slack.com/api/chat.postMessage",
 		"webhook.site", "requestbin.net", "pipedream.net", "canarytokens.com",
@@ -303,14 +322,16 @@ func buildIndicatorTable() []indicator {
 	// names known_hosts — so it is code-only and needs the decoder-chain context.
 	// The path-anchored forms still catch the real reach: ~/.ssh covers
 	// ~/.ssh/id_rsa, ~/.ssh/known_hosts and ~/.ssh/authorized_keys.
-	add(ruleCredential, "credential-path", false,
+	add(
+		ruleCredential, "credential-path", false,
 		"~/.ssh", "/.ssh/id_rsa", "/.ssh/id_ed25519", "~/.aws", "/.aws/credentials",
 		"~/.cache/huggingface/token", "/.cache/huggingface/token",
 		"/etc/shadow", "/etc/passwd", "/proc/self/environ", "/proc/self/mem",
 		".netrc", ".git-credentials", ".docker/config.json", ".kube/config",
 		".npmrc", ".pypirc",
 	)
-	addCode(ruleCredential, "credential-path",
+	addCode(
+		ruleCredential, "credential-path",
 		"id_rsa", "id_ed25519", "authorized_keys", "known_hosts",
 		"wallet.dat", "login.keychain", "credentials.json",
 		"service-account.json", "macaroons", "cookies.sqlite",
@@ -329,7 +350,8 @@ func buildIndicatorTable() []indicator {
 		"SLACK_TOKEN", "DOCKER_AUTH", "KUBECONFIG", "NPM_TOKEN", "PYPI_TOKEN",
 	}
 	for _, n := range credentialEnv {
-		add(ruleCredential, "credential-env-access", false,
+		add(
+			ruleCredential, "credential-env-access", false,
 			"$"+n, "${"+n+"}", "%"+n+"%",
 			`environ["`+n+`"]`, "environ['"+n+"']",
 			`getenv("`+n+`")`, "getenv('"+n+"')",
@@ -338,10 +360,15 @@ func buildIndicatorTable() []indicator {
 
 	// A literal `NAME=` followed by a value is the shape a hard-coded secret takes.
 	// These are the redacting indicators: the match itself is secret material.
-	add(ruleSecretValue, "secret-assignment", true,
+	// The generic names at the end cover a hard-coded credential that is not one
+	// of the vendor variables above — a JSON field, an INI line, a shell script
+	// — and are the shape that carries `password=hunter2` or `client_secret=`.
+	add(
+		ruleSecretValue, "secret-assignment", true,
 		"AWS_SECRET_ACCESS_KEY=", "AWS_ACCESS_KEY_ID=", "GITHUB_TOKEN=",
 		"OPENAI_API_KEY=", "ANTHROPIC_API_KEY=", "HF_TOKEN=",
 		"SLACK_TOKEN=", "NPM_TOKEN=", "PYPI_TOKEN=", "PRIVATE KEY-----",
+		"password=", "passwd=", "secret=", "api_key=",
 	)
 
 	// Shell and process payloads. The chains carry their own context — `curl | sh`
@@ -351,21 +378,24 @@ func buildIndicatorTable() []indicator {
 	// the same buffer also names a decoder or second-stage callable. The bare
 	// `| sh` spellings are gone entirely: "| shape" in a Markdown table is not a
 	// pipe into a shell, and the real chains above already carry the pipe.
-	add(ruleShell, "shell-payload", false,
+	add(
+		ruleShell, "shell-payload", false,
 		"bash -i", "sh -i", "/bin/sh -c", "/bin/bash -c", "bash -c",
 		"curl | sh", "wget -qO-",
 		"nc -e", "ncat -e", "socat exec:", "/dev/tcp/",
 		"powershell -e", "powershell -enc", "cmd.exe /c", "certutil -urlcache",
 		"reverse shell",
 	)
-	addCode(ruleShell, "shell-payload",
+	addCode(
+		ruleShell, "shell-payload",
 		"mkfifo", "chmod +x", "base64 -d", "base64 --decode", "whoami",
 		"python -c", "perl -e", "ruby -e",
 	)
 
 	// Decoder calls: a data string that names one is a step in an obfuscation
 	// chain, which is what the pickle and metadata contexts make interesting.
-	add(ruleDecoder, "decoder", false,
+	add(
+		ruleDecoder, "decoder", false,
 		"b64decode", "b85decode", "a85decode", "unhexlify", "fromhex",
 		"codecs.decode", "zlib.decompress", "gzip.decompress", "bz2.decompress",
 		"lzma.decompress", "marshal.loads", "compile(", "exec(", "eval(",
@@ -374,7 +404,8 @@ func buildIndicatorTable() []indicator {
 	)
 
 	// Loader flags that turn a data file into a code-loading path.
-	add(ruleLoaderFlag, "loader-flag", false,
+	add(
+		ruleLoaderFlag, "loader-flag", false,
 		"trust_remote_code", "allow_pickle=true", "allow_pickle=True",
 		"weights_only=false", "weights_only=False", "safe_mode=false",
 		"yaml.unsafe_load", "yaml.load(", "auto_map", "load_in_8bit",
@@ -384,7 +415,8 @@ func buildIndicatorTable() []indicator {
 	// published model-card and dataset-card attacks; the phrasing is short enough
 	// that a false positive is possible in a document *about* prompt injection,
 	// which is why the rule is medium and says so.
-	add(ruleInjection, "injection-phrase", false,
+	add(
+		ruleInjection, "injection-phrase", false,
 		"ignore previous instructions", "ignore all previous instructions",
 		"ignore the previous instructions", "disregard previous instructions",
 		"disregard all previous", "do not tell the user", "don't tell the user",
@@ -392,8 +424,16 @@ func buildIndicatorTable() []indicator {
 		"you must not reveal", "do not reveal this", "without telling the user",
 		"override your instructions", "ignore your instructions",
 		"new instructions:", "system prompt:", "exfiltrate",
+		// The above-anaphora family: the instruction points at the text before
+		// it instead of naming what it overrides, so these literals are what a
+		// card gains when its body is prepended to another prompt. The shared
+		// table and internal/cards carry the same phrases, so one card reports
+		// both the metadata and the card verdict.
+		"ignore the above", "ignore all previous", "disregard the above",
+		"forget the above", "forget all previous",
 	)
-	add(ruleInjection, "injection-tag", false,
+	add(
+		ruleInjection, "injection-tag", false,
 		"[INST]", "[/INST]", "<|im_start|>", "<|im_end|>", "<|system|>",
 		"<|user|>", "<|assistant|>", "<system>", "</system>", "### Instruction:",
 		"### System:", "### Human:", "ACT AS IF", "act as if",
@@ -401,7 +441,8 @@ func buildIndicatorTable() []indicator {
 
 	// Code-execution keywords inside metadata values, which is the tensorguard
 	// TG06-TG10 shape.
-	add(ruleMetadataCode, "metadata-code", false,
+	add(
+		ruleMetadataCode, "metadata-code", false,
 		"os.system", "subprocess", "__import__", "exec(", "eval(",
 		"trust_remote_code", "pickle.load", "marshal.loads", "socket.socket",
 		"urllib.request", "requests.post", "base64.b64decode",

@@ -44,6 +44,7 @@ func scanInto(b []byte, hits []Hit) []Hit {
 	hits = automaton.scanLiterals(b, hits)
 	hits = dropUncorroborated(hits)
 	hits = scanRawIPURLs(b, hits)
+	hits = scanSecretTokens(b, hits)
 	hits = scanOpaqueLiterals(b, hits)
 	hits = scanUnicodeAnomalies(b, hits)
 	return dedupe(sortedHits(hits))
@@ -156,21 +157,42 @@ func scanURLsAnchored(b []byte, anchor byte, hits []Hit) []Hit {
 		if bracket {
 			inner = hostLit[1 : len(hostLit)-1]
 		}
-		literal := isIPv4Literal(inner)
+		// A host literal is a bracketed IPv6 literal or one of the IPv4
+		// notations; anything else is a name and no finding. Both checks must run
+		// before anything is allocated, because this path runs once per URL
+		// candidate in the buffer and the engine's cost contract is that a
+		// candidate that is not a host costs nothing.
+		var (
+			form          string
+			value         uint32
+			documentation bool
+		)
 		if bracket {
-			literal = isIPv6Literal(inner)
-		}
-		if !literal {
-			i++
-			continue
-		}
-		// The URL may be a legitimate documentation example (RFC 5737 reserves the
-		// documentation ranges for IPv4, RFC 3849 the 2001:db8::/32 block for
-		// IPv6), and saying so in the evidence saves a reviewer the lookup.
-		extra := map[string]string{"kind": "raw-ip-url", "host": string(hostLit)}
-		documentation := isDocumentationIP(inner)
-		if bracket {
+			if !isIPv6Literal(inner) {
+				i++
+				continue
+			}
+			// RFC 3849 reserves the 2001:db8::/32 block for documentation, and
+			// saying so in the evidence saves a reviewer the lookup.
 			documentation = isDocumentationIPv6(inner)
+		} else {
+			ok := false
+			form, value, ok = parseIPv4Literal(inner)
+			if !ok {
+				i++
+				continue
+			}
+			// RFC 5737 reserves 192.0.2.0/24, 198.51.100.0/24 and 203.0.113.0/24.
+			// The label is decided on the address the host resolves to, so a hex
+			// or integer spelling of a documentation address is labelled too.
+			documentation = isDocumentationIP(value)
+		}
+		extra := map[string]string{"kind": "raw-ip-url", "host": string(hostLit)}
+		// The notation the host was written in is part of the finding: the URL
+		// reads as a name unless the reader is told "0x7f000001" is a hex integer
+		// and "2130706433" a decimal one.
+		if form != "" {
+			extra["form"] = form
 		}
 		if documentation {
 			extra["reserved"] = "documentation"
@@ -239,92 +261,305 @@ func indexAny(b []byte, set string) int {
 	return -1
 }
 
-// isIPv4Literal reports whether b is a dotted quad of four decimal octets.
+// parseIPv4Literal reports whether b is an IPv4 literal in one of the notations
+// a curl-class client resolves, and returns the notation and the address.
 //
-// Each octet is accumulated and bounded at 255 rather than only counting its
-// digits: "999.999.999.999" has four three-digit groups but is not an address,
-// and reporting it as a raw-IP URL is a finding a reviewer cannot act on. The
-// digit cap stays as a cheap bound on the accumulation.
-func isIPv4Literal(b []byte) bool {
-	octets, digits, value := 0, 0, 0
-	for i := range b {
+// The dotted quad of decimal octets is one spelling among six. inet_aton — and
+// therefore curl, and anything else that accepts the numeric-host form — also
+// reads hex octets ("0x7f.0.0.1"), octal octets written with a leading zero
+// ("0177.0.0.1"), and a single 32-bit number in decimal ("2130706433"), octal
+// ("017700000001") or hex ("0x7f000001"). Every one of them reaches the same
+// host, and a detector that knows only the dotted-decimal spelling reads
+// "http://0x7f000001/x" as a URL whose host is a name.
+//
+// The notation is returned rather than only a verdict because the finding has to
+// say what it saw: "the host is 0x7f000001" is not something a reviewer can check
+// without being told it is a hex integer.
+//
+// Each octet of a dotted form is bounded at 255 (the accumulation is bounded
+// too, so "999.999.999.999" is not an address and reporting it as a raw-IP URL
+// would be a finding a reviewer cannot act on), and a dotted form must have
+// exactly four components: "http://1.2.3/" is a version path, not an address.
+func parseIPv4Literal(b []byte) (form string, value uint32, ok bool) {
+	if len(b) == 0 {
+		return "", 0, false
+	}
+	if bytes.IndexByte(b, '.') < 0 {
+		// A single number: the whole 32-bit address in one field.
+		v, notation, ok := ipv4Number(b)
+		if !ok {
+			return "", 0, false
+		}
+		if notation == "decimal" {
+			notation = "integer"
+		}
+		return notation, uint32(v), true
+	}
+	parts := 0
+	form = "dotted-decimal"
+	for {
+		dot := bytes.IndexByte(b, '.')
+		part := b
+		if dot >= 0 {
+			part = b[:dot]
+		}
+		v, notation, ok := ipv4Number(part)
+		if !ok || v > 255 || parts == 4 {
+			return "", 0, false
+		}
+		value = value<<8 | uint32(v)
 		switch {
-		case b[i] >= '0' && b[i] <= '9':
-			if digits >= 3 {
-				return false
-			}
-			digits++
-			value = value*10 + int(b[i]-'0')
-			if value > 255 {
-				return false
-			}
-		case b[i] == '.':
-			if digits == 0 {
-				return false
-			}
-			octets++
-			digits = 0
-			value = 0
-		default:
-			return false
+		case notation == "hex":
+			form = "hex"
+		case notation == "octal" && form == "dotted-decimal":
+			form = "octal"
+		}
+		parts++
+		if dot < 0 {
+			break
+		}
+		b = b[dot+1:]
+	}
+	if parts != 4 {
+		return "", 0, false
+	}
+	return form, value, true
+}
+
+// ipv4Number parses one field of an IPv4 literal: a decimal number, an octal
+// one (a leading zero, which is how inet_aton and the C library read "0177") or
+// a hexadecimal one ("0x7f"). It returns the value and the notation it was
+// written in, so that the caller can name a host that is not plain decimal.
+func ipv4Number(s []byte) (value uint64, notation string, ok bool) {
+	if len(s) == 0 {
+		return 0, "", false
+	}
+	notation, base, digits := "decimal", uint64(10), s
+	switch {
+	case len(s) > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'):
+		notation, base, digits = "hex", 16, s[2:]
+	case len(s) > 1 && s[0] == '0':
+		notation, base, digits = "octal", 8, s[1:]
+	}
+	if len(digits) == 0 {
+		return 0, "", false
+	}
+	var v uint64
+	for _, c := range digits {
+		d := hexValue(c)
+		if d < 0 || uint64(d) >= base {
+			return 0, "", false
+		}
+		v = v*base + uint64(d)
+		if v > 0xFFFFFFFF {
+			return 0, "", false
 		}
 	}
-	return octets == 3 && digits > 0
+	return v, notation, true
+}
+
+// hexValue is the numeric value of a hex digit, or -1.
+func hexValue(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
 }
 
 // isDocumentationIP reports whether the address is in a range reserved for
 // documentation or for private use, where a scanner should say so rather than
-// leave the reader wondering whether the target is real.
-func isDocumentationIP(b []byte) bool {
-	first := 0
-	i := 0
-	for ; i < len(b) && b[i] != '.'; i++ {
-		first = first*10 + int(b[i]-'0')
-	}
-	switch {
-	case first == 192:
+// leave the reader wondering whether the target is real. It takes the parsed
+// address rather than its spelling, so a documentation address written in hex or
+// as a single integer is labelled the same way as the dotted quad.
+func isDocumentationIP(v uint32) bool {
+	switch v >> 24 {
+	case 192:
 		// 192.0.2.0/24 (TEST-NET-1) and 192.168.0.0/16 (private). The TEST-NET-1
 		// match must name the third octet: 192.0.0.0/16 is ordinary address space
 		// (192.0.5.7 is a real host), and labelling the whole of it "documentation"
 		// is a label a reviewer uses to dismiss a finding.
-		second, third := 0, 0
-		for i++; i < len(b) && b[i] != '.'; i++ {
-			second = second*10 + int(b[i]-'0')
-		}
-		for i++; i < len(b) && b[i] != '.'; i++ {
-			third = third*10 + int(b[i]-'0')
-		}
-		return (second == 0 && third == 2) || second == 168
-	case first == 198:
+		return v>>16&0xff == 0 && v>>8&0xff == 2 || v>>16&0xff == 168
+	case 198:
 		// 198.51.100.0/24 (TEST-NET-2).
-		second, third := 0, 0
-		for i++; i < len(b) && b[i] != '.'; i++ {
-			second = second*10 + int(b[i]-'0')
-		}
-		for i++; i < len(b) && b[i] != '.'; i++ {
-			third = third*10 + int(b[i]-'0')
-		}
-		return second == 51 && third == 100
-	case first == 203:
+		return v>>16&0xff == 51 && v>>8&0xff == 100
+	case 203:
 		// 203.0.113.0/24 (TEST-NET-3).
-		second, third := 0, 0
-		for i++; i < len(b) && b[i] != '.'; i++ {
-			second = second*10 + int(b[i]-'0')
-		}
-		for i++; i < len(b) && b[i] != '.'; i++ {
-			third = third*10 + int(b[i]-'0')
-		}
-		return second == 0 && third == 113
-	case first == 127, first == 10:
+		return v>>16&0xff == 0 && v>>8&0xff == 113
+	case 127, 10:
 		return true
-	case first == 172:
-		second := 0
-		for i++; i < len(b) && b[i] != '.'; i++ {
-			second = second*10 + int(b[i]-'0')
-		}
+	case 172:
+		second := v >> 16 & 0xff
 		return second >= 16 && second <= 31
 	}
 	return false
+}
+
+// tokenAlphabet is the character class a vendor issues a token in.
+type tokenAlphabet uint8
+
+const (
+	// alphaUpper is the AWS access-key class: uppercase letters and digits.
+	alphaUpper tokenAlphabet = iota
+	// alphaToken is the GitHub, OpenAI, Google and Slack class: letters,
+	// digits, underscore and hyphen.
+	alphaToken
+	// alphaURL is the base64url class a JWT segment is drawn from.
+	alphaURL
+)
+
+func inAlphabet(c byte, a tokenAlphabet) bool {
+	switch {
+	case c >= '0' && c <= '9', c >= 'A' && c <= 'Z':
+		return true
+	case c >= 'a' && c <= 'z':
+		return a != alphaUpper
+	case c == '-' || c == '_':
+		return a == alphaToken || a == alphaURL
+	}
+	return false
+}
+
+// isTokenByte reports whether c is a byte of an opaque token, which is what the
+// left boundary of a prefixed token must not be: "skill-base" contains "sk-",
+// and "disk-1" does too.
+func isTokenByte(c byte) bool {
+	return inAlphabet(c, alphaToken)
+}
+
+// secretTokenShapes are the provider credential shapes the literal table cannot
+// carry: a token whose own prefix announces the vendor, which is how a
+// credential appears in a JSON document ("token":"ghp_…") and how one appears
+// under a name the table does not list.
+//
+// Every prefix here is public — it is printed in the vendor's own documentation
+// — and the run after it is the secret. Each shape is matched with a left
+// boundary and a minimum run of the alphabet the vendor issues, because the bare
+// prefixes are far too short and too common to be literals in the automaton:
+// "sk-" occurs inside "risk-based", "task-", "disk-"; "AKIA", "ASIA" and "AIza"
+// are letter runs of the word "Asia"; and every base64 blob of a JSON document
+// begins with "eyJ".
+//
+// The prefix is a byte slice rather than a string because the scan runs
+// bytes.Index over it: converting a string at every call allocated once per
+// shape per buffer, which broke the engine's cost contract on a clean buffer.
+var secretTokenShapes = []struct {
+	prefix   []byte
+	shape    string
+	alphabet tokenAlphabet
+	minRun   int
+}{
+	{[]byte("ghp_"), "ghp_", alphaToken, 20},
+	{[]byte("github_pat_"), "github_pat_", alphaToken, 20},
+	{[]byte("sk-"), "sk-", alphaToken, 20},
+	{[]byte("AKIA"), "AKIA", alphaUpper, 16},
+	{[]byte("ASIA"), "ASIA", alphaUpper, 16},
+	{[]byte("AIza"), "AIza", alphaToken, 30},
+	{[]byte("xoxb-"), "xoxb-", alphaToken, 20},
+}
+
+// jwtPrefix is the first three characters of a JWT header: the base64 of "{" and
+// the first byte of the first claim, which every JSON Web Token begins with.
+const (
+	jwtPrefix     = "eyJ"
+	jwtSegmentMin = 8
+)
+
+var jwtPrefixBytes = []byte(jwtPrefix)
+
+// scanSecretTokens reports the credential shapes that carry their own vendor
+// prefix. A NAME= assignment is the shape SC4N-STRING-SECRET-VALUE has always
+// covered; this is the value shape, which the name-based table cannot see.
+//
+// The hits are redacted exactly as an assignment is: the value never reaches the
+// evidence, and the finding's `shape` extra names the prefix that matched.
+func scanSecretTokens(b []byte, hits []Hit) []Hit {
+	for _, s := range secretTokenShapes {
+		from := 0
+		for {
+			j := bytes.Index(b[from:], s.prefix)
+			if j < 0 {
+				break
+			}
+			at := from + j
+			from = at + len(s.prefix)
+			if at > 0 && isTokenByte(b[at-1]) {
+				continue
+			}
+			if tokenRun(b[at+len(s.prefix):], s.alphabet) < s.minRun {
+				continue
+			}
+			hits = append(hits, secretTokenHit(int64(at), s.shape))
+		}
+	}
+	from := 0
+	for {
+		j := bytes.Index(b[from:], jwtPrefixBytes)
+		if j < 0 {
+			break
+		}
+		at := from + j
+		from = at + len(jwtPrefixBytes)
+		if at > 0 && isTokenByte(b[at-1]) {
+			continue
+		}
+		if !jwtShape(b[at:]) {
+			continue
+		}
+		hits = append(hits, secretTokenHit(int64(at), jwtPrefix+"… (JWT)"))
+	}
+	return hits
+}
+
+// jwtShape reports whether b begins a JSON Web Token: the "eyJ" header segment,
+// then two more base64url segments of at least jwtSegmentMin characters each,
+// separated by dots. The prefix alone is not enough to report — a base64 blob of
+// a JSON document begins with those three characters — so all three segments are
+// required.
+func jwtShape(b []byte) bool {
+	i := len(jwtPrefixBytes) + tokenRun(b[len(jwtPrefixBytes):], alphaURL)
+	if i < len(jwtPrefixBytes)+jwtSegmentMin {
+		return false
+	}
+	for range 2 {
+		if i >= len(b) || b[i] != '.' {
+			return false
+		}
+		i++
+		n := tokenRun(b[i:], alphaURL)
+		if n < jwtSegmentMin {
+			return false
+		}
+		i += n
+	}
+	return true
+}
+
+// tokenRun is the length of the run of alphabet bytes starting at b.
+func tokenRun(b []byte, a tokenAlphabet) int {
+	n := 0
+	for n < len(b) && inAlphabet(b[n], a) {
+		n++
+	}
+	return n
+}
+
+// secretTokenHit builds the redacted hit for a token shape. Match carries the
+// shape name rather than the bytes of the stream, so that a token value cannot
+// reach the evidence even if the redacted branch of emit is ever changed: the
+// bytes of the buffer are the half that must not be reproduced.
+func secretTokenHit(off int64, shape string) Hit {
+	return Hit{
+		Rule:     ruleSecretValue,
+		Off:      off,
+		Match:    shape,
+		Redacted: true,
+		Extra:    map[string]string{"kind": "secret-token", "shape": shape},
+	}
 }
 
 // minOpaqueRun is the length at which a base64 or hex literal stops looking like a
@@ -605,7 +840,11 @@ const maxMixedScriptBytes = 256
 func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 	// Fixed-size state rather than maps, for the same reason.
 	var (
-		reported   [3]bool
+		// reported[0] zero-width, [1] bidi control, [2] line separator,
+		// [3] Unicode Tags. One finding of a kind per buffer: the second
+		// zero-width character in a string adds nothing a reviewer does not
+		// already know from the first.
+		reported   [4]bool
 		scriptSeen [4]bool
 		scriptKind byte
 		firstMixed = -1
@@ -672,6 +911,27 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 					Off:   int64(offset),
 					Match: string(r),
 					Extra: map[string]string{"kind": "line-separator", "rune": runeName(r)},
+				})
+			}
+		case r >= 0xE0000 && r <= 0xE007F:
+			// The Unicode Tags block — U+E0001 and the deprecated tag
+			// characters U+E0020-U+E007F — is the standard invisible
+			// prompt-injection channel: the characters draw nothing, every
+			// renderer drops them, and a model's tokeniser still reads the
+			// instruction they spell. No model artifact, card or template has a
+			// legitimate use for one, so the first is reported.
+			//
+			// The evidence names the range rather than the individual rune: the
+			// rune is invisible where the evidence is read, so a reviewer
+			// cannot tell a hidden character from an empty string, and the
+			// range is what identifies the channel.
+			if !reported[3] {
+				reported[3] = true
+				hits = append(hits, Hit{
+					Rule:  ruleUnicode,
+					Off:   int64(offset),
+					Match: "U+E0000-U+E007F Tags block characters",
+					Extra: map[string]string{"kind": "unicode-tag", "range": "U+E0000-U+E007F", "rune": runeName(r)},
 				})
 			}
 		default:
