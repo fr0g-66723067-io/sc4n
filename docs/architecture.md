@@ -215,6 +215,7 @@ today, with the honest gaps marked.
 | — of which: Aho–Corasick literals | — | 220 MB/s | one dependent load chain per byte |
 | — of which: Unicode anomaly walk | — | 550 MB/s | ASCII fast path, `utf8.DecodeRune` only for non-ASCII |
 | — of which: raw-IP URL hunt | — | 2.2 GB/s | two single-anchor `bytes.IndexByte` passes |
+| — of which: provider-token shapes | — | 103 MB/s clean, 29 MB/s token-dense | `BenchmarkSecretTokenShapes`; one pass over the buffer |
 | validated-native search over random bytes | — | 338 MB/s | header validation, not a byte scan |
 | safetensors header + metadata | ≥ 1 GB/s | 7 µs per header | the file's *body* is not read |
 | end-to-end 13.00 GiB F16 safetensors | ≤ 20 s wall, ≤ 512 MiB RSS | **1.25 s wall (10.4 GiB/s), 7.8 MiB anonymous RSS** | `make bench-big` |
@@ -232,6 +233,20 @@ the goto table so that only the ~70 bytes that actually occur in an indicator ge
 column, and materialising fail transitions so the walk has no fail loop, brought it
 to 220 MB/s; the ASCII fast paths in the Unicode and URL scanners removed the two
 scanners that were *slower* than the automaton.
+
+The engine's two reproducible end-to-end benchmarks are `BenchmarkScanClean` (1 MiB
+of prose with five sprinkled indicators) and `BenchmarkScanIndicators` (an
+indicator-dense buffer, so hit-bound rather than walk-bound). Re-measured
+2026-10-15: 25.6 MB/s and 11.3 MB/s, against 33.3 MB/s and 13.1 MB/s at the round's
+starting commit — the round added three detectors (provider-token shapes, the
+secret-assignment corroboration, a fourth Unicode-walk slot) and their passes each
+walk the buffer again. The token-shape pass was written as one `bytes.Index` search
+per shape and rewritten as a single pass over a first-byte set, which returned about
+a third of the regression (`BenchmarkSecretTokenShapes`: 103 MB/s clean, 29 MB/s
+token-dense); the literal table grew as well and its walk is the same 220 MB/s. Real
+scans do not see this: `sc4n scan testdata/fixtures` is 1.14 s wall on both binaries,
+because a real artifact spends its time in I/O, hashing and header parsing, not in
+the indicator engine over a synthetic all-prose buffer.
 
 What is not on that path, and why the end-to-end number is what it is: the
 indicator engine runs over *text* — metadata values, config JSON, source, cards,

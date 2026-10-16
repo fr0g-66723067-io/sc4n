@@ -74,6 +74,15 @@ type elementInfo struct {
 	size    int
 	numeric bool // a real number (NaN/Inf/outlier checks apply)
 	complex bool
+	// bf16 marks the brain-float encoding, which is 2 bytes like F16 but is not
+	// IEEE binary16: it is the top 16 bits of a float32. Decoding a BF16 pattern
+	// with the binary16 decoder turns a finite value into a NaN whenever the bits
+	// land in binary16's all-ones exponent field, which is most of bf16's useful
+	// range — a 0x7D00 element is ~1.15e36 in bf16 and NaN in binary16. Measured
+	// before the fix: a tensor of 32 finite BF16 values reported "32/32 sampled
+	// values are NaN or Inf". BF16 is the common weight format in modern
+	// checkpoints, so the false positive landed on the tensors the pass exists for.
+	bf16 bool
 }
 
 func elementInfoFor(dtype string) (elementInfo, bool) {
@@ -82,8 +91,10 @@ func elementInfoFor(dtype string) (elementInfo, bool) {
 		return elementInfo{size: 4, numeric: true}, true
 	case "F64":
 		return elementInfo{size: 8, numeric: true}, true
-	case "F16", "BF16":
+	case "F16":
 		return elementInfo{size: 2, numeric: true}, true
+	case "BF16":
+		return elementInfo{size: 2, numeric: true, bf16: true}, true
 	case "C64":
 		return elementInfo{size: 8, numeric: true, complex: true}, true
 	case "BOOL", "U8", "I8":
@@ -200,6 +211,10 @@ func decodeElement(ei elementInfo, el []byte) (float64, bool, bool) {
 	case 2:
 		u := binary.LittleEndian.Uint16(el)
 		if ei.numeric {
+			if ei.bf16 {
+				v := math.Float32frombits(uint32(u) << 16)
+				return float64(v), u == 0, !isBad(float64(v))
+			}
 			v := halfToFloat(u)
 			return float64(v), u == 0, !isBad(float64(v))
 		}

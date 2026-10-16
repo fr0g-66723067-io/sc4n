@@ -42,6 +42,31 @@ func BenchmarkScanClean(b *testing.B) {
 	_ = dst
 }
 
+// BenchmarkSecretTokenShapes measures the provider-token shape pass on its own. It
+// exists because that pass is the one part of the engine that was written as a
+// full-buffer search per shape (eight bytes.Index traversals of every buffer) and
+// then rewritten as a single pass: on the clean buffer below that was 30% of the
+// whole scan's regression against the round's starting commit.
+func BenchmarkSecretTokenShapes(b *testing.B) {
+	clean := []byte(strings.Repeat("the corpus is evaluated on held-out splits; ", 30000))
+	tokens := []byte(strings.Repeat("see ghp_"+strings.Repeat("A1b2", 12)+" and sk-"+strings.Repeat("x9", 24)+" ", 200))
+	for _, tc := range []struct {
+		name string
+		buf  []byte
+	}{{"clean", clean}, {"tokens", tokens}} {
+		b.Run(tc.name, func(b *testing.B) {
+			dst := make([]Hit, 0, 64)
+			b.SetBytes(int64(len(tc.buf)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				dst = scanSecretTokens(tc.buf, dst[:0])
+			}
+			_ = dst
+		})
+	}
+}
+
 func BenchmarkScanIndicators(b *testing.B) {
 	buf := []byte(strings.Repeat("hook https://discord.com/api/webhooks/1 and ~/.ssh ", 20000))
 	dst := make([]Hit, 0, 64)

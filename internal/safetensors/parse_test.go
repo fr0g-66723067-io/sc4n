@@ -615,3 +615,51 @@ func TestOverCapHeaderIsReportedNotSilentlySkipped(t *testing.T) {
 		t.Fatal("a 9-byte file declaring a 1 TiB header was claimed as safetensors")
 	}
 }
+
+// TestDeepStatsBF16IsNotBinary16 pins the decode of bfloat16, which is two bytes
+// like F16 but is the top half of a float32 rather than IEEE binary16. Decoding a
+// BF16 pattern with the binary16 decoder turns a finite value into a NaN whenever
+// the bits land in binary16's all-ones exponent field: bf16 0x7D00 is ~1.15e36 and
+// binary16 0x7D00 is NaN. Measured before the fix, a tensor of 32 finite BF16 values
+// reported "32/32 sampled values are NaN or Inf" — a false positive on the weight
+// format most modern checkpoints use, in the pass that exists to inspect weights.
+func TestDeepStatsBF16IsNotBinary16(t *testing.T) {
+	finite := make([]byte, 64)
+	for i := 0; i < 32; i++ {
+		binary.LittleEndian.PutUint16(finite[i*2:], 0x7D00) // finite in bf16, NaN in binary16
+	}
+	ids := deepStatsIDs(t, `{"a":{"dtype":"BF16","shape":[32],"data_offsets":[0,64]}}`, finite)
+	if ids["SC4N-WEIGHTS-NAN"] {
+		t.Fatalf("finite BF16 values reported as NaN: %v", ids)
+	}
+
+	// The NaN path still works for BF16: 0x7FC0 is a quiet NaN in both encodings.
+	nan := make([]byte, 64)
+	for i := 0; i < 16; i++ {
+		binary.LittleEndian.PutUint16(nan[i*2:], 0x7FC0)
+	}
+	for i := 16; i < 32; i++ {
+		binary.LittleEndian.PutUint16(nan[i*2:], 0x3F00) // 0.5
+	}
+	ids = deepStatsIDs(t, `{"a":{"dtype":"BF16","shape":[32],"data_offsets":[0,64]}}`, nan)
+	if !ids["SC4N-WEIGHTS-NAN"] {
+		t.Fatalf("a half-NaN BF16 tensor was not reported: %v", ids)
+	}
+}
+
+// deepStatsIDs scans one safetensors blob with -deep-stats enabled and returns the
+// rule IDs it produced.
+func deepStatsIDs(t *testing.T, header string, data []byte) map[string]bool {
+	t.Helper()
+	c := report.NewCollector(0)
+	lim := limits.Default()
+	sess := artifact.NewSession(c, "", lim)
+	sess.DeepStats = true
+	ctx := &artifact.Ctx{Session: sess, Sink: c.For("m.safetensors"), Limits: lim, Format: artifact.FormatSafetensors}
+	src := source.Mem("m.safetensors", st(header, data))
+	defer src.Close()
+	if err := (parser{}).Parse(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	return ids(c.Findings())
+}

@@ -478,40 +478,41 @@ var jwtPrefixBytes = []byte(jwtPrefix)
 //
 // The hits are redacted exactly as an assignment is: the value never reaches the
 // evidence, and the finding's `shape` extra names the prefix that matched.
+// scanSecretTokens appends a hit for every provider token shape in b.
+//
+// The scan is one pass over the buffer that stops only at offsets where a shape
+// could begin (a first-byte set), rather than one bytes.Index pass per shape: the
+// per-shape version cost eight full traversals of every buffer scanned, which showed
+// up as a 30% regression on a clean 1 MiB buffer where no shape occurs at all.
 func scanSecretTokens(b []byte, hits []Hit) []Hit {
+	var first [256]bool
 	for _, s := range secretTokenShapes {
-		from := 0
-		for {
-			j := bytes.Index(b[from:], s.prefix)
-			if j < 0 {
-				break
-			}
-			at := from + j
-			from = at + len(s.prefix)
-			if at > 0 && isTokenByte(b[at-1]) {
+		first[s.prefix[0]] = true
+	}
+	first[jwtPrefixBytes[0]] = true
+
+	for at := 0; at < len(b); at++ {
+		if !first[b[at]] {
+			continue
+		}
+		// A shape has to start at a token boundary, not in the middle of a longer
+		// run of token bytes (`risk-based` contains sk-, `Asia` contains AKIA).
+		if at > 0 && isTokenByte(b[at-1]) {
+			continue
+		}
+		rest := b[at:]
+		for _, s := range secretTokenShapes {
+			if !bytes.HasPrefix(rest, s.prefix) {
 				continue
 			}
-			if tokenRun(b[at+len(s.prefix):], s.alphabet) < s.minRun {
+			if tokenRun(rest[len(s.prefix):], s.alphabet) < s.minRun {
 				continue
 			}
 			hits = append(hits, secretTokenHit(int64(at), s.shape))
 		}
-	}
-	from := 0
-	for {
-		j := bytes.Index(b[from:], jwtPrefixBytes)
-		if j < 0 {
-			break
+		if bytes.HasPrefix(rest, jwtPrefixBytes) && jwtShape(rest) {
+			hits = append(hits, secretTokenHit(int64(at), jwtPrefix+"… (JWT)"))
 		}
-		at := from + j
-		from = at + len(jwtPrefixBytes)
-		if at > 0 && isTokenByte(b[at-1]) {
-			continue
-		}
-		if !jwtShape(b[at:]) {
-			continue
-		}
-		hits = append(hits, secretTokenHit(int64(at), jwtPrefix+"… (JWT)"))
 	}
 	return hits
 }

@@ -460,6 +460,15 @@ and they are off by default. They can find a payload smuggled *in* weights (a
 NaN-encoded blob, an appended encrypted region) and they cannot find a trained
 trigger.
 
+The decoder is per-dtype, and it has to be: `BF16` is two bytes like `F16` but is
+the top half of a float32, so decoding a BF16 pattern with the binary16 decoder
+turns a finite value into a NaN whenever the bits land in binary16's all-ones
+exponent field (`0x7D00` is ~1.15e36 in bf16 and NaN in binary16, and most of bf16's
+useful range is in that field). Measured before the fix, a tensor of 32 finite BF16
+values reported "32/32 sampled values are NaN or Inf" — a false positive on the
+weight format modern checkpoints are written in, inside the pass that exists to
+inspect weights. `TestDeepStatsBF16IsNotBinary16` pins both directions.
+
 **Residual risk.** Stated plainly: a backdoored model with clean structure, clean
 metadata and clean code passes sc4n. Provenance (§10) and dynamic evaluation are
 the mitigations; neither is a scanner's job.
