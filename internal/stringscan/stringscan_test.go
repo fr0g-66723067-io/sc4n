@@ -405,6 +405,15 @@ func TestCredentialEnvironmentNameNeedsARead(t *testing.T) {
 		{"%GITHUB_TOKEN%", true},
 		{`os.environ["GITHUB_TOKEN"]`, true},
 		{"os.environ['HF_TOKEN']", true},
+		{`os.environ.get("GITHUB_TOKEN")`, true},
+		{"os.environ.get('SLACK_TOKEN')", true},
+		{`os.environ.get("GITHUB_TOKEN", "")`, true},
+		// A longer variable with a vendor name as its prefix is a different name.
+		{`os.environ.get("GITHUB_TOKEN_EXTRA")`, false},
+		// TOKEN is not one of the vendor names the table lists, and `.get` on it
+		// stays silent for the same reason the bare name does: a generic variable
+		// is a name, and only a vendor variable is a credential.
+		{`os.environ.get("TOKEN")`, false},
 		{`getenv("OPENAI_API_KEY")`, true},
 		{"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI", true},
 	} {

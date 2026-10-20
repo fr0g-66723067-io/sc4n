@@ -342,6 +342,11 @@ func buildIndicatorTable() []indicator {
 			ruleCredential, "credential-env-access", false,
 			"$"+n, "${"+n+"}", "%"+n+"%",
 			`environ["`+n+`"]`, "environ['"+n+"']",
+			`environ.get("`+n+`")`, "environ.get('"+n+"')",
+			// The default-argument idiom: os.environ.get("NAME", ""). The trailing
+			// comma is part of the literal so that a longer name that merely starts
+			// with a vendor name (GITHUB_TOKEN_EXTRA) does not match.
+			`environ.get("`+n+`",`, "environ.get('"+n+"',",
 			`getenv("`+n+`")`, "getenv('"+n+"')",
 		)
 	}
