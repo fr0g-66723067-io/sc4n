@@ -38,6 +38,7 @@ const (
 	FormatTorchScript // zip with code/**/*.py
 	FormatPT2         // zip with archive_format="pt2"
 	FormatPTE         // PyTorch Mobile / ExecuTorch flatbuffer
+	FormatUTF16       // UTF-16 text: BOM, or ASCII interleaved with NUL
 
 	// Numeric.
 	FormatNPY // \x93NUMPY
@@ -93,6 +94,7 @@ var formatNames = map[Format]string{
 	FormatTorchScript:      "torchscript",
 	FormatPT2:              "pt2",
 	FormatPTE:              "pte",
+	FormatUTF16:            "utf-16",
 	FormatNPY:              "npy",
 	FormatNPZ:              "npz",
 	FormatMsgpack:          "msgpack",
@@ -415,7 +417,15 @@ var extensions = map[string][]Format{
 // for path's extension. An unknown extension is always plausible (there is
 // nothing to contradict), which keeps the rule from firing on the many real-world
 // files named .model, .weights or .data.
+//
+// A UTF-16 artifact is plausible under every name: the format records the
+// *encoding* of a text document, not what the document is. The decoded bytes are
+// re-dispatched and judged on their own, so "README.md that is UTF-16" is a
+// markdown card in a different encoding, not a contradiction of its name.
 func ExtensionPlausible(path string, f Format) bool {
+	if f == FormatUTF16 {
+		return true
+	}
 	i := strings.LastIndexByte(path, '.')
 	if i < 0 || i == len(path)-1 {
 		return true

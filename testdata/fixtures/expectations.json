@@ -1210,6 +1210,29 @@
       ],
       "notes": "zstd magic with opaque payload: recognised, named, and reported as NOT decompressed rather than silently skipped, because the standard library has no zstd decoder and sc4n never shells out."
     },
+    "utf16/card_nobom/README.md": {
+      "expect": [
+        "SC4N-CONTENT-UTF16"
+      ],
+      "forbid": [
+        "SC4N-METADATA-INJECTION"
+      ],
+      "notes": "UTF-16LE without a byte-order mark: claimed through the NUL-interleaved Latin-text path. Its text is ordinary prose, so the decode must not manufacture an injection."
+    },
+    "utf16/card_utf16le/README.md": {
+      "expect": [
+        "SC4N-CONTENT-UTF16",
+        "SC4N-METADATA-INJECTION"
+      ],
+      "notes": "A UTF-16LE model card with a byte-order mark carrying an instruction phrase. Before the format existed the file was dispatched unknown and produced nothing; the decode re-dispatches the text, so the shared phrase rule fires on the decoded bytes."
+    },
+    "utf16/config_utf16be/config.json": {
+      "expect": [
+        "SC4N-CONTENT-UTF16",
+        "SC4N-CONFIG-AUTO-MAP"
+      ],
+      "notes": "A UTF-16BE config.json with an auto_map. The re-dispatch is the point: the decoded bytes are sniffed as JSON and reach the config walker, which is where the auto_map finding comes from."
+    },
     "whl_in_repo/evil.whl": {
       "expect": [
         "SC4N-REPO-WHEEL-IN-MODEL"
@@ -1576,6 +1599,20 @@
         "SC4N-FORMAT-EXTENSION-MISMATCH"
       ],
       "notes": "A well-formed UBJSON model with a typed int32 array and exact framing: the false-positive gate for the UBJSON walker."
+    },
+    "utf16/jpeg_utf16_exif.jpg": {
+      "expect": null,
+      "forbid": [
+        "SC4N-CONTENT-UTF16"
+      ],
+      "notes": "A JPEG whose EXIF UserComment is 1200 bytes of UTF-16LE prompt text. Two files of this shape in the HF campaign were claimed as whole-file UTF-16 by the NUL-ratio heuristic and their pixel data was rescanned as decoded text; a BOM-less claim is now limited to heads with no high byte."
+    },
+    "utf16/not_text.bin": {
+      "expect": null,
+      "forbid": [
+        "SC4N-CONTENT-UTF16"
+      ],
+      "notes": "A class-file-shaped binary whose repeated 0x0a 0x00 pairs read as newline-interleaved text. The letter ratio in the sniffer is what keeps it out of the UTF-16 claim."
     }
   }
 }
