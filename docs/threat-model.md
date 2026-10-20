@@ -477,10 +477,14 @@ the mitigations; neither is a scanner's job.
 
 **Mechanism.** Everything a model or its tooling reads is an input channel: the
 model card (`README.md`), `dataset_info.json`, `model_index.json`, `*.md` docs,
-metadata string values, and the tokenizer's special tokens. Text can instruct the
-consuming agent, hide instructions in HTML comments or zero-width/bidi
-characters, or carry an exfiltration URL. Unicode anomalies do double duty:
-homoglyphs and mixed scripts evade a human reviewer while remaining renderable.
+metadata string values, the tokenizer's special tokens, and an image's text
+metadata (PNG tEXt/zTXt/iTXt/eXIf, JPEG EXIF/XMP/COM) — a model card can quote a
+prompt table as a screenshot, and the bytes are still text an agent reads. The
+same channel exists in a different encoding: a UTF-16 card is the same document
+with every ASCII byte followed by a NUL. Text can instruct the consuming agent,
+hide instructions in HTML comments or zero-width/bidi characters, or carry an
+exfiltration URL. Unicode anomalies do double duty: homoglyphs and mixed scripts
+evade a human reviewer while remaining renderable.
 
 **Evidence.** OWASP LLM01 (prompt injection); the spotlighting/datamarking line of
 mitigation work.
@@ -493,7 +497,12 @@ practice), `SC4N-CARD-INVISIBLE` (a zero-width run that reorders nothing — wha
 copy-paste from a rendered page leaves behind), `SC4N-CARD-PARSE` (frontmatter
 that does not parse — reported, then the raw text is still scanned),
 `SC4N-METADATA-INJECTION`, `SC4N-METADATA-CODE` (a metadata value that looks like
-code), `SC4N-UNICODE-ANOMALY`, and the shared indicator engine's `SC4N-STRING-C2`,
+code), `SC4N-UNICODE-ANOMALY`, `SC4N-CONTENT-UTF16` (a text artifact decoded from
+UTF-16 and re-dispatched, so the card analyser and the indicator engine read it at
+all), `SC4N-IMG-METADATA` (an image whose metadata was read and scanned; info, so
+a clean image is not confused with an unread one), `SC4N-IMG-STRUCT` (image
+metadata framing that hides what follows), and the shared indicator engine's
+`SC4N-STRING-C2`,
 `-RAW-IP-URL`, `-CREDENTIAL`, `-SECRET-VALUE` over every metadata string.
 `SC4N-METADATA-INJECTION` reports instruction *phrasing*, not the chat-format
 delimiters. `[INST]`, `<|im_start|>`, `<system>` and `### Instruction:` are the
@@ -657,6 +666,14 @@ unsigned.
     cancellation can interrupt it. An explicitly named FIFO is still opened, which
     is what makes `sc4n scan <(producer)` and a `mkfifo`-fed path work; a symlink
     whose target is one of these is reported like the target itself.
+12. **Image payloads are not decoded.** PNG chunks and JPEG marker segments are
+    walked for text metadata; pixel data and entropy-coded data are skipped by
+    their declared lengths, so a payload hidden in pixels (steganography) is out
+    of scope. GIF, WAV and MP4 are not covered at all.
+13. **BOM-less non-Latin UTF-16 is not claimed.** Without a byte-order mark the
+    sniffer needs every byte under 0x80 — a container header otherwise passes the
+    NUL-ratio test — so a UTF-16 document in a non-Latin script is read only when
+    it carries a BOM. The format's capability note says the same.
 
 ## 12. Mapping from rule to fixture
 
@@ -668,7 +685,7 @@ disjoint from `forbid` for every file on disk. The benign set
 (`testdata/fixtures/benign/`) is the false-positive gate: it must produce no
 `high` or `critical` finding at all.
 
-The gate covers the fixtures that exist, not the rule catalogue: 142 of the 189
+The gate covers the fixtures that exist, not the rule catalogue: 144 of the 192
 rules are named in `expectations.json`, and the rest — the limit rules, the
 parse-failure rules and the hf-cache collector rules, which need a crafted input or
 a crafted cache to reach — are covered by Go tests only. `sc4n rules` prints the

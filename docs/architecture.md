@@ -55,6 +55,7 @@ Two invariants hold across the whole graph:
 | `internal/torch`, `internal/numpy`, `internal/msgpack`, `internal/xgb`, `internal/coreml`, `internal/pte` | the remaining runtimes, each recognising its shapes by content |
 | `internal/pysrc`, `internal/repo`, `internal/content` | Python source and notebooks, install/startup hooks in a repository, and the JSON/text/metadata layer that routes cards, tokenizers, templates and HF config files |
 | `internal/jinja`, `internal/tokenizer`, `internal/cards` | the template, tokenizer-pattern and card analysers the content layer calls |
+| `internal/utf16text`, `internal/imgmeta` | text encodings and image metadata: UTF-16 text is decoded to UTF-8 and re-dispatched (SC4N-CONTENT-UTF16); PNG tEXt/zTXt/iTXt/eXIf and JPEG EXIF/XMP/COM strings reach the indicator engine at their absolute offsets, while pixels and entropy-coded data are skipped by declared length (SC4N-IMG-METADATA, SC4N-IMG-STRUCT) |
 | `internal/policy` | exit-code verdicts and baseline suppression |
 | `internal/hfcache` | the Hugging Face cache expander: symlink resolution, revision labels, blob de-duplication |
 | `internal/formats` | blank-imports every parser package so a binary states what it contains |
