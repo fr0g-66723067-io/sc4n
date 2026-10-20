@@ -494,13 +494,16 @@ copy-paste from a rendered page leaves behind), `SC4N-CARD-PARSE` (frontmatter
 that does not parse — reported, then the raw text is still scanned),
 `SC4N-METADATA-INJECTION`, `SC4N-METADATA-CODE` (a metadata value that looks like
 code), `SC4N-UNICODE-ANOMALY`, and the shared indicator engine's `SC4N-STRING-C2`,
-`-RAW-IP-URL`, `-CREDENTIAL`, `-SECRET-VALUE` over every metadata string. The
-chat-control-tag half of `SC4N-METADATA-INJECTION` is exempt in the five documents
-that *declare* the tokenizer's tokens (`tokenizer.json`, `tokenizer_config.json`,
-`special_tokens_map.json`, `added_tokens.json`, `chat_template.json`): a file that
-defines `<|im_start|>` is naming its own token, not smuggling text into a model's
-input. The instruction phrases, the secrets and the endpoints are still reported
-there, and the same bytes under any other name are scanned as ordinary text.
+`-RAW-IP-URL`, `-CREDENTIAL`, `-SECRET-VALUE` over every metadata string.
+`SC4N-METADATA-INJECTION` reports instruction *phrasing*, not the chat-format
+delimiters. `[INST]`, `<|im_start|>`, `<system>` and `### Instruction:` are the
+syntax a chat template emits, and a card that documents a template, a tokenizer
+that declares its own control token and a template file that prints them all
+contain those bytes without asking a model to do anything. They were literals
+until round 7 with a declaration-file exemption for the last two, and still 157 of
+the 172 findings on the 273-model campaign were cards documenting a template, so
+the delimiters are not indicators in any context. The instruction phrases, the
+secrets and the endpoints are reported everywhere.
 
 Three details of that set are worth reading, because each is a channel that was
 invisible until it was measured:

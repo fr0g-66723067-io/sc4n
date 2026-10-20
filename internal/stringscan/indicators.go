@@ -72,22 +72,13 @@ const (
 	// vocabulary, a flatbuffer segment — where a shell fragment or a decoder name
 	// is just a string in a table.
 	KindSecrets
-	// KindTemplate applies every rule except the instruction/pseudo-tag
-	// indicator. A chat template is a program that emits text: `<|im_start|>` is
-	// the delimiter it exists to emit, and "do not tell the user about function
-	// calls" is a tool-use instruction. Judging that phrasing is the job of the
-	// template analyser (SC4N-TEMPLATE-INJECTION, SC4N-JINJA-*), which knows it
-	// is reading a template; the generic metadata rule cannot tell either apart
+	// KindTemplate applies every rule except the injection-phrase indicator. A
+	// chat template is a program that emits text, and "do not tell the user about
+	// function calls" is a tool-use instruction. Judging that phrasing is the job
+	// of the template analyser (SC4N-TEMPLATE-INJECTION, SC4N-JINJA-*), which
+	// knows it is reading a template; the generic metadata rule cannot tell it
 	// from an injection, and reporting both is a duplicate with a worse verdict.
 	KindTemplate
-	// KindDeclaration applies every rule except the chat-control-tag indicator.
-	// A tokenizer document declares the tokens and the template it exists to
-	// describe: `<|im_start|>` in tokenizer_config.json, special_tokens_map.json,
-	// added_tokens.json or chat_template.json is the file naming its own control
-	// token, not text smuggled into a model's input. The instruction *phrases*
-	// ("do not tell the user", "### Instruction:") are still reported there,
-	// because a declaration file has no reason to carry one.
-	KindDeclaration
 )
 
 // tier is which family a rule belongs to, for the Kind filter.
@@ -123,18 +114,15 @@ func tierOf(r *report.Rule) tier {
 
 // allows reports whether a hit is in scope for the kind.
 //
-// It takes the hit rather than the rule because one rule can carry two kinds of
-// indicator: SC4N-METADATA-INJECTION reports both an instruction phrase and a
-// chat control tag, and a declaration file must keep the first while dropping the
-// second. The indicator kind is already on the hit (`Extra["kind"]`).
+// It takes the hit rather than the rule because a rule can carry more than one
+// indicator family; the filter is on the family, which is already on the hit
+// (`Extra["kind"]`).
 func (k Kind) allows(h Hit) bool {
 	switch k {
 	case KindSecrets:
 		return tierOf(h.Rule) == tierSecret
 	case KindTemplate:
 		return h.Rule != ruleInjection
-	case KindDeclaration:
-		return h.Rule != ruleInjection || h.Extra["kind"] != "injection-tag"
 	default:
 		return true
 	}
@@ -431,12 +419,14 @@ func buildIndicatorTable() []indicator {
 		// both the metadata and the card verdict.
 		"ignore the above", "ignore all previous", "disregard the above",
 		"forget the above", "forget all previous",
-	)
-	add(
-		ruleInjection, "injection-tag", false,
-		"[INST]", "[/INST]", "<|im_start|>", "<|im_end|>", "<|system|>",
-		"<|user|>", "<|assistant|>", "<system>", "</system>", "### Instruction:",
-		"### System:", "### Human:", "ACT AS IF", "act as if",
+		// A bare imperative with no object. It is phrasing, not a delimiter, so it
+		// stays; the chat-format delimiters (`[INST]`, `<|im_start|>`,
+		// `### Instruction:`) are deliberately absent: they are the syntax a chat
+		// template emits, and a card that documents a template contains them
+		// without asking a model to do anything. They were literals until round 7,
+		// and 157 of the 172 SC4N-METADATA-INJECTION findings on the 273-model
+		// campaign were exactly that — model cards documenting a template.
+		"act as if",
 	)
 
 	// Code-execution keywords inside metadata values, which is the tensorguard

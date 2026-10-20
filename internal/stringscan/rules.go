@@ -130,17 +130,21 @@ var (
 
 	ruleInjection = report.DefineRule(report.Rule{
 		ID:         "SC4N-METADATA-INJECTION",
-		Title:      "Data string contains prompt-injection phrasing or a chat pseudo-tag",
+		Title:      "Data string contains prompt-injection phrasing",
 		Severity:   report.SeverityMedium,
 		Confidence: report.ConfidenceMedium,
 		CWE:        []string{"CWE-1426"},
 		Class:      "metadata",
 		Description: "A string in the artifact contains instruction-like text aimed at a model rather than " +
 			"at a reader: \"ignore previous instructions\", \"ignore the above\", \"do not tell the " +
-			"user\", \"override your instructions\", an exfiltration instruction, or a chat pseudo-tag " +
-			"([INST], <|im_start|>, <system>, ### Instruction:). Model cards, dataset cards and metadata " +
-			"are read by agents and are pasted into prompts, so text in them is an input channel into " +
-			"whatever consumes the artifact (OWASP LLM01). The above-anaphora family (\"ignore the above " +
+			"user\", \"override your instructions\", an exfiltration instruction. Model cards, dataset " +
+			"cards and metadata are read by agents and are pasted into prompts, so text in them is an " +
+			"input channel into whatever consumes the artifact (OWASP LLM01). The chat-format " +
+			"delimiters themselves ([INST], <|im_start|>, <system>, ### Instruction:) are not " +
+			"indicators: a card that documents a chat template, a tokenizer that declares its own " +
+			"control token and a template file that prints them all contain those bytes without asking " +
+			"a model to do anything, and they were 157 of the 172 findings on the 273-model campaign. " +
+			"The above-anaphora family (\"ignore the above " +
 			"instructions\", \"disregard the above\", \"forget the above\") is what an instruction that " +
 			"overrides the text before it looks like when it is prepended to a prompt. The rule is " +
 			"medium because a document that quotes an injection, or a legitimate chat template, " +

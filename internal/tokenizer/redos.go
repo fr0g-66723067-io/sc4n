@@ -61,35 +61,6 @@ var specialTokenKeys = []string{
 	"cls_token", "mask_token", "additional_special_tokens", "extra_special_tokens",
 }
 
-// declarationNames are the documents that *declare* the tokenizer's control
-// tokens and chat template, as opposed to carrying text a model reads. In these
-// files `<|im_start|>` is the token being defined.
-var declarationNames = map[string]bool{
-	"tokenizer.json":          true,
-	"tokenizer_config.json":   true,
-	"special_tokens_map.json": true,
-	"added_tokens.json":       true,
-	"chat_template.json":      true,
-}
-
-// IsDeclarationName reports whether a document name is one of the tokenizer
-// declaration files. The name test lives here because this package owns the
-// names: internal/content asks it which indicator tier to scan the raw buffer
-// with, and AnalyzeJSON asks it for the decoded values.
-func IsDeclarationName(base string) bool { return declarationNames[base] }
-
-// baseName is the final path element of a display name, after any archive-member
-// chain (`a.whl:tokenizer.json` -> `tokenizer.json`) and after any separators.
-func baseName(path string) string {
-	if i := strings.LastIndexByte(path, ':'); i >= 0 {
-		path = path[i+1:]
-	}
-	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
-		path = path[i+1:]
-	}
-	return path
-}
-
 // AnalyzeJSON scans a decoded tokenizer.json (or tokenizer_config.json) for
 // catastrophic-backtracking and non-RE2 regex patterns and for injection text
 // in special tokens. data is the raw JSON; base is the offset of the file.
@@ -107,9 +78,6 @@ func AnalyzeJSON(sink *report.Sink, base int64, path string, data []byte) {
 		return
 	}
 	e := &emitter{sink: sink, base: base, path: path, offsets: buildOffsets(data)}
-	if IsDeclarationName(baseName(path)) {
-		e.kind = stringscan.KindDeclaration
-	}
 	e.walk(doc)
 	if m, ok := doc.(map[string]any); ok {
 		e.specialTokens(m)
@@ -131,15 +99,11 @@ type emitter struct {
 	// value (bytes.Index plus a json.Marshal fallback on a miss), which is
 	// quadratic in the document: 50 000 added_tokens took 66 s.
 	offsets map[string]int64
-	// kind is the indicator tier the decoded values are scanned with. A
-	// tokenizer declaration file is scanned as KindDeclaration so the control
-	// tags it defines are not reported as injections; everything else is text.
-	kind stringscan.Kind
 }
 
-// emitString scans one decoded value with the emitter's tier.
+// emitString scans one decoded value with the shared indicator engine.
 func (e *emitter) emitString(s string) {
-	stringscan.EmitStringKind(e.sink, e.off(s), s, e.kind)
+	stringscan.EmitString(e.sink, e.off(s), s)
 }
 
 // off resolves a decoded JSON string to a file offset. A value the index does
