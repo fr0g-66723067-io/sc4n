@@ -83,6 +83,9 @@ const (
 
 	// Executables.
 	FormatNative // ELF / PE / Mach-O / OLE, identified by magic
+
+	// Images whose text metadata is parsed.
+	FormatImageMeta // PNG or JPEG: metadata chunks only, pixels skipped
 )
 
 var formatNames = map[Format]string{
@@ -129,6 +132,7 @@ var formatNames = map[Format]string{
 	FormatYAML:             "yaml",
 	FormatText:             "text",
 	FormatNative:           "native",
+	FormatImageMeta:        "image-metadata",
 }
 
 func (f Format) String() string {
@@ -371,7 +375,7 @@ var extensions = map[string][]Format{
 	"ckpt":        {FormatTorchNew, FormatTorchLegacy, FormatPickle, FormatZip, FormatTFCheckpoint},
 	"npy":         {FormatNPY},
 	"npz":         {FormatNPZ, FormatZip},
-	"bin":         {FormatSafetensors, FormatPickle, FormatTorchNew, FormatZip, FormatNative, FormatText},
+	"bin":         {FormatSafetensors, FormatPickle, FormatTorchNew, FormatZip, FormatNative, FormatText, FormatImageMeta},
 	"safetensors": {FormatSafetensors},
 	"gguf":        {FormatGGUF},
 	"onnx":        {FormatONNX},
@@ -406,6 +410,10 @@ var extensions = map[string][]Format{
 	"txt":         {FormatText, FormatJinja},
 	"jsonl":       {FormatJSONLines},
 	"whl":         {FormatZip, FormatNPZ},
+	"png":         {FormatImageMeta},
+	"jpg":         {FormatImageMeta},
+	"jpeg":        {FormatImageMeta},
+	"jfif":        {FormatImageMeta},
 	"so":          {FormatNative},
 	"dll":         {FormatNative},
 	"dylib":       {FormatNative},

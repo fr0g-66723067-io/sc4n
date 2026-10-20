@@ -334,6 +334,34 @@
       ],
       "notes": "model_config holds a Lambda, and Keras ignores safe_mode for H5 (GHSA-36rr-ww3j-vrjv), so this is the .keras critical reached through the H5 loader."
     },
+    "imgmeta/jpeg_exif_webhook.jpg": {
+      "expect": [
+        "SC4N-IMG-METADATA",
+        "SC4N-STRING-C2"
+      ],
+      "notes": "An EXIF UserComment with a Discord webhook URL: the APP1 segment is walked, the TIFF IFD0 is read, and the comment reaches the indicator engine."
+    },
+    "imgmeta/png_bad_length.png": {
+      "expect": [
+        "SC4N-IMG-METADATA",
+        "SC4N-IMG-STRUCT"
+      ],
+      "notes": "A tEXt chunk declaring 0x7fff bytes in a file of a few hundred: the framing mismatch is reported, and the parser stops rather than reading past the buffer."
+    },
+    "imgmeta/png_text_injection.png": {
+      "expect": [
+        "SC4N-IMG-METADATA",
+        "SC4N-METADATA-INJECTION"
+      ],
+      "notes": "A 1x1 PNG whose tEXt chunk carries an instruction phrase. Before the format existed the image was dispatched unknown and produced no findings; the metadata is run through the shared indicator engine at its absolute offset."
+    },
+    "imgmeta/png_ztxt_invisible.png": {
+      "expect": [
+        "SC4N-IMG-METADATA",
+        "SC4N-UNICODE-ANOMALY"
+      ],
+      "notes": "A zTXt chunk (deflated) carrying zero-width spaces: the compressed form has to be inflated before the invisible-character pass can see them."
+    },
     "jinja_looks_python.jinja": {
       "expect": [
         "SC4N-JINJA-PY-OBJECT"
@@ -1599,6 +1627,16 @@
         "SC4N-FORMAT-EXTENSION-MISMATCH"
       ],
       "notes": "A well-formed UBJSON model with a typed int32 array and exact framing: the false-positive gate for the UBJSON walker."
+    },
+    "imgmeta/benign/png_plain.png": {
+      "expect": [
+        "SC4N-IMG-METADATA"
+      ],
+      "forbid": [
+        "SC4N-IMG-STRUCT",
+        "SC4N-METADATA-INJECTION"
+      ],
+      "notes": "A 1x1 PNG with no text chunk: the false-positive gate for the image parser. The informational finding is the contract that the file was read, not a finding about it."
     },
     "utf16/jpeg_utf16_exif.jpg": {
       "expect": null,
