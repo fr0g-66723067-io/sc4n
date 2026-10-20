@@ -718,6 +718,10 @@ func TestLargeConstantIsScannedWhole(t *testing.T) {
 // TestCodeStringInBinaryConstantIsSeen pins the F16 fix: a REDUCE argument whose
 // head is binary leaves text empty on the no-decode path, which made the
 // code-string rule blind to the ShadowPickle shape with a padded payload.
+//
+// It also pins the round-7 correction: each text run is tested on its own, so two
+// short fragments separated by binary padding are not joined (with an invented
+// newline) into a "string" the artifact does not contain.
 func TestCodeStringInBinaryConstantIsSeen(t *testing.T) {
 	payload := append(make([]byte, 4096), []byte("import os\nos.system('id')\n")...)
 
@@ -738,6 +742,14 @@ func TestCodeStringInBinaryConstantIsSeen(t *testing.T) {
 	// not have moved the detection to a different shape.
 	_, fs = walk(t, build([]byte("import os\nos.system('id')\n")))
 	mustHave(t, fs, "SC4N-PICKLE-CODE-STRING")
+
+	// Two fragments under codeStringMinBytes separated by binary padding are two
+	// values, not source: the join put '\n' between them and the evidence quoted
+	// the assembled string.
+	split := append([]byte("import os"), make([]byte, 8)...)
+	split = append(split, []byte("os.system('id')")...)
+	_, fs = walk(t, build(split))
+	mustNotHave(t, fs, "SC4N-PICKLE-CODE-STRING")
 }
 
 // TestMemoAliasNeedsDistinctSlots pins the rule's semantics: a name bound once

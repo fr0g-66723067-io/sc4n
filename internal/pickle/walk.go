@@ -931,11 +931,11 @@ func walkStrings(v Val, depth int, visit func(string)) {
 			return
 		}
 		// A constant that was scanned in place rather than decoded: the code
-		// string is in its printable runs, which is how a REDUCE argument whose
-		// first bytes are padding was previously invisible to this rule.
+		// string is in its text runs, which is how a REDUCE argument whose first
+		// bytes are padding was previously invisible to this rule.
 		if len(v.raw) > 0 {
-			if s := asciiPrefix(v.raw); len(s) >= codeStringMinBytes {
-				visit(s)
+			for _, run := range printableRuns(v.raw) {
+				visit(string(run))
 			}
 		}
 	case kList, kTuple, kSet, kFrozenSet, kDict:
@@ -1240,30 +1240,44 @@ func (w *walker) bytesValue(arg any, off int, kind valKind) Val {
 	return Val{kind: kind, text: w.retain(latin1String(scan[:maxRetainString])), n: full}
 }
 
-// asciiPrefix extracts the printable runs from a binary constant, bounded by
-// maxRetainString, so that looksLikeCode can be applied to it. It is called at the
-// REDUCE site (see walkStrings), not when the constant is created: a state_dict
-// has thousands of tensor blobs and extracting a prefix for each of them at
-// creation time would spend the retention budget on values no rule reads.
-func asciiPrefix(b []byte) string {
-	var sb strings.Builder
-	for i := 0; i < len(b) && sb.Len() < maxRetainString; {
-		if !printableByte(b[i]) {
+// printableRuns returns the text runs of a binary constant, bounded by
+// maxRetainString, so that looksLikeCode can be applied to each of them. It is
+// called at the REDUCE site (see walkStrings), not when the constant is created:
+// a state_dict has thousands of tensor blobs and extracting runs for each of them
+// at creation time would spend the retention budget on values no rule reads.
+//
+// A run is a maximal span of printable bytes and text whitespace. Whitespace is
+// part of a run because source text is line-structured - "import os\nos.system"
+// is one string, and splitting at the newline would drop every multi-line
+// payload below codeStringMinBytes. Any other byte separates runs, so two
+// unrelated ASCII fragments inside a tensor blob are never joined into one
+// "string": the join used to insert '\n' at every separator, which both
+// fabricated a code-looking value from short fragments and quoted the fabricated
+// value as evidence.
+func printableRuns(b []byte) [][]byte {
+	var runs [][]byte
+	total := 0
+	for i := 0; i < len(b) && total < maxRetainString; {
+		if !textByte(b[i]) {
 			i++
 			continue
 		}
 		j := i
-		for j < len(b) && printableByte(b[j]) {
+		for j < len(b) && textByte(b[j]) {
 			j++
 		}
-		if j-i >= 4 {
-			sb.Write(b[i:j])
-			sb.WriteByte('\n')
+		if j-i >= codeStringMinBytes {
+			runs = append(runs, b[i:j])
+			total += j - i
 		}
 		i = j
 	}
-	return sb.String()
+	return runs
 }
+
+// textByte is what a source run is made of: printable ASCII and the whitespace
+// that separates its lines.
+func textByte(c byte) bool { return printableByte(c) || c == '\t' || c == '\n' || c == '\r' }
 
 func printableByte(c byte) bool { return c >= 0x20 && c < 0x7f }
 
