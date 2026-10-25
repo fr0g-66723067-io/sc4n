@@ -39,7 +39,8 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		out        = fs.String("out", "", "campaign directory (required)")
 		stage      = fs.String("stage", "all", "all|candidates|verdicts|fetch|scan|report")
 		searchFile = fs.String("search-file", "", "file of search terms, one per line ('#' comments)")
-		defaults   = fs.Bool("defaults", true, "include the built-in universe (42 terms, 3 tags, 7 authors)")
+		defaults   = fs.Bool("defaults", true, fmt.Sprintf("include the built-in universe (%d terms, %d tags, %d authors)",
+			len(hubcampaign.DefaultTerms), len(hubcampaign.DefaultTags), len(hubcampaign.DefaultAuthors)))
 		limit      = fs.Int("limit", 100, "results per query (1..1000)")
 		level      = fs.String("level", "unsafe", "Hub verdict level that selects a repo: unsafe|suspicious|caution|error")
 		jobs       = fs.Int("jobs", 8, "concurrent Hub requests")
