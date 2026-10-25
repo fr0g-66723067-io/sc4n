@@ -367,6 +367,26 @@ var (
 	// connect call, a receive call and a command sink. Any single call is ordinary;
 	// the combination is a reverse shell, and the payload text a generator embeds in
 	// a string literal counts the same as the code it runs.
+	// ruleCodeRemoteToolLoader fires for transformers.load_tool('org/repo'), which
+	// imports and runs the code of a Hub repository inside the current process.
+	ruleCodeRemoteToolLoader = report.DefineRule(report.Rule{
+		ID:         "SC4N-CODE-REMOTE-TOOL-LOADER",
+		Title:      "Python source loads and runs code from a Hub repository",
+		Severity:   report.SeverityHigh,
+		Confidence: report.ConfidenceMedium,
+		CWE:        []string{"CWE-829", "CWE-94"},
+		Class:      "code",
+		Description: "transformers.load_tool('org/repo') resolves a Space or repository from the Hub and " +
+			"imports its Python module into the current process, so the repository's code runs with the " +
+			"caller's privileges. A model card cannot make that code inspectable: the trust decision is " +
+			"delegated to whoever controls the named repository, at whatever revision it currently has.",
+		Refs: []string{
+			"https://cwe.mitre.org/data/definitions/829.html",
+			"https://cwe.mitre.org/data/definitions/94.html",
+		},
+		Tags: []string{"remote-code"},
+	})
+
 	ruleCodeReverseShell = report.DefineRule(report.Rule{
 		ID:         "SC4N-CODE-REVERSE-SHELL",
 		Title:      "Python source contains a reverse-shell shape",
@@ -696,6 +716,12 @@ func isSerializerDump(calls []Call) bool {
 		}
 	}
 	return false
+}
+
+// emitAtExtra is emitAt with an extras map.
+func (a *analyzer) emitAtExtra(r *report.Rule, off int32, ev string, extra map[string]string) {
+	line, col := a.at(off)
+	a.ctx.Sink.EmitAtExtra(r, line, col, report.TruncateEvidence(ev, 160), extra)
 }
 
 func (a *analyzer) emitAt(r *report.Rule, off int32, ev string) {
@@ -1097,6 +1123,12 @@ func (a *analyzer) loaderRules(st []Token, calls []Call, stmtText string) {
 			a.emitAt(ruleLoaderKerasSafeMode, c.Off, "load_model with safe_mode=False: "+callEvidence(a.src, c))
 		case dottedLast(c.Dotted) == "Lambda" || strings.HasSuffix(c.Dotted, "layers.Lambda"):
 			a.emitAt(ruleLoaderKerasLambda, c.Off, "keras Lambda layer: "+callEvidence(a.src, c))
+		case dottedLast(c.Dotted) == "load_tool":
+			if repo, ok := a.stringArg(c, 0); ok && looksLikeRepoID(repo) {
+				a.emitAtExtra(ruleCodeRemoteToolLoader, c.Off,
+					"load_tool('"+repo+"') imports and runs code from a Hub repository",
+					map[string]string{"repo": repo})
+			}
 		case (dottedLast(c.Dotted) == "from_string" || dottedLast(c.Dotted) == "from_file") && strings.Contains(stmtText, "Environment"):
 			a.emitAt(ruleLoaderJinjaFromString, c.Off, "jinja2 Environment rendering an untrusted template: "+callEvidence(a.src, c))
 		}
@@ -1138,6 +1170,34 @@ func (a *analyzer) isAutoFromPretrained(c Call) bool {
 		}
 	}
 	return false
+}
+
+// looksLikeRepoID reports whether s names a Hub repository: exactly two
+// non-empty components and no filesystem prefix. A local directory
+// ("./tools/x", "../x/y", "/opt/tool") loads local code and is not this rule.
+func looksLikeRepoID(s string) bool {
+	if s == "" || strings.HasPrefix(s, ".") || strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~") {
+		return false
+	}
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	return parts[0] != "" && parts[1] != ""
+}
+
+// stringArg returns the unquoted value of the call's i-th positional argument when
+// it is a plain string literal. A prefix that builds the name at run time (f-string,
+// concatenation) is not a literal and is not reported by the literal rules.
+func (a *analyzer) stringArg(c Call, i int) (string, bool) {
+	if i < 0 || i >= len(c.Args) {
+		return "", false
+	}
+	t := strings.TrimSpace(c.Args[i].Text(a.src))
+	if len(t) < 2 || (t[0] != '\'' && t[0] != '"') || t[len(t)-1] != t[0] {
+		return "", false
+	}
+	return t[1 : len(t)-1], true
 }
 
 func (a *analyzer) localPathArg(c Call) bool {

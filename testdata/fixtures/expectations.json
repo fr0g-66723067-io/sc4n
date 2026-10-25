@@ -856,6 +856,12 @@
       ],
       "notes": "a class whose __reduce__ returns exec plus a pickle.dump of it: the published payload-generator shape, and the human-readable half of the pickle the engine reports when the dumped file is scanned"
     },
+    "python_remote_tool/exploit.py": {
+      "expect": [
+        "SC4N-CODE-REMOTE-TOOL-LOADER"
+      ],
+      "notes": "load_tool('org/repo') imports a Hub repository's Python module into this process: the repository's code runs with the caller's privileges"
+    },
     "python_reverse_shell/generator.py": {
       "expect": [
         "SC4N-CODE-REVERSE-SHELL"
