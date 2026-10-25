@@ -218,6 +218,18 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 	}
 
 	whole, need := f.plan(e)
+	downgraded := false
+	if need > *repoBudget || need > f.left {
+		// A whole fetch refused by either budget falls back to a header slice when
+		// one fits: `budget` then means "not even the header was fetched", which is
+		// a different claim from "only the header was". The round's 6.0 GiB run
+		// refused files whose slice would have cost 2 MiB.
+		if whole {
+			if sn := f.sliceNeed(e); sn <= *repoBudget && sn <= f.left {
+				whole, need, downgraded = false, sn, true
+			}
+		}
+	}
 	if need > *repoBudget || need > f.left {
 		ff.Status = "budget"
 		ff.Detail = fmt.Sprintf("needs %s; %s left for the repo and %s for the campaign",
@@ -226,6 +238,10 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 	}
 	*repoBudget -= need
 	f.left -= need
+	if downgraded {
+		ff.Detail = fmt.Sprintf("whole file does not fit the byte budget; fetched a %s header slice",
+			humanBytes(need))
+	}
 
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		ff.Detail = err.Error()
@@ -280,6 +296,15 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 	return ff
 }
 
+// sliceNeed is the byte count a header slice of e costs.
+func (f *fetcher) sliceNeed(e planned) int64 {
+	need := f.o.SliceSize
+	if e.size >= 0 && e.size < need {
+		need = e.size
+	}
+	return need
+}
+
 // plan decides whole-file versus slice and how many bytes that needs.
 func (f *fetcher) plan(e planned) (whole bool, need int64) {
 	if e.size == 0 {
@@ -288,11 +313,7 @@ func (f *fetcher) plan(e planned) (whole bool, need int64) {
 	if e.size > 0 && (e.size <= f.o.FullLimit || (e.flagged && e.size <= f.o.FlaggedLimit)) {
 		return true, e.size
 	}
-	need = f.o.SliceSize
-	if e.size >= 0 && e.size < need {
-		need = e.size
-	}
-	return false, need
+	return false, f.sliceNeed(e)
 }
 
 // humanBytes formats a byte count for a progress or detail line.

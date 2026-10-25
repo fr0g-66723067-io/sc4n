@@ -552,3 +552,92 @@ func TestJoinRefusesStaleStages(t *testing.T) {
 		t.Fatalf("err = %v, want a stale-fetch error naming o/two", err)
 	}
 }
+
+// TestWholeFetchFallsBackToSlice: when the budget cannot admit the whole file but
+// can admit the header, the file is fetched as a slice and says so — `budget` is
+// reserved for "not even the header was fetched".
+func TestWholeFetchFallsBackToSlice(t *testing.T) {
+	body := make([]byte, 100<<10)
+	copy(body, pickleOSSystem)
+	hub := &fakeHub{
+		repos: []string{"o/evil"},
+		scans: map[string]string{
+			"o/evil": `{"scansDone":true,"filesWithIssues":[{"path":"big.pkl","level":"unsafe"}]}`,
+		},
+		siblings: map[string][]map[string]any{"o/evil": {sibling("big.pkl", int64(len(body)))}},
+		files:    map[string][]byte{"o/evil/big.pkl": body},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.FullLimit = 1 << 20
+	o.TotalBudget = 8 << 10
+	if _, err := Candidates(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verdicts(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fetch(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	ff := readFetchDoc(t, dir).Repos[0].Files[0]
+	if ff.Status != "slice" || ff.Bytes != 4096 {
+		t.Fatalf("file = %+v, want a 4096-byte slice", ff)
+	}
+	if !strings.Contains(ff.Detail, "header slice") {
+		t.Errorf("detail = %q, want the downgrade stated", ff.Detail)
+	}
+	rep, err := Join(appendScan(t, o))
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	if f := rep.Repos[0].Files[0]; f.Coverage != "partial" {
+		t.Fatalf("coverage = %q, want partial", f.Coverage)
+	}
+}
+
+// TestSliceFallbackRespectsRepoBudget: the repo budget is the binding one here, so
+// the fallback must consult it too.
+func TestSliceFallbackRespectsRepoBudget(t *testing.T) {
+	body := make([]byte, 100<<10)
+	hub := &fakeHub{
+		repos: []string{"o/evil"},
+		scans: map[string]string{
+			"o/evil": `{"scansDone":true,"filesWithIssues":[{"path":"big.pkl","level":"unsafe"}]}`,
+		},
+		siblings: map[string][]map[string]any{"o/evil": {sibling("big.pkl", int64(len(body)))}},
+		files:    map[string][]byte{"o/evil/big.pkl": body},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.FullLimit = 1 << 20
+	o.RepoBudget = 2048 // smaller than one slice
+	if _, err := Candidates(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verdicts(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fetch(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	ff := readFetchDoc(t, dir).Repos[0].Files[0]
+	if ff.Status != "budget" {
+		t.Fatalf("file = %+v, want budget when not even a slice fits", ff)
+	}
+}
+
+// appendScan runs the scan stage, which the join needs.
+func appendScan(t *testing.T, o Options) Options {
+	t.Helper()
+	if _, err := ScanTree(context.Background(), o); err != nil {
+		t.Fatalf("ScanTree: %v", err)
+	}
+	return o
+}

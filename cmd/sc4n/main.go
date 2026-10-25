@@ -116,7 +116,8 @@ hub flags:
   -level unsafe|suspicious|caution|error
                                Hub verdict level that selects a repo (default unsafe)
   -full-limit/-flagged-limit/-slice/-repo-budget/-total-budget SIZE
-                               what to fetch whole, slice, or refuse (32MiB/1GiB/2MiB/512MiB/6GiB)
+                               what to fetch whole, slice, or refuse (32MiB/1GiB/2MiB/1GiB/9GiB)
+                               a whole fetch that does not fit falls back to a header slice
   -api URL                     Hub base URL (default https://huggingface.co)
   -token-file FILE             token (default $HF_TOKEN, then $HF_HOME/token)
   -refresh                     recompute a stage that already wrote its file

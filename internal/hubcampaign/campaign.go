@@ -59,13 +59,26 @@ const (
 
 // Budget defaults. They are the values the Python round used.
 const (
-	defaultLimit        = 100
-	defaultJobs         = 8
-	defaultFullLimit    = 32 << 20
+	defaultLimit     = 100
+	defaultJobs      = 8
+	defaultFullLimit = 32 << 20
+	// defaultFlaggedLimit is 1 GiB because a slice is not a substitute for the
+	// whole file when the format needs its end. Measured on the 2026-10-24 round:
+	// a 2 MiB slice of a 474 MiB torch checkpoint yields only SC4N-PARSE-FAILED
+	// (medium) because the member lives behind the central directory, while the
+	// whole file yields SC4N-PICKLE-GLOBAL-CRITICAL. With a 32 MiB limit 15 flagged
+	// files dropped from critical to medium for 5 GiB of saved transfer.
 	defaultFlaggedLimit = 1 << 30
+	// defaultRepoBudget covers every repo of that round once the per-file cap
+	// applies (largest demands: 822 MiB, 667 MiB, then 487 MiB per file).
+	defaultRepoBudget = 1 << 30
+	// defaultTotalBudget is the round's demand plus headroom: 9.63 GiB of flagged
+	// files in total, 8.30 GiB with the per-file cap. A 6 GiB cap left 7 flagged
+	// files fetched only as slices, and one 2.4 GiB file stays a slice whatever the
+	// cap. An operator scanning a bigger universe lowers it.
+	defaultTotalBudget = 9 << 30
 	defaultSliceSize    = 2 << 20
-	defaultRepoBudget   = 512 << 20
-	defaultTotalBudget  = 6 << 30
+
 )
 
 // Sel is one candidate query. Kind is "search", "tag" or "author".
