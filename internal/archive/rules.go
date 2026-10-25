@@ -5,9 +5,11 @@
 // member that cannot be read is reported as SC4N-ARCHIVE-MEMBER-ERROR and the
 // walk continues, because a scanner that aborts on an unreadable entry and then
 // reports "clean" is exactly how modelscan issue #354 turned a malicious
-// `archive/data.pkl` into a CLEAN verdict. Only an unreadable *container* (a zip
-// whose end-of-central-directory or central directory cannot be located) fails
-// the artifact.
+// `archive/data.pkl` into a CLEAN verdict. Only an unreadable *container* fails the
+// artifact, and a zip with no end-of-central-directory record is not unreadable:
+// its local file headers are walked instead (see zip_truncated.go), so a header
+// slice of a checkpoint has its members scanned and the artifact carries
+// SC4N-ARCHIVE-TRUNCATED.
 package archive
 
 import "github.com/fr0g-66723067-io/sc4n/internal/report"

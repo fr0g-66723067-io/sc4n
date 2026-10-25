@@ -196,6 +196,16 @@ Two of them are worth reading as design notes rather than as caps:
   member inside a `.pt` is parsed by the same random-access parsers that read a
   top-level file, and its CRC-32 is still validated (at close, by streaming the
   member once — the parser may have read only a header).
+- **A zip with no central directory is still scanned.** A member's span is
+  normally its central-directory record, but the fetch layer keeps only the first
+  slice of a large artifact, so a 474 MiB torch checkpoint arrives as local file
+  headers followed by member data with no directory and no EOCD. The archive
+  parser then walks the local headers forward, taking each member's span from its
+  declared compressed size when that lies inside the source and otherwise from
+  the offset of the next local/central/EOCD signature, and dispatches every member
+  it bounds through the same caps and spill path. The artifact carries
+  `SC4N-ARCHIVE-TRUNCATED` (info) so a clean slice is never mistaken for a clean
+  file; a prefix with no complete local header keeps its parse failure.
 - **`MaxHashBytes`** exists because sha256 is CPU-bound on this class of host.
   Measured: 0.35 GB/s (the reference CPU has AVX2 but no SHA-NI), so a full digest
   of a 13 GiB artifact costs ~37 s — more than the entire scan budget — while the
