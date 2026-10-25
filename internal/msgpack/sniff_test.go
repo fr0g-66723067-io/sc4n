@@ -3,6 +3,7 @@ package msgpack
 import (
 	"testing"
 
+	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
@@ -37,5 +38,32 @@ func TestSniffRequiresCoverage(t *testing.T) {
 				t.Fatalf("sniff(% x) = %v,%v, want %v", c.data, f, ok, c.want)
 			}
 		})
+	}
+}
+
+// A container count the file cannot possibly hold is binary data that begins
+// with a container header, not a truncated document. The measured shape is a
+// torch storage blob: df 10 48 3c 12 opens a map32 of 273,102,866 entries in a
+// 256 KiB file, and claiming it turned the artifact into a medium
+// "msgpack: truncated value" instead of scanning it as binary.
+func TestSniffRejectsImpossibleContainerCount(t *testing.T) {
+	blob := make([]byte, 256<<10)
+	copy(blob, []byte{0xdf, 0x10, 0x48, 0x3c, 0x12})
+	src := source.Mem("data/102646816", blob)
+	defer src.Close()
+	if f, ok := sniff(src, limits.Default()); ok {
+		t.Fatalf("sniff claimed a 273M-entry map32 in a 256 KiB file as %v", f)
+	}
+}
+
+// A plausible count that the probe cannot satisfy is still a truncated document
+// and must keep being claimed.
+func TestSniffAcceptsPlausibleTruncatedCount(t *testing.T) {
+	// map32 of two entries, first key present, then the bytes end.
+	doc := []byte{0xdf, 0, 0, 0, 2, 0xa1, 'a'}
+	src := source.Mem("m.msgpack", doc)
+	defer src.Close()
+	if f, ok := sniff(src, limits.Default()); !ok || f != artifact.FormatMsgpack {
+		t.Fatalf("sniff = %v,%v; want msgpack,true", f, ok)
 	}
 }

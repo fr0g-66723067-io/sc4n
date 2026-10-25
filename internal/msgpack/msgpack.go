@@ -123,15 +123,54 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		// the bytes read; a value that closes early and leaves the rest of the
 		// buffer behind is not this format.
 		return artifact.FormatMsgpack, w.idx == len(head)
-	case errors.Is(verr, errTruncated), errors.Is(verr, errCap):
-		// The value needs more bytes than were read, or a cap was reached while
-		// the walk was still making sense of the document: either way the bytes so
-		// far are consistent with MessagePack, and the parser has something to
-		// report about the document (a truncation, or the cap).
+	case errors.Is(verr, errCap):
+		// A cap was reached while the walk was still making sense of the
+		// document, so the bytes so far are consistent with MessagePack and the
+		// parser has something to report.
+		return artifact.FormatMsgpack, true
+	case errors.Is(verr, errTruncated):
+		// The value needs more bytes than were read, which is legitimate for a
+		// slice whose document continues past the probe — unless the top-level
+		// container declares far more elements than the file could hold. Every
+		// element costs at least one byte, so a count several times the artifact's
+		// size is binary data that happens to start with a container header, not a
+		// truncated document. Measured: a torch storage blob beginning
+		// df 10 48 3c 12 declares a map32 of 273,102,866 entries in a 256 KiB file
+		// and was claimed as MessagePack, so the artifact ended in a medium
+		// "msgpack: truncated value" instead of being scanned as the binary it is.
+		// The factor tolerates a slice whose document continues past the probe.
+		if c, ok := firstContainerCount(head); ok && c > 8*uint64(size) {
+			return artifact.FormatUnknown, false
+		}
 		return artifact.FormatMsgpack, true
 	default:
 		return artifact.FormatUnknown, false
 	}
+}
+
+// firstContainerCount reads the element count of a top-level map or array
+// header. fixarray/fixmap carry it in the low nibble; array16/32 and map16/32 in
+// the following big-endian bytes. ok is false for every other first byte or when
+// the header is shorter than its count field.
+func firstContainerCount(b []byte) (uint64, bool) {
+	if len(b) == 0 {
+		return 0, false
+	}
+	switch c := b[0]; {
+	case c >= 0x80 && c <= 0x8f, c >= 0x90 && c <= 0x9f:
+		return uint64(c & 0x0f), true
+	case c == 0xdc, c == 0xde:
+		if len(b) < 3 {
+			return 0, false
+		}
+		return uint64(b[1])<<8 | uint64(b[2]), true
+	case c == 0xdd, c == 0xdf:
+		if len(b) < 5 {
+			return 0, false
+		}
+		return uint64(b[1])<<24 | uint64(b[2])<<16 | uint64(b[3])<<8 | uint64(b[4]), true
+	}
+	return 0, false
 }
 
 // isContainerHeader reports whether b is a map or array header byte. Fixints and
