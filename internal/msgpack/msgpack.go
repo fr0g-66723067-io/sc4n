@@ -60,8 +60,9 @@ type parser struct{}
 func init() {
 	artifact.RegisterFormat(artifact.Info{
 		Format: artifact.FormatMsgpack,
-		Magic:  "a map/array header byte (0x80-0x9f/0xde/0xdf/0xdc/0xdd) whose bounded walk consumes the file",
-		Depth:  artifact.DepthDeep,
+		Magic: "a map/array header byte (0x80-0x9f/0xde/0xdf/0xdc/0xdd) whose bounded walk either consumes " +
+			"the file or decodes at least a quarter of the probed prefix before the document runs out",
+		Depth: artifact.DepthDeep,
 		Notes: "the document is walked with a nesting, element and string/blob budget; every string value is " +
 			"run through the shared indicator engine; NaN runs in binary blobs are reported at info; and a " +
 			"blob that sniffs as a pickle or a native image is dispatched to its own engine. MessagePack has " +
