@@ -1034,3 +1034,27 @@ func TestLargeMemoIndexDoesNotAllocateTheTable(t *testing.T) {
 		t.Fatalf("a %d-byte stream allocated %d bytes for its memo table", len(data), grown)
 	}
 }
+
+// TestTruncatedValueStopsTheStreamWithoutFabricatingOpcodes pins the boundary
+// between "the bytes are not opcodes" (resync, so a payload after a junk prefix is
+// still found) and "the value swallowed the rest of the stream" (stop, because a
+// reference unpickler raises "pickle data was truncated" there and reads no
+// further). Measured on a 2 MiB slice of an 8 MB sklearn pickle, resyncing inside
+// the truncated value produced 3871 medium and 4 critical findings, among them a
+// PERSID whose id was thirty zero bytes.
+func TestTruncatedValueStopsTheStreamWithoutFabricatingOpcodes(t *testing.T) {
+	// PROTO 4, BINBYTES declaring 4 KiB with 8 bytes present, then bytes that a
+	// resync would read as PERSID ("P" + a text id).
+	data := []byte{opPROTO, 4, opBINBYTES, 0, 0, 0x10, 0x00, 1, 2, 3, 4, 5, 6, 7, 8}
+	data = append(data, 'P')
+	data = append(data, []byte("evil\n")...)
+
+	_, fs := walk(t, data)
+	mustHave(t, fs, "SC4N-PICKLE-INCOMPLETE", "SC4N-PICKLE-STRUCT")
+	if hasRule(fs, "SC4N-PICKLE-PERSID") {
+		t.Fatalf("the walk resynced inside a truncated value and read the payload as opcodes: %v", ruleIDs(fs))
+	}
+	if len(fs) > 3 {
+		t.Fatalf("%d findings from a 21-byte truncated stream: %v", len(fs), ruleIDs(fs))
+	}
+}

@@ -346,6 +346,18 @@ func (w *walker) segment(start int) (int, bool) {
 		if err != nil {
 			w.structFinding(errKind(err), err.Error(), int64(pos))
 			w.emitOnce("incomplete:"+strconv.Itoa(pos)+":"+err.Error(), ruleIncomplete, int64(pos), err.Error())
+			if errKind(err) == "truncated-argument" {
+				// The stream ended inside a value: a length or a fixed-width
+				// argument runs past the end of the data. Resyncing here would read
+				// the value's own payload as opcodes, and that is a fabrication, not
+				// evidence: measured on a 2 MiB slice of an 8 MB sklearn pickle, the
+				// tail of the value decoded as thousands of opcodes and produced
+				// 3871 medium and 4 critical findings, among them a PERSID whose id
+				// was 30 zero bytes. The reference unpickler raises "pickle data was
+				// truncated" at the same byte and reads no further, so the walk stops
+				// here; run() then reports the missing STOP.
+				return pos, true
+			}
 			w.resyncRun++
 			if w.resyncRun > maxResyncRun {
 				w.structFinding("undecodable-region",
