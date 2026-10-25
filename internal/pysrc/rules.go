@@ -1,6 +1,7 @@
 package pysrc
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 
@@ -362,6 +363,30 @@ var (
 		Tags: []string{"payload-builder", "pickle"},
 	})
 
+	// ruleCodeReverseShell fires when one artifact contains a socket constructor, a
+	// connect call, a receive call and a command sink. Any single call is ordinary;
+	// the combination is a reverse shell, and the payload text a generator embeds in
+	// a string literal counts the same as the code it runs.
+	ruleCodeReverseShell = report.DefineRule(report.Rule{
+		ID:         "SC4N-CODE-REVERSE-SHELL",
+		Title:      "Python source contains a reverse-shell shape",
+		Severity:   report.SeverityHigh,
+		Confidence: report.ConfidenceMedium,
+		CWE:        []string{"CWE-78", "CWE-306"},
+		Class:      "code",
+		Description: "One artifact contains a socket constructor, a connect call, a receive call and a " +
+			"command sink (subprocess.*, os.system, os.popen). Each of those alone is ordinary; together " +
+			"they describe a connection that receives commands and runs them, which is the interactive " +
+			"access payload a model file or a training script carries. The markers are matched over the " +
+			"whole artifact, because a generator that embeds the payload in a string literal carries the " +
+			"same signal as one that runs it.",
+		Refs: []string{
+			"https://cwe.mitre.org/data/definitions/78.html",
+			"https://cwe.mitre.org/data/definitions/306.html",
+		},
+		Tags: []string{"reverse-shell"},
+	})
+
 	ruleLoaderKerasLambda = report.DefineRule(report.Rule{
 		ID:         "SC4N-LOADER-KERAS-LAMBDA",
 		Title:      "keras.layers.Lambda constructs a layer from a Python function",
@@ -399,11 +424,65 @@ func analyze(ctx *artifact.Ctx, src []byte, cellLines []int) {
 		netTainted: map[string]bool{},
 		callBudget: maxCallTokens,
 	}
+	a.reverseShell()
 	stmts := Statements(src, Lex(src))
 	for _, st := range stmts {
 		a.stmt(st)
 	}
 	a.finish()
+}
+
+// reverseShell reports an artifact that combines a socket constructor, a connect
+// call, a receive call and a command sink.
+func (a *analyzer) reverseShell() {
+	off, markers, ok := reverseShellMarkers(a.src)
+	if !ok {
+		return
+	}
+	line, col := a.at(off)
+	a.ctx.Sink.EmitAtExtra(ruleCodeReverseShell, line, col,
+		"reverse-shell shape: socket + connect + recv + a command sink in one artifact",
+		map[string]string{"markers": strings.Join(markers, ",")})
+}
+
+// reverseShellMarkers reports whether src holds all four reverse-shell groups and
+// which markers were seen. The groups are: a socket constructor; a connect call;
+// a command sink; a receive call. threading.Thread and the specific sink names are
+// reported when present but are not required.
+func reverseShellMarkers(src []byte) (int32, []string, bool) {
+	sock := bytes.Index(src, []byte("socket.socket("))
+	if sock < 0 {
+		return 0, nil, false
+	}
+	if !hasAnyMarker(src, ".connect(") {
+		return 0, nil, false
+	}
+	if !hasAnyMarker(src, "subprocess.", "os.system(", "os.popen(") {
+		return 0, nil, false
+	}
+	if !hasAnyMarker(src, ".recv(", ".recvfrom(") {
+		return 0, nil, false
+	}
+	markers := []string{"socket.socket("}
+	for _, m := range []string{
+		".connect(", ".recv(", ".recvfrom(", "subprocess.getoutput", "subprocess.Popen",
+		"subprocess.run", "os.system(", "os.popen(", "threading.Thread(",
+	} {
+		if bytes.Contains(src, []byte(m)) {
+			markers = append(markers, m)
+		}
+	}
+	return int32(sock), markers, true
+}
+
+// hasAnyMarker reports whether src contains any of the markers.
+func hasAnyMarker(src []byte, markers ...string) bool {
+	for _, m := range markers {
+		if bytes.Contains(src, []byte(m)) {
+			return true
+		}
+	}
+	return false
 }
 
 // finish emits the artifact-level rule that pairs a reducing class with a

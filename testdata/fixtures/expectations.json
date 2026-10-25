@@ -856,6 +856,12 @@
       ],
       "notes": "a class whose __reduce__ returns exec plus a pickle.dump of it: the published payload-generator shape, and the human-readable half of the pickle the engine reports when the dumped file is scanned"
     },
+    "python_reverse_shell/generator.py": {
+      "expect": [
+        "SC4N-CODE-REVERSE-SHELL"
+      ],
+      "notes": "socket + connect + recv + subprocess in one artifact, here inside a textwrap.dedent literal: the payload text is the signal"
+    },
     "python_taint/modeling_x.py": {
       "expect": [
         "SC4N-CODE-TAINT-EXEC",
@@ -1400,6 +1406,13 @@
     "benign/dup_output_distinct.safetensors": {
       "expect": [],
       "notes": "Two genuinely distinct tensors with contiguous, non-overlapping extents. It is the control for the duplicate-top-level-key fixture: a de-duplication implemented by dropping tensors, or by silencing the contiguity pass, has to fail somewhere, and it must not fail here."
+    },
+    "benign/echo_server.py": {
+      "expect": null,
+      "forbid": [
+        "SC4N-CODE-REVERSE-SHELL"
+      ],
+      "notes": "a server that echoes a received line and runs no command must not be reported as a reverse shell"
     },
     "benign/eicar_prose.txt": {
       "expect": null,
