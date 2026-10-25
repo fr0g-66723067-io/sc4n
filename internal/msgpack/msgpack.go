@@ -34,6 +34,12 @@ const (
 	// lower) and stops a map declaring billions of keys from occupying the
 	// scanner even before the byte-length check fires.
 	maxElements = 1 << 22
+	// msgpackMinDecoded and msgpackEvidenceFloor bound what a truncated parse must
+	// demonstrate: at least 32 decoded bytes, at least a quarter of the prefix the
+	// sniffer read, and only when that prefix is long enough for the ratio to mean
+	// anything.
+	msgpackMinDecoded    = 32
+	msgpackEvidenceFloor = 64
 	// sniffBudget bounds how much of a candidate the sniffer parses. A larger
 	// document is accepted if its prefix parses cleanly, because the parser runs
 	// the full bounded walk afterwards.
@@ -140,6 +146,17 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		// "msgpack: truncated value" instead of being scanned as the binary it is.
 		// The factor tolerates a slice whose document continues past the probe.
 		if c, ok := firstContainerCount(head); ok && c > 8*uint64(size) {
+			return artifact.FormatUnknown, false
+		}
+		// A walk that failed before decoding 32 bytes proves nothing: MessagePack
+		// has no magic, so the claim rests entirely on how far the parse got, and a
+		// binary blob whose first byte happens to be a container header fails on its
+		// second. Measured on the unsafe corpus, 814 of the 815 parse failures were
+		// members of a torch checkpoint (raw storage bytes) claimed as a truncated
+		// MessagePack document that decoded a byte or two. A real truncated document
+		// decodes a prefix — the 1 MiB sniff budget is the only truncation a scan
+		// of the artifact's own size can produce.
+		if len(head) >= msgpackEvidenceFloor && (int64(w.idx) < msgpackMinDecoded || int64(w.idx)*4 < int64(len(head))) {
 			return artifact.FormatUnknown, false
 		}
 		return artifact.FormatMsgpack, true

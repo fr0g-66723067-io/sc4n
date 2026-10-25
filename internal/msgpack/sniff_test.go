@@ -67,3 +67,33 @@ func TestSniffAcceptsPlausibleTruncatedCount(t *testing.T) {
 		t.Fatalf("sniff = %v,%v; want msgpack,true", f, ok)
 	}
 }
+
+// A probe that fails within its first bytes has proved nothing: MessagePack has no
+// magic, so the claim rests on how far the parse got. The measured shape is a torch
+// storage blob claimed as a truncated document after decoding one byte.
+func TestSniffRequiresDecodedProgressWhenTruncated(t *testing.T) {
+	// 0x93 (fixarray 3) followed by an impossible string length, then zeros: the
+	// walk fails at byte 2.
+	blob := make([]byte, 4096)
+	blob[0], blob[1], blob[2], blob[3], blob[4] = 0x93, 0xd9, 0xff, 0xff, 0xff
+	src := source.Mem("data/1017", blob)
+	defer src.Close()
+	if f, ok := sniff(src, limits.Default()); ok {
+		t.Fatalf("sniff claimed a blob whose parse failed at byte 2 as %v", f)
+	}
+
+	// A document that decodes a real prefix before running out is still claimed: an
+	// array of 64 elements whose first 60 decode and whose 61st is a 100-byte
+	// string with five bytes present. The walk gets through 62 bytes before the
+	// truncation.
+	doc := []byte{0xdc, 0x00, 0x40}
+	for range 60 {
+		doc = append(doc, 0x01)
+	}
+	doc = append(doc, 0xd9, 0x64, 'x', 'x', 'x', 'x', 'x')
+	src2 := source.Mem("truncated.msgpack", doc)
+	defer src2.Close()
+	if f, ok := sniff(src2, limits.Default()); !ok {
+		t.Fatalf("sniff declined a decoded prefix (format %v)", f)
+	}
+}
