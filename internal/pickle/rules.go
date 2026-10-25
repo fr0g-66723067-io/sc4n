@@ -66,7 +66,7 @@ var (
 			"torch.load(weights_only=True) nor present in sc4n's gadget tables. Two readings are " +
 			"possible: an ordinary library object that the weights-only unpickler would reject (so the " +
 			"user must opt into the unsafe loader), or a name crafted to look ordinary. Either way the " +
-			"artifact cannot be loaded with weights_only=True as written.",
+			"artifact cannot be loaded with weights_only=True as written. One finding per stream reports how many distinct names are involved, with the first five listed.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/502.html"},
 	})
 
@@ -80,7 +80,8 @@ var (
 		Class:      "pickle",
 		Description: "Every global in this stream is outside the built-in weights-only allowlist, so loading " +
 			"it with weights_only=True requires torch.serialization.add_safe_globals. That is a " +
-			"deliberate act by the user, and the names involved are reported individually; this finding " +
+			"deliberate act by the user, and the names involved appear in the SC4N-PICKLE-GLOBAL-UNKNOWN " +
+			"summary; this finding " +
 			"exists so that a reader can see the artifact's loading requirement as a single fact rather " +
 			"than reconstructing it from the per-global findings. The ID is historical and reads like a " +
 			"clearance; it is not one — the Title is the statement.",
@@ -117,7 +118,7 @@ var (
 			"user allowlisted (\"Can only build Tensor, Parameter, OrderedDict or types allowlisted\"). A " +
 			"BUILD outside that set either drives __setstate__ on an arbitrary class or, worse, sets " +
 			"attributes from stream data: the ShadowPickle shape is exactly `allowlisted class + payload " +
-			"state + BUILD`.",
+			"state + BUILD`. One finding per stream reports how many distinct names are involved, with the first five listed.",
 		Refs: []string{
 			"https://cwe.mitre.org/data/definitions/915.html",
 			"https://arxiv.org/abs/2607.17503",
@@ -135,7 +136,7 @@ var (
 		Class:      "pickle",
 		Description: "INST builds an instance of the class named in the opcode argument, calling it with the " +
 			"arguments on the stack. The weights-only unpickler does not implement INST at all, so a " +
-			"stream containing it requires the unsafe loader by construction.",
+			"stream containing it requires the unsafe loader by construction. One finding per stream reports how many distinct names are involved, with the first five listed.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/502.html"},
 	})
 
@@ -147,7 +148,7 @@ var (
 		CWE:        []string{"CWE-502"},
 		Class:      "pickle",
 		Description: "OBJ is INST with the class taken from the stack, which means the class name can be " +
-			"reconstructed by STACK_GLOBAL from strings. The weights-only unpickler does not implement OBJ.",
+			"reconstructed by STACK_GLOBAL from strings. The weights-only unpickler does not implement OBJ. One finding per stream reports how many distinct names are involved, with the first five listed.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/502.html"},
 	})
 
@@ -161,7 +162,7 @@ var (
 		Description: "NEWOBJ calls cls.__new__(cls, *args). The reference loader permits it only for " +
 			"torch.nn.Parameter and for classes in the allowlist (\"Can only create new object for " +
 			"nn.Parameter or classes allowlisted\"); anything else is a rejection, and with an " +
-			"attacker-chosen class in a less strict unpickler it is object construction from stream data.",
+			"attacker-chosen class in a less strict unpickler it is object construction from stream data. One finding per stream reports how many distinct names are involved, with the first five listed.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/502.html"},
 	})
 
@@ -174,7 +175,7 @@ var (
 		Class:      "pickle",
 		Description: "NEWOBJ_EX is NEWOBJ with a keyword-argument state dict, which the weights-only " +
 			"unpickler does not implement. It is also the opcode PROTECTED_SETATTR-style payloads use, " +
-			"because the state dict gives the attacker control over attribute names as well as values.",
+			"because the state dict gives the attacker control over attribute names as well as values. One finding per stream reports how many distinct names are involved, with the first five listed.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/502.html"},
 	})
 

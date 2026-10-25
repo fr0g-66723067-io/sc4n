@@ -37,17 +37,19 @@ type zipEntry struct {
 }
 
 const (
-	sigLocal   = 0x04034b50
-	sigCentral = 0x02014b50
-	sigEOCD    = 0x06054b50
-	sigZ64Loc  = 0x07064b50
-	sigZ64EOCD = 0x06064b50
+	sigLocal     = 0x04034b50
+	sigCentral   = 0x02014b50
+	sigDataDescr = 0x08074b50
+	sigEOCD      = 0x06054b50
+	sigZ64Loc    = 0x07064b50
+	sigZ64EOCD   = 0x06064b50
 )
 
 func le16(b []byte) uint16 { return uint16(b[0]) | uint16(b[1])<<8 }
 func le32(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }
+
 func le64(b []byte) uint64 {
 	return uint64(le32(b)) | uint64(le32(b[4:]))<<32
 }

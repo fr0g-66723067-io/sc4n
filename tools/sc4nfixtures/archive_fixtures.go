@@ -146,7 +146,8 @@ func archiveFixtures(f *fixtureSet) {
 
 // arcTruncatedZip returns a zip prefix with one stored member named name whose
 // local header carries the data-descriptor flags torch writes (bit 3, zero
-// compressed size) and no central directory at all.
+// compressed size), the 16-byte descriptor that follows the payload, and no
+// central directory at all.
 func arcTruncatedZip(name string, body []byte) []byte {
 	var buf bytes.Buffer
 	var b [30]byte
@@ -158,6 +159,15 @@ func arcTruncatedZip(name string, body []byte) []byte {
 	buf.Write(b[:])
 	buf.WriteString(name)
 	buf.Write(body)
+	// The descriptor is container framing: the recovered member's span must stop
+	// before it, or the pickle walk sees 16 bytes that are not a pickle
+	// (SC4N-PICKLE-TRAILING).
+	var d [16]byte
+	binary.LittleEndian.PutUint32(d[0:], 0x08074b50)
+	binary.LittleEndian.PutUint32(d[4:], crc32.ChecksumIEEE(body))
+	binary.LittleEndian.PutUint32(d[8:], uint32(len(body)))
+	binary.LittleEndian.PutUint32(d[12:], uint32(len(body)))
+	buf.Write(d[:])
 	return buf.Bytes()
 }
 
@@ -493,7 +503,7 @@ func archiveExpectations() (map[string]expectation, map[string]expectation) {
 		},
 		"archive/truncated_torch.pt": {
 			Expect: []string{"SC4N-ARCHIVE-TRUNCATED", "SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"},
-			Forbid: []string{"SC4N-PARSE-FAILED"},
+			Forbid: []string{"SC4N-PARSE-FAILED", "SC4N-PICKLE-TRAILING"},
 			Notes: "A 2 MiB header slice of a torch checkpoint: one local file header " +
 				"for archive/data.pkl with the data-descriptor flags torch writes, the " +
 				"pickle, and no central directory. Recovering the member from the local " +

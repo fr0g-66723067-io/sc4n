@@ -8,6 +8,25 @@ package main
 // for a gadget it does not contain.
 func pickleExpectations() map[string]expectation {
 	return map[string]expectation{
+		"pickle_numpy_float.pkl": {
+			Expect: []string{"SC4N-PICKLE-REDUCE", "SC4N-PICKLE-GLOBAL-UNKNOWN"},
+			Forbid: []string{"SC4N-PICKLE-GLOBAL-CRITICAL"},
+			Notes: "numpy.core.multiarray._reconstruct with a float32 dtype: a numeric " +
+				"array the stream rebuilds, which cannot carry objects. The gadget's " +
+				"danger is the object dtype, so the critical is forbidden and the " +
+				"non-allowlisted name is reported as a summary plus its REDUCE.",
+		},
+		"pickle_numpy_object.pkl": {
+			Expect: []string{"SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"},
+			Notes: "The same reconstruction with dtype 'O': its elements are arbitrary " +
+				"pickled objects, which is the table entry's stated condition.",
+		},
+		"pickle_numpy_dtype_object.pkl": {
+			Expect: []string{"SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"},
+			Notes: "The dtype as a numpy.dtype instance built by a nested REDUCE, the " +
+				"shape joblib and torch write: the object-dtype marker is inside the " +
+				"argument, not a bare string.",
+		},
 		"pickle_gadget_os_system.pkl": {
 			Expect: []string{
 				"SC4N-PICKLE-GLOBAL-CRITICAL",

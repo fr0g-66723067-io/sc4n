@@ -35,8 +35,19 @@ func msgpackFixtures(f *fixtureSet) {
 	// payload through numeric code untouched.
 	f.add("msgpack_nan/flax_model.msgpack", mfMap(mfStr("w"), mfBin(bytes.Repeat([]byte{0x7f, 0xf8}, 6))))
 
-	// A declared str16 length far past the end of the file.
-	f.add("msgpack_truncated.msgpack", []byte{0x81, 0xda, 0x00, 0x64})
+	// A document cut mid-value, in the shape a truncated fetch produces: an
+	// array16 of 2001 values whose first 2000 decode, then a str32 that declares
+	// 65535 bytes with three present, padded to 4 KiB. The sniffer claims a
+	// truncated document only on a decoded prefix of an artifact at least 4 KiB
+	// long, so a four-byte header pair no longer qualifies (and no longer
+	// describes anything a reader could act on).
+	truncated := []byte{0xdc, 0x07, 0xd1}
+	for range 2000 {
+		truncated = append(truncated, 0x01)
+	}
+	truncated = append(truncated, 0xdb, 0x00, 0x00, 0xff, 0xff, 'x', 'y', 'z')
+	truncated = append(truncated, make([]byte, 4096-len(truncated))...)
+	f.add("msgpack_truncated.msgpack", truncated)
 
 	// Benign: a Flax-style parameter tree with no blob payloads.
 	f.add("benign/flax_model.msgpack", mfMap(
@@ -59,7 +70,10 @@ func msgpackExpectations() map[string]expectation {
 		},
 		"msgpack_truncated.msgpack": {
 			Expect: []string{"SC4N-MSGPACK-STRUCT"},
-			Notes:  "A map declaring a 100-byte string with no payload: the bounded walker reports the truncation rather than reading past the buffer.",
+			Notes: "A 4 KiB array16 whose 2000 decoded values are followed by a str32 that " +
+				"declares 65535 bytes with three present: the bounded walker reports the " +
+				"truncation rather than reading past the buffer, and the size floor keeps " +
+				"four-byte header pairs from being claimed as documents.",
 		},
 	}
 }

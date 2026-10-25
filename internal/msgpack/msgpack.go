@@ -34,12 +34,17 @@ const (
 	// lower) and stops a map declaring billions of keys from occupying the
 	// scanner even before the byte-length check fires.
 	maxElements = 1 << 22
-	// msgpackMinDecoded and msgpackEvidenceFloor bound what a truncated parse must
-	// demonstrate: at least 32 decoded bytes, at least a quarter of the prefix the
-	// sniffer read, and only when that prefix is long enough for the ratio to mean
-	// anything.
-	msgpackMinDecoded    = 32
-	msgpackEvidenceFloor = 64
+	// msgpackMinDecoded bounds what a truncated parse must demonstrate: at least
+	// 32 decoded bytes, and at least a quarter of the prefix the sniffer read.
+	msgpackMinDecoded = 32
+	// msgpackMinTruncatedSize is the smallest artifact for which a truncated claim
+	// is made at all. Below it the claim is indistinguishable from a few bytes of
+	// binary data that begin with a container header, and a document cut that short
+	// carries no payload a reader could act on. Measured: the 96-byte storage
+	// member best/data/106 of a YOLO checkpoint claims 0x92 (fixarray of 2) and
+	// faults at byte 83, and 198 such members accounted for every
+	// SC4N-MSGPACK-STRUCT finding on the unsafe corpus.
+	msgpackMinTruncatedSize = 4096
 	// sniffBudget bounds how much of a candidate the sniffer parses. A larger
 	// document is accepted if its prefix parses cleanly, because the parser runs
 	// the full bounded walk afterwards.
@@ -61,7 +66,7 @@ func init() {
 	artifact.RegisterFormat(artifact.Info{
 		Format: artifact.FormatMsgpack,
 		Magic: "a map/array header byte (0x80-0x9f/0xde/0xdf/0xdc/0xdd) whose bounded walk either consumes " +
-			"the file or decodes at least a quarter of the probed prefix before the document runs out",
+			"the file, or decodes at least a quarter of the probed prefix with the artifact at least 4 KiB",
 		Depth: artifact.DepthDeep,
 		Notes: "the document is walked with a nesting, element and string/blob budget; every string value is " +
 			"run through the shared indicator engine; NaN runs in binary blobs are reported at info; and a " +
@@ -157,7 +162,7 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		// MessagePack document that decoded a byte or two. A real truncated document
 		// decodes a prefix — the 1 MiB sniff budget is the only truncation a scan
 		// of the artifact's own size can produce.
-		if len(head) >= msgpackEvidenceFloor && (int64(w.idx) < msgpackMinDecoded || int64(w.idx)*4 < int64(len(head))) {
+		if int64(size) < msgpackMinTruncatedSize || int64(w.idx) < msgpackMinDecoded || int64(w.idx)*4 < int64(len(head)) {
 			return artifact.FormatUnknown, false
 		}
 		return artifact.FormatMsgpack, true

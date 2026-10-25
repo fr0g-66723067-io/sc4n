@@ -26,7 +26,9 @@ func TestSniffRequiresCoverage(t *testing.T) {
 		{"empty map alone is below the size floor", []byte{0x80}, false},
 		{"empty array then padding", append([]byte{0x90}, make([]byte, 4096)...), false},
 		{"one byte then other data", []byte{0x90, 0x00, 0x01, 0x02}, false},
-		{"truncated map", []byte{0x82, 0xa1, 'a'}, true},
+		// A 3-byte artifact is below msgpackMinTruncatedSize: a truncated document
+		// that small carries nothing.
+		{"truncated map", []byte{0x82, 0xa1, 'a'}, false},
 		{"invalid marker after a header", []byte{0x81, 0xc1, 0x01}, false},
 	}
 	for _, c := range cases {
@@ -57,12 +59,23 @@ func TestSniffRejectsImpossibleContainerCount(t *testing.T) {
 }
 
 // A plausible count that the probe cannot satisfy is still a truncated document
-// and must keep being claimed.
+// and must keep being claimed, provided the artifact is large enough and the walk
+// decoded a real prefix.
 func TestSniffAcceptsPlausibleTruncatedCount(t *testing.T) {
-	// map32 of two entries, first key present, then the bytes end.
-	doc := []byte{0xdf, 0, 0, 0, 2, 0xa1, 'a'}
+	// map32 of two entries whose first key decodes, then an array16 of 2000
+	// values, then a str32 that declares far more than is present: the walk
+	// decodes ~2 KiB of a 4 KiB artifact before it runs out.
+	doc := []byte{0xdf, 0, 0, 0, 2, 0xa1, 'a', 0xc0, 0xa1, 'b', 0xdc, 0x07, 0xd1}
+	for range 2000 {
+		doc = append(doc, 0x01)
+	}
+	doc = append(doc, 0xdb, 0x00, 0x01, 0x00, 0x00, 'x')
+	doc = append(doc, make([]byte, 4096-len(doc))...)
 	src := source.Mem("m.msgpack", doc)
 	defer src.Close()
+	if len(doc) != 4096 {
+		t.Fatalf("fixture is %d bytes, want 4096", len(doc))
+	}
 	if f, ok := sniff(src, limits.Default()); !ok || f != artifact.FormatMsgpack {
 		t.Fatalf("sniff = %v,%v; want msgpack,true", f, ok)
 	}
@@ -82,18 +95,33 @@ func TestSniffRequiresDecodedProgressWhenTruncated(t *testing.T) {
 		t.Fatalf("sniff claimed a blob whose parse failed at byte 2 as %v", f)
 	}
 
-	// A document that decodes a real prefix before running out is still claimed: an
-	// array of 64 elements whose first 60 decode and whose 61st is a 100-byte
-	// string with five bytes present. The walk gets through 62 bytes before the
-	// truncation.
-	doc := []byte{0xdc, 0x00, 0x40}
-	for range 60 {
+	// A document that decodes a real prefix before running out is still claimed,
+	// and it must clear both the 4 KiB size floor and the quarter-prefix ratio: an
+	// array16 of 2000 decoded fixints (a 3-byte header plus 2000 values) followed
+	// by a str32 that declares 65535 bytes with 3 present, padded to 4096 bytes.
+	// The walk decodes ~2005 bytes of the 4096-byte probe before it faults.
+	doc := []byte{0xdc, 0x07, 0xd1}
+	for range 2000 {
 		doc = append(doc, 0x01)
 	}
-	doc = append(doc, 0xd9, 0x64, 'x', 'x', 'x', 'x', 'x')
+	doc = append(doc, 0xdb, 0x00, 0x00, 0xff, 0xff, 'x', 'y', 'z')
+	doc = append(doc, make([]byte, 4096-len(doc))...)
 	src2 := source.Mem("truncated.msgpack", doc)
 	defer src2.Close()
+	if len(doc) != 4096 {
+		t.Fatalf("fixture is %d bytes, want 4096", len(doc))
+	}
 	if f, ok := sniff(src2, limits.Default()); !ok {
 		t.Fatalf("sniff declined a decoded prefix (format %v)", f)
+	}
+
+	// The measured shape of best/data/106: a 96-byte storage blob starting 0x92
+	// whose walk reaches 83 bytes. Below the size floor, so declined.
+	small := make([]byte, 96)
+	small[0], small[1], small[2] = 0x92, 0xa9, 'a'
+	src3 := source.Mem("data/106", small)
+	defer src3.Close()
+	if f, ok := sniff(src3, limits.Default()); ok {
+		t.Fatalf("sniff claimed a 96-byte truncated blob as %v", f)
 	}
 }

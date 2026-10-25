@@ -184,6 +184,48 @@ func pickleFixtures(f *fixtureSet) {
 		stop(),
 	))
 
+	// --- numpy reconstruction: the critical is conditional on the dtype -----------
+	// The gadget entry says "_reconstruct … with object dtype can hold arbitrary
+	// objects", so the critical belongs to the object-dtype streams only. Before
+	// this pair existed the critical fired for every numpy reconstruct, which made
+	// 74 of the unsafe corpus's 274 criticals sklearn models that store numeric
+	// arrays.
+	f.add("pickle_numpy_float.pkl", cat(
+		proto(2),
+		stackGlobal("numpy.core.multiarray", "_reconstruct"),
+		[]byte{bEMPTY_DICT},
+		[]byte{bEMPTY_TUPLE},
+		shortBinUnicode("f4"),
+		[]byte{bTUPLE3},
+		[]byte{bREDUCE},
+		stop(),
+	))
+	f.add("pickle_numpy_object.pkl", cat(
+		proto(2),
+		stackGlobal("numpy.core.multiarray", "_reconstruct"),
+		[]byte{bEMPTY_DICT},
+		[]byte{bEMPTY_TUPLE},
+		shortBinUnicode("O"),
+		[]byte{bTUPLE3},
+		[]byte{bREDUCE},
+		stop(),
+	))
+	// The dtype as an instance, which is the shape joblib and torch write: the
+	// spelling is inside a nested REDUCE, not a bare argument.
+	f.add("pickle_numpy_dtype_object.pkl", cat(
+		proto(2),
+		stackGlobal("numpy.core.multiarray", "_reconstruct"),
+		[]byte{bEMPTY_DICT},
+		[]byte{bEMPTY_TUPLE},
+		stackGlobal("numpy", "dtype"),
+		shortBinUnicode("O"),
+		[]byte{bTUPLE1},
+		[]byte{bREDUCE},
+		[]byte{bTUPLE3},
+		[]byte{bREDUCE},
+		stop(),
+	))
+
 	// --- benign: a real-structure torch state dict --------------------------------
 	// The false-positive gate for the whole pickle engine. Every global is one the
 	// weights-only unpickler accepts, the persistent id is the ("storage", …)

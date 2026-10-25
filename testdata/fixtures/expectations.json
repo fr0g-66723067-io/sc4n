@@ -42,7 +42,8 @@
         "SC4N-PICKLE-REDUCE"
       ],
       "forbid": [
-        "SC4N-PARSE-FAILED"
+        "SC4N-PARSE-FAILED",
+        "SC4N-PICKLE-TRAILING"
       ],
       "notes": "A 2 MiB header slice of a torch checkpoint: one local file header for archive/data.pkl with the data-descriptor flags torch writes, the pickle, and no central directory. Recovering the member from the local header is what makes the pickle visible; the artifact is reported as a partial container so a clean slice is not read as a clean file."
     },
@@ -136,6 +137,15 @@
         "SC4N-CONFIG-AUTO-MAP"
       ],
       "notes": "A config.json whose auto_map imports modeling_x.CustomModel. The loader executes that module when trust_remote_code is set, and the module file is not present beside the config, which the evidence states. Reproduces the VU#456290 / CVE-2026-4372 remote-code surface."
+    },
+    "content_binary_blob.bin": {
+      "expect": [
+        "SC4N-CONTENT-NOT-UTF8"
+      ],
+      "forbid": [
+        "SC4N-UNICODE-ANOMALY"
+      ],
+      "notes": "Prose head (with a bidi override in it) then 64 KiB of a binary pattern: the not-UTF-8 skip is reported because the artifact opens as text, and the Unicode-shape pass is forbidden because the buffer is half binary."
     },
     "content_chat_template/config.json": {
       "expect": [
@@ -499,7 +509,7 @@
       "expect": [
         "SC4N-MSGPACK-STRUCT"
       ],
-      "notes": "A map declaring a 100-byte string with no payload: the bounded walker reports the truncation rather than reading past the buffer."
+      "notes": "A 4 KiB array16 whose 2000 decoded values are followed by a str32 that declares 65535 bytes with three present: the bounded walker reports the truncation rather than reading past the buffer, and the size floor keeps four-byte header pairs from being claimed as documents."
     },
     "native_embedded.so": {
       "expect": [
@@ -756,6 +766,30 @@
         "SC4N-PICKLE-REDUCE"
       ],
       "notes": "ShadowPickle's overwritten-module shape (arXiv 2607.17503): an allowlisted name is bound to memo slot 0 and then the same slot is rebound to posix.system. Name-scanning scanners see one binding per name and cannot observe the rebinding."
+    },
+    "pickle_numpy_dtype_object.pkl": {
+      "expect": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-REDUCE"
+      ],
+      "notes": "The dtype as a numpy.dtype instance built by a nested REDUCE, the shape joblib and torch write: the object-dtype marker is inside the argument, not a bare string."
+    },
+    "pickle_numpy_float.pkl": {
+      "expect": [
+        "SC4N-PICKLE-REDUCE",
+        "SC4N-PICKLE-GLOBAL-UNKNOWN"
+      ],
+      "forbid": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL"
+      ],
+      "notes": "numpy.core.multiarray._reconstruct with a float32 dtype: a numeric array the stream rebuilds, which cannot carry objects. The gadget's danger is the object dtype, so the critical is forbidden and the non-allowlisted name is reported as a summary plus its REDUCE."
+    },
+    "pickle_numpy_object.pkl": {
+      "expect": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-REDUCE"
+      ],
+      "notes": "The same reconstruction with dtype 'O': its elements are arbitrary pickled objects, which is the table entry's stated condition."
     },
     "pickle_offset_zero.pkl": {
       "expect": [

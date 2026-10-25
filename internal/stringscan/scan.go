@@ -959,10 +959,11 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 		// [3] Unicode Tags. One finding of a kind per buffer: the second
 		// zero-width character in a string adds nothing a reviewer does not
 		// already know from the first.
-		reported   [4]bool
-		scriptSeen [4]bool
-		scriptKind byte
-		firstMixed = -1
+		reported    [4]bool
+		scriptSeen  [4]bool
+		scriptCount [4]int
+		scriptKind  byte
+		firstMixed  = -1
 	)
 	// prevWord records whether the rune before this one was an ASCII letter,
 	// digit or underscore: the context in which a zero-width character hides
@@ -974,11 +975,14 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 		// collapses to one branch. The slow path below runs only for non-ASCII, which
 		// is rare in the JSON, Python and YAML this engine mostly sees.
 		if c := b[offset]; c < utf8.RuneSelf {
-			if !scriptSeen[0] && (c|0x20) >= 'a' && (c|0x20) <= 'z' {
-				scriptSeen[0] = true
-				scriptKind++
-				if scriptKind > 1 && firstMixed < 0 {
-					firstMixed = offset
+			if (c|0x20) >= 'a' && (c|0x20) <= 'z' {
+				scriptCount[0]++
+				if !scriptSeen[0] {
+					scriptSeen[0] = true
+					scriptKind++
+					if scriptKind > 1 && firstMixed < 0 {
+						firstMixed = offset
+					}
 				}
 			}
 			prevWord = isWordASCII(c)
@@ -1062,6 +1066,9 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 				case 'H':
 					idx = 3
 				}
+				if idx >= 0 {
+					scriptCount[idx]++
+				}
 				if idx >= 0 && !scriptSeen[idx] {
 					scriptSeen[idx] = true
 					scriptKind++
@@ -1074,7 +1081,17 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 		prevWord = false
 		offset += size
 	}
-	if scriptKind > 1 && firstMixed >= 0 && len(b) <= maxMixedScriptBytes {
+	// Mixed scripts is a homoglyph claim, and a homoglyph is a lookalike inside
+	// otherwise Latin text: "pаypal" with a Cyrillic а. Two scripts in a buffer are
+	// not enough — text written *in* another script that happens to contain an
+	// ASCII word is not an attack, and the counter-example is measured: an sklearn
+	// dataset whose labels are Russian (f64k/pickle/ARCH_traned_LinearSVC_*.pickle
+	// in the corpus) produced 3,850 "mixed scripts" findings, every one of them a
+	// Cyrillic sentence with an ASCII identifier next to it. The claim therefore
+	// requires the Latin count to exceed every other script combined: a homoglyph
+	// attack always satisfies it, a Russian sentence never does.
+	if scriptKind > 1 && firstMixed >= 0 && len(b) <= maxMixedScriptBytes &&
+		scriptCount[0] > scriptCount[1]+scriptCount[2]+scriptCount[3] {
 		hits = append(hits, Hit{
 			Rule:  ruleUnicode,
 			Off:   int64(firstMixed),

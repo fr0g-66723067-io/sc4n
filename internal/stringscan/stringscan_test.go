@@ -881,3 +881,56 @@ func TestRawIPURLNotations(t *testing.T) {
 		t.Fatal("no finding was emitted for the hex host")
 	}
 }
+
+func TestMixedScriptRequiresLatinDominance(t *testing.T) {
+	mixed := func(s string) bool {
+		for _, h := range hitsFor(t, s) {
+			if h.Extra["kind"] == "mixed-script" {
+				return true
+			}
+		}
+		return false
+	}
+	// A homoglyph inside Latin text: reported.
+	if !mixed("transfer to pаypal now") { // Cyrillic а
+		t.Fatal("a Latin-dominant homoglyph was not reported")
+	}
+	// Text written in another script that contains an ASCII word: not reported.
+	// The corpus counter-example is a Russian-labelled sklearn dataset whose
+	// pickled values are Cyrillic sentences, which produced 3,850 findings when
+	// "two scripts" was the whole test.
+	if mixed("самообключающеся intent грузу") {
+		t.Fatal("Cyrillic-dominant text was reported as a homoglyph attack")
+	}
+	if mixed("モデルカード model") {
+		t.Fatal("Han-dominant text was reported as a homoglyph attack")
+	}
+}
+
+// TestBytesConstantGetsTheByteSafeTier pins what a pickle's binary bytes constant
+// is scanned for. The pickle engine only reaches scanBytes for a constant its own
+// mostlyText test judged binary; running the text-shape rules over one reports a
+// tensor's mantissas as prose. The endpoint and credential tier is still correct
+// on any bytes, so it must survive.
+func TestBytesConstantGetsTheByteSafeTier(t *testing.T) {
+	sink, findings := sinkFor()
+	// A latin-dominant homoglyph (a text-shape hit) next to a raw-IP endpoint
+	// (a secret-tier hit), in a buffer with binary framing around them.
+	buf := []byte("\x93\x02sprizz\xd0\xb0\x8c\x05http://45.33.32.156/x\x94")
+	emitBytes(sink, 0, buf)
+	var unicode, rawIP bool
+	for _, f := range findings() {
+		switch f.RuleID {
+		case "SC4N-UNICODE-ANOMALY":
+			unicode = true
+		case "SC4N-STRING-RAW-IP-URL":
+			rawIP = true
+		}
+	}
+	if unicode {
+		t.Fatal("a text-shape rule fired on a binary bytes constant")
+	}
+	if !rawIP {
+		t.Fatal("the byte-safe endpoint rule did not run on a binary bytes constant")
+	}
+}

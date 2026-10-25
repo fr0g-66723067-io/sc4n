@@ -23,8 +23,13 @@ import (
 //
 //   - Nothing is invented. A member's span is its declared compressed size when
 //     that lies inside the source, else the offset of the next signature, else
-//     the end of the source. A member whose CRC-32 was written to a data
-//     descriptor is not CRC-checked, because the descriptor is not present.
+//     the end of the source, less the data descriptor that follows the payload
+//     when the header deferred its sizes to one (general-purpose bit 3, which
+//     torch sets on every member). The descriptor is container framing, so a
+//     member's span is its payload: leaving the 16 bytes in made every recovered
+//     data.pkl end in bytes that are not a pickle. A member whose CRC-32 was
+//     written to a descriptor is not CRC-checked, because the descriptor's CRC is
+//     what the trim removes.
 //   - The artifact stays visible as partial. The caller emits
 //     SC4N-ARCHIVE-TRUNCATED, so a clean result on a slice is not mistaken for a
 //     clean result on the whole file.
@@ -42,6 +47,54 @@ type recoveredMember struct {
 	flags   uint16
 	dataOff int64
 	dataEnd int64
+}
+
+// descriptorLen returns the length of the zip data descriptor that ends at end,
+// or 0 when the bytes there are not one. A member whose local header sets
+// general-purpose bit 3 (torch sets it on every member) carries, after its
+// payload: an optional signature 0x08074b50, a CRC-32, and the compressed and
+// uncompressed sizes — 4 bytes each, so 16 with the signature and 12 without; a
+// zip64 descriptor carries 8-byte sizes, 24 with the signature.
+//
+// The compressed-size field is validated against the payload length
+// dataOff..end, so arbitrary bytes that happen to end in a plausible signature
+// cannot shorten a member. The signature-less 12-byte form can still match 12
+// bytes of payload by chance (about 2⁻³² per member); losing 12 trailing bytes
+// is invisible to every parser sc4n has, so that is accepted rather than paid for
+// with a CRC read the descriptor's own geometry makes redundant.
+func descriptorLen(s source.Source, dataOff, end int64) int64 {
+	if end-dataOff <= 0 {
+		return 0
+	}
+	// head returns the bytes from at to end, or false when at is outside the
+	// member or the source cannot supply them.
+	head := func(at int64) ([]byte, bool) {
+		if at < dataOff || at >= end {
+			return nil, false
+		}
+		b, err := s.Bytes(at, end-at)
+		if int64(len(b)) != end-at {
+			_ = err
+			return nil, false
+		}
+		return b, true
+	}
+	if end-dataOff >= 24 {
+		if b, ok := head(end - 24); ok && le32(b) == sigDataDescr && le64(b[8:]) == uint64(end-24-dataOff) {
+			return 24
+		}
+	}
+	if end-dataOff >= 16 {
+		if b, ok := head(end - 16); ok && le32(b) == sigDataDescr && int64(le32(b[8:])) == end-16-dataOff {
+			return 16
+		}
+	}
+	if end-dataOff >= 12 {
+		if b, ok := head(end - 12); ok && int64(le32(b[4:])) == end-12-dataOff {
+			return 12
+		}
+	}
+	return 0
 }
 
 // recoverLocalMembers walks local file headers from offset 0 forward. It stops
@@ -94,20 +147,36 @@ func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMembe
 				dataEnd = size
 			}
 		}
-		if dataEnd < 0 {
+		next := dataEnd
+		if next < 0 {
 			// No declared size (a data descriptor follows the payload, as torch
 			// writes it), so the member is bounded by the next record signature.
-			dataEnd = nextZipSig(s, dataOff, size)
+			next = nextZipSig(s, dataOff, size)
 		}
-		if dataEnd <= dataOff {
+		if next <= off {
 			break
+		}
+		span := next
+		if flags&0x8 != 0 {
+			// The header deferred its sizes to a descriptor, which is container
+			// framing rather than member data. Leaving it in the span made every
+			// recovered data.pkl end in 16 bytes that are not a pickle
+			// (SC4N-PICKLE-TRAILING, high, on 279 corpus artifacts).
+			span = next - descriptorLen(s, dataOff, next)
+		}
+		if span <= dataOff {
+			// The descriptor consumed the whole span: a zero-length member.
+			off = next
+			continue
 		}
 		if len(out) >= max {
 			capped = true
 			break
 		}
-		out = append(out, recoveredMember{name: name, method: method, flags: flags, dataOff: dataOff, dataEnd: dataEnd})
-		off = dataEnd
+		out = append(out, recoveredMember{name: name, method: method, flags: flags, dataOff: dataOff, dataEnd: span})
+		// The walk advances past the descriptor to the next header, never to the
+		// trimmed span end.
+		off = next
 	}
 	return out, capped
 }

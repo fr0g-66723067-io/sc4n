@@ -30,7 +30,7 @@ func init() {
 	// report it in a metadata value. The dependency runs one way: stringscan knows
 	// about pickle's hook, and pickle knows nothing about this package.
 	pickle.StringScan = EmitString
-	pickle.BytesScan = Emit
+	pickle.BytesScan = emitBytes
 	pickle.StringUse = EmitUse
 }
 
@@ -127,6 +127,16 @@ func (k Kind) allows(h Hit) bool {
 	default:
 		return true
 	}
+}
+
+// emitBytes runs the byte-safe tier over a bytes constant. The pickle engine
+// reaches it only for a constant it has already judged binary (its own
+// mostlyText test); reading such a buffer as prose manufactures findings out of a
+// tensor's mantissas and out of a pickled multilingual label list. The tier keeps
+// the literal table, the endpoint hunt, the credential and secret assignments and
+// the EICAR marker, which are correct on any bytes.
+func emitBytes(sink *report.Sink, base int64, b []byte) {
+	EmitKind(sink, base, b, KindSecrets)
 }
 
 // EmitUnicodeAnomalies reports the invisible, order-changing and mixed-script hits

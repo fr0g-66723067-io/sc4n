@@ -412,3 +412,70 @@ func TestGoTemplateIsNotJinja(t *testing.T) {
 		t.Error("the Go template was not recognised by the content test")
 	}
 }
+
+func TestMostlyText(t *testing.T) {
+	// ratio builds n bytes with the given percentage of printable ASCII and the
+	// rest a byte that is neither printable nor whitespace.
+	ratio := func(n, printable int) []byte {
+		b := make([]byte, n)
+		cut := n * printable / 100
+		for i := range b {
+			if i < cut {
+				b[i] = 'a'
+			} else {
+				b[i] = 0x07
+			}
+		}
+		return b
+	}
+	for _, tc := range []struct {
+		name string
+		b    []byte
+		want bool
+	}{
+		{"99 percent", ratio(1000, 99), true},
+		{"83 percent", ratio(1000, 83), true},
+		{"80 percent", ratio(1000, 80), true},
+		{"71 percent", ratio(1000, 71), false},
+		{"35 percent", ratio(1000, 35), false},
+		{"empty", nil, false},
+		{"whitespace counts as printable", bytes.Repeat([]byte("\t\r\n"), 100), true},
+	} {
+		if got := mostlyText(tc.b); got != tc.want {
+			t.Errorf("%s: mostlyText = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// The sample bound: only the first 64 KiB decides, so a printable head followed
+	// by a binary tail is accepted and the reverse is rejected. Without the bound a
+	// multi-megabyte member would cost a full pass per claim.
+	head := append(bytes.Repeat([]byte("a"), 64<<10), bytes.Repeat([]byte{0x07}, 64<<10)...)
+	tail := append(bytes.Repeat([]byte{0x07}, 64<<10), bytes.Repeat([]byte("a"), 64<<10)...)
+	if !mostlyText(head) {
+		t.Error("printable 64 KiB head rejected")
+	}
+	if mostlyText(tail) {
+		t.Error("binary 64 KiB head accepted")
+	}
+}
+
+func TestBinaryBufferGetsNeitherTextClaim(t *testing.T) {
+	// A tensor buffer: no NUL in its first kilobyte (so the fallback classifier
+	// claims text) but binary from byte 0 and 0.4 printable overall. Neither the
+	// Unicode pass nor the not-UTF-8 report describes anything a reader can act on.
+	l := limits.Default()
+	var blob []byte
+	for i := 0; i < 2000; i++ {
+		blob = append(blob, byte(0xc0|i&0x3f), 0x3f, 0x80, 0x7f)
+	}
+	// A plaintext payload inside the buffer makes the byte-safe tier's work
+	// visible: the block is scanned, so the raw-IP URL is reported.
+	blob = append(blob, "\nhttp://45.33.32.156/shell.sh\n"...)
+	fs := scanBytes(t, "tensor.bin", blob, l)
+	got := ids(fs)
+	if got["SC4N-CONTENT-NOT-UTF8"] || got["SC4N-UNICODE-ANOMALY"] {
+		t.Fatalf("binary buffer claimed as text: %v", got)
+	}
+	if !got["SC4N-STRING-RAW-IP-URL"] {
+		t.Fatalf("byte-safe tier did not run over the binary buffer: %v", got)
+	}
+}

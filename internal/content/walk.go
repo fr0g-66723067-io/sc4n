@@ -182,15 +182,28 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		// of "injection" hits from its own symbol names — so the prose-shaped
 		// rules are skipped, as are the text-only layers (cards, tokenizer,
 		// jinja). What still runs is the byte-safe tier: the literal table, the
-		// raw-IP URL hunt, the credential/secret assignments and the
-		// Unicode-anomaly pass, which decode runes and skip an invalid byte rather
-		// than standing down, so they are correct on any buffer. The skip itself
-		// is reported rather than the artifact being dropped in silence.
+		// raw-IP URL hunt and the credential/secret assignments, which are correct
+		// on any buffer.
+		//
+		// Two claims are made only on a text-shaped buffer, because on binary they
+		// describe nothing a reader can act on. The Unicode-shape pass decodes
+		// runes, so on random bytes it reports "mixed scripts" about float
+		// mantissas; and "the text-only layers did not run" is vacuous when there
+		// was no text to lose. Both used to fire for every NUL-free binary member
+		// of a torch checkpoint: 2,875 SC4N-CONTENT-NOT-UTF8 (low) and the
+		// "mixed scripts" half of 4,032 SC4N-UNICODE-ANOMALY findings, on buffers
+		// measuring 0.35-0.71 printable. The skip itself is still reported for a
+		// buffer that opens as text or is mostly text.
 		stringscan.EmitKind(ctx.Sink, 0, data, stringscan.KindSecrets)
-		stringscan.EmitUnicodeAnomalies(ctx.Sink, 0, data)
-		ctx.Sink.EmitExtra(ruleNotUTF8, 0,
-			"the artifact is not valid UTF-8, so the text-only layers did not run",
-			map[string]string{"invalidAt": strconv.Itoa(firstInvalidUTF8(data))})
+		textish := mostlyText(data)
+		if textish {
+			stringscan.EmitUnicodeAnomalies(ctx.Sink, 0, data)
+		}
+		if textish || opensAsText(data) {
+			ctx.Sink.EmitExtra(ruleNotUTF8, 0,
+				"the artifact is not valid UTF-8, so the text-only layers did not run",
+				map[string]string{"invalidAt": strconv.Itoa(firstInvalidUTF8(data))})
+		}
 		return nil
 	}
 
@@ -280,6 +293,53 @@ func texty(b []byte) bool {
 		return true
 	}
 	return false
+}
+
+// mostlyText reports whether b is predominantly printable ASCII, the condition
+// under which a text-shape anomaly is meaningful. Measured on the unsafe corpus:
+// genuine non-UTF-8 text artifacts are 0.83-0.99 printable
+// (keras_metadata.pb 0.99, TestMsgPackFile.msgpack 0.83) while the torch storage
+// members that produced 4,032 SC4N-UNICODE-ANOMALY findings are 0.35-0.71.
+func mostlyText(b []byte) bool {
+	const maxSample = 64 << 10
+	if len(b) > maxSample {
+		b = b[:maxSample]
+	}
+	if len(b) == 0 {
+		return false
+	}
+	printable := 0
+	for _, c := range b {
+		if c >= 0x20 && c < 0x7f || c == '\t' || c == '\n' || c == '\r' {
+			printable++
+		}
+	}
+	return printable*5 >= len(b)*4 // ratio >= 0.8, integer arithmetic
+}
+
+// opensAsText reports whether b begins with a run of printable bytes long enough
+// that "text with binary appended" is a reading of the artifact rather than a
+// coincidence. It mirrors the artifact package's minTextPrefix test for the
+// buffer rather than the sniffer's head: a UTF-16 document that fails the decoders
+// or a Latin-1 card both open as text, a float array does not.
+func opensAsText(b []byte) bool {
+	const minPrefix = 64
+	if len(b) > 4<<10 {
+		b = b[:4<<10]
+	}
+	n := 0
+	for _, c := range b {
+		switch {
+		case c >= 0x20 && c < 0x7f, c == '\t', c == '\n', c == '\r':
+			n++
+			if n >= minPrefix {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+	return n >= minPrefix
 }
 
 // firstInvalidUTF8 returns the offset of the first byte that starts an invalid

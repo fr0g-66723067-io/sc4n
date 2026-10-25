@@ -115,6 +115,34 @@ type structStat struct {
 }
 
 // walker is the single-pass state.
+// objectDtypeConditional names the numpy reconstruction callables whose entry
+// states its danger conditionally ("with object dtype"). The critical claim is
+// deferred to the REDUCE site, where the dtype argument is visible; without an
+// object-dtype marker the name is summarised as a non-allowlisted global and its
+// REDUCE is reported as a call outside the allowlist.
+var objectDtypeConditional = map[string]bool{
+	"numpy.core.multiarray._reconstruct": true,
+	"numpy.core.multiarray.scalar":       true,
+}
+
+// isObjectDtype reports whether a dtype spelling makes a reconstruction able to
+// carry arbitrary objects.
+func isObjectDtype(s string) bool {
+	return s == "O" || s == "|O" || s == "object"
+}
+
+// argsHaveObjectDtype reports whether a value holds an object-dtype spelling.
+// REDUCE's argument container retains its first elements as Vals, so the dtype
+// string is visible without re-reading the stream.
+func argsHaveObjectDtype(v Val) bool {
+	for _, e := range v.elems {
+		if e.kind == kStr && isObjectDtype(e.text) {
+			return true
+		}
+	}
+	return false
+}
+
 type walker struct {
 	sink *report.Sink
 	lim  limits.Limits
@@ -155,6 +183,60 @@ type walker struct {
 	// none was seen. flush emits the one SC4N-PICKLE-MEMO-ALIAS finding from it,
 	// so the evidence carries the final rebinding count.
 	memoOverwriteOff int64
+
+	// objectDtype is set when the stream reconstructs a numpy dtype from an
+	// object-dtype spelling, which is the condition under which the numpy
+	// reconstruction gadget can carry arbitrary objects.
+	objectDtype bool
+
+	// Per-stream accumulators. Each construction rule reports once for the stream
+	// with the count and the first names, instead of once per class: a state_dict
+	// names hundreds of model classes, and the decision a reviewer has to make is
+	// the same for all of them.
+	newObj, newObjEx, inst, obj, build, unknown classNote
+}
+
+// maxNoteNames caps how many names a stream summary lists; the rest are a count.
+// Five keeps the evidence readable and the extras deterministic.
+const maxNoteNames = 5
+
+// classNote accumulates the names one rule saw in a stream, so the rule reports
+// once per stream instead of once per class. Measured: one YOLO checkpoint's
+// data.pkl produced 40+ SC4N-PICKLE-NEWOBJ findings that all said "the reference
+// loader permits only torch.nn.Parameter".
+type classNote struct {
+	first string
+	off   int64
+	names []string
+	seen  map[string]bool
+	count int // distinct names
+}
+
+func (n *classNote) add(name string, off int64) {
+	if n.seen == nil {
+		n.seen = map[string]bool{}
+	}
+	if n.count == 0 {
+		n.first, n.off = name, off
+	}
+	if n.seen[name] {
+		return
+	}
+	n.seen[name] = true
+	n.count++
+	if len(n.names) < maxNoteNames {
+		n.names = append(n.names, name)
+	}
+}
+
+// extras is the evidence a summary finding carries: how many distinct names were
+// involved, the first one at this offset, and the first five in order.
+func (n *classNote) extras(countKey string) map[string]string {
+	return map[string]string{
+		countKey: strconv.Itoa(n.count),
+		"first":  n.first,
+		"names":  strings.Join(n.names, ","),
+	}
 }
 
 const (
@@ -634,8 +716,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if !isBuildableClass(inst.global) {
-			w.emitOnce("build:"+describe(inst), ruleBuildState, int64(off),
-				"BUILD applies stream-controlled state to "+describe(inst)+"; the reference loader permits only torch.Tensor, torch.nn.Parameter, collections.OrderedDict and user-allowlisted classes")
+			w.build.add(describe(inst), int64(off))
 		}
 		w.checkCodeStrings(state, off, "the BUILD state", callableName(inst))
 
@@ -672,8 +753,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 		if _, marked := w.st.popMark(); !marked {
 			w.structFinding("no-mark", "INST with no MARK on the stack", int64(off))
 		}
-		w.emitOnce("inst:"+g.text, ruleInst, int64(off),
-			"INST constructs "+g.text+"; the weights-only unpickler does not implement INST")
+		w.inst.add(g.text, int64(off))
 		w.st.push(Val{kind: kInstance, text: g.text, global: g.global})
 
 	case opOBJ:
@@ -686,8 +766,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 		if len(items) > 0 {
 			cls = items[0]
 		}
-		w.emitOnce("obj:"+describe(cls), ruleObj, int64(off),
-			"OBJ constructs "+describe(cls)+" from values on the stack; the class name can be assembled by STACK_GLOBAL, and the weights-only unpickler does not implement OBJ")
+		w.obj.add(describe(cls), int64(off))
 		w.st.push(Val{kind: kInstance, text: cls.text, global: cls.global})
 
 	case opNEWOBJ:
@@ -698,8 +777,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		if !isBuildableClass(cls.global) && cls.global != nil {
-			w.emitOnce("newobj:"+cls.text, ruleNewObj, int64(off),
-				"NEWOBJ calls __new__ on "+cls.text+"; the reference loader permits only torch.nn.Parameter and allowlisted classes")
+			w.newObj.add(cls.text, int64(off))
 		}
 		w.checkCodeStrings(args, off, "the NEWOBJ argument", callableName(cls))
 		w.st.push(Val{kind: kInstance, text: cls.text, global: cls.global})
@@ -712,8 +790,7 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			w.structFinding("stack-underflow", "NEWOBJ_EX with fewer than three operands", int64(off))
 			break
 		}
-		w.emitOnce("newobj_ex:"+cls.text, ruleNewObjEx, int64(off),
-			"NEWOBJ_EX constructs "+describe(cls)+" with keyword state; the weights-only unpickler does not implement it")
+		w.newObjEx.add(cls.text, int64(off))
 		w.checkCodeStrings(args, off, "the NEWOBJ_EX argument", callableName(cls))
 		w.checkCodeStrings(kwargs, off, "the NEWOBJ_EX keyword state", callableName(cls))
 		w.st.push(Val{kind: kInstance, text: cls.text, global: cls.global})
@@ -849,6 +926,13 @@ func (w *walker) globalValue(module, name string, off int64, stackBuilt bool) Va
 	w.globals[g.QualName()] = g
 	w.stream.Globals = append(w.stream.Globals, g)
 
+	if objectDtypeConditional[g.QualName()] {
+		// The dtype argument is decoded after this point, so the critical is
+		// decided at REDUCE (reportReduce); here the name joins the summary.
+		w.unknown.add(g.QualName(), off)
+		return Val{kind: kGlobal, text: g.textKey(), global: g}
+	}
+
 	switch {
 	case verdict == AllowBlocked:
 		w.emitOnce("global:"+g.QualName(), ruleGlobalCritical, off,
@@ -873,7 +957,7 @@ func (w *walker) globalValue(module, name string, off int64, stackBuilt bool) Va
 		case GadgetLibrary:
 			w.emitOnce("global:"+g.QualName(), ruleGlobalHigh, off, ev)
 		default:
-			w.emitOnce("global:"+g.QualName(), ruleGlobalUnknown, off, ev)
+			w.unknown.add(g.QualName(), off)
 		}
 	}
 	return Val{kind: kGlobal, text: g.textKey(), global: g}
@@ -889,6 +973,13 @@ func (w *walker) reportReduce(callableV, args Val, off int) {
 			"REDUCE calls "+describe(callableV)+", which the walker could not resolve to a name")
 		w.checkCodeStrings(args, off, "the REDUCE argument", callableName(callableV))
 		return
+	}
+	if g.QualName() == "numpy.dtype" && argsHaveObjectDtype(args) {
+		w.objectDtype = true
+	}
+	if objectDtypeConditional[g.QualName()] && (w.objectDtype || argsHaveObjectDtype(args)) {
+		w.emitOnce("global:"+g.QualName(), ruleGlobalCritical, int64(off),
+			g.QualName()+" — "+g.Gadget.Sink+"; the stream reconstructs an object-dtype array, whose elements are arbitrary pickled objects")
 	}
 	if g.Allows != AllowDefault {
 		w.emitOnce("reduce:"+g.QualName(), ruleReduce, int64(off),
@@ -1067,6 +1158,27 @@ func (w *walker) flush() {
 			ev = fmt.Sprintf("%s (%d occurrences reported as one finding)", ev, st.count)
 		}
 		w.sink.EmitExtra(st.rule, st.off, ev, map[string]string{"occurrences": strconv.Itoa(st.count)})
+	}
+	// One finding per construction rule per stream, naming how many distinct
+	// classes or globals are involved. Order is fixed so a report is stable.
+	type noteEmit struct {
+		note  *classNote
+		rule  *report.Rule
+		key   string
+		evFmt string
+	}
+	for _, ne := range []noteEmit{
+		{&w.newObj, ruleNewObj, "classes", "NEWOBJ constructs %d non-allowlisted class(es) in this stream (first: %s); the reference loader permits only torch.nn.Parameter and allowlisted classes"},
+		{&w.newObjEx, ruleNewObjEx, "classes", "NEWOBJ_EX constructs %d class(es) with keyword state (first: %s); the weights-only unpickler does not implement it"},
+		{&w.inst, ruleInst, "classes", "INST constructs %d class(es) named by the stream (first: %s); the weights-only unpickler does not implement INST"},
+		{&w.obj, ruleObj, "classes", "OBJ constructs %d class(es) from the stack (first: %s); the weights-only unpickler does not implement OBJ"},
+		{&w.build, ruleBuildState, "classes", "BUILD applies stream-controlled state to %d non-allowlisted class(es) (first: %s); the reference loader permits only torch.Tensor, torch.nn.Parameter, collections.OrderedDict and user-allowlisted classes"},
+		{&w.unknown, ruleGlobalUnknown, "globals", "%d global(s) are outside the built-in allowlist (first: %s); the loader rejects them unless add_safe_globals names them"},
+	} {
+		if ne.note.count == 0 {
+			continue
+		}
+		w.sink.EmitExtra(ne.rule, ne.note.off, fmt.Sprintf(ne.evFmt, ne.note.count, ne.note.first), ne.note.extras(ne.key))
 	}
 }
 

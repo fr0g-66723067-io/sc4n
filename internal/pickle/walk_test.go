@@ -1058,3 +1058,124 @@ func TestTruncatedValueStopsTheStreamWithoutFabricatingOpcodes(t *testing.T) {
 		t.Fatalf("%d findings from a 21-byte truncated stream: %v", len(fs), ruleIDs(fs))
 	}
 }
+
+// onlyFinding returns the single finding with the given rule ID.
+func onlyFinding(t *testing.T, fs []report.Finding, id string) report.Finding {
+	t.Helper()
+	var out []report.Finding
+	for _, f := range fs {
+		if f.RuleID == id {
+			out = append(out, f)
+		}
+	}
+	if len(out) != 1 {
+		t.Fatalf("%s findings = %d, want 1; all = %v", id, len(out), ruleIDs(fs))
+	}
+	return out[0]
+}
+
+func TestConstructionRulesSummarisePerStream(t *testing.T) {
+	newObj := func(module, name string) []byte {
+		return append(append([]byte{opGLOBAL}, module+"\n"+name+"\n"...), opEMPTY_TUPLE, opNEWOBJ)
+	}
+	build := func(module, name string) []byte {
+		return append(newObj(module, name), opEMPTY_DICT, opBUILD, opPOP)
+	}
+	data := []byte{opPROTO, 2}
+	data = append(data, newObj("a.b", "C")...)
+	data = append(data, newObj("a.b", "D")...)
+	data = append(data, newObj("a.b", "E")...)
+	data = append(data, newObj("a.b", "C")...)
+	data = append(data, build("a.b", "C")...)
+	data = append(data, build("a.b", "D")...)
+	data = append(data, opSTOP)
+
+	_, fs := walk(t, data)
+	n := onlyFinding(t, fs, ruleNewObj.ID)
+	if got := n.Extra["classes"]; got != "3" {
+		t.Fatalf("NEWOBJ classes = %q, want 3", got)
+	}
+	if got := n.Extra["first"]; got != "a.b.C" {
+		t.Fatalf("NEWOBJ first = %q", got)
+	}
+	if got := n.Extra["names"]; got != "a.b.C,a.b.D,a.b.E" {
+		t.Fatalf("NEWOBJ names = %q", got)
+	}
+	b := onlyFinding(t, fs, ruleBuildState.ID)
+	if got := b.Extra["classes"]; got != "2" {
+		t.Fatalf("BUILD classes = %q, want 2", got)
+	}
+	if got := b.Extra["names"]; got != "a.b.C,a.b.D" {
+		t.Fatalf("BUILD names = %q", got)
+	}
+}
+
+func TestUnknownGlobalsSummarisePerStream(t *testing.T) {
+	data := []byte{opPROTO, 2}
+	for _, g := range [][2]string{{"a.b", "C"}, {"a.b", "D"}, {"a.b", "C"}, {"posix", "system"}} {
+		data = append(data, opGLOBAL)
+		data = append(data, g[0]+"\n"+g[1]+"\n"...)
+	}
+	data = append(data, opSTOP)
+
+	_, fs := walk(t, data)
+	u := onlyFinding(t, fs, ruleGlobalUnknown.ID)
+	if got := u.Extra["globals"]; got != "2" {
+		t.Fatalf("GLOBAL-UNKNOWN globals = %q, want 2", got)
+	}
+	if got := u.Extra["names"]; got != "a.b.C,a.b.D" {
+		t.Fatalf("GLOBAL-UNKNOWN names = %q", got)
+	}
+	c := onlyFinding(t, fs, ruleGlobalCritical.ID)
+	if !strings.Contains(c.Evidence, "posix.system") {
+		t.Fatalf("critical evidence = %q", c.Evidence)
+	}
+}
+
+func TestNumpyReconstructCriticalRequiresObjectDtype(t *testing.T) {
+	global := func(module, name string) []byte {
+		return append([]byte{opGLOBAL}, module+"\n"+name+"\n"...)
+	}
+	// dtypeArg is the third element of _reconstruct's argument tuple: either a
+	// bare dtype string or a numpy.dtype instance built by a nested REDUCE.
+	stream := func(dtypeArg ...[]byte) []byte {
+		data := append([]byte{opPROTO, 2}, global("numpy.core.multiarray", "_reconstruct")...)
+		data = append(data, opEMPTY_DICT, opEMPTY_TUPLE)
+		for _, p := range dtypeArg {
+			data = append(data, p...)
+		}
+		return append(data, opTUPLE3, opREDUCE, opSTOP)
+	}
+	dtypeInstance := func(spec string) [][]byte {
+		out := global("numpy", "dtype")
+		out = append(out, binUnicode(spec)...)
+		out = append(out, opTUPLE1, opREDUCE)
+		return [][]byte{out}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		stream   []byte
+		critical bool
+	}{
+		{"float dtype", stream(binUnicode("f4")), false},
+		{"object dtype", stream(binUnicode("O")), true},
+		{"object dtype spelled out", stream(binUnicode("object")), true},
+		{"float dtype instance", stream(dtypeInstance("f4")...), false},
+		{"object dtype instance", stream(dtypeInstance("O")...), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, fs := walk(t, tc.stream)
+			mustHave(t, fs, ruleReduce.ID)
+			if tc.critical {
+				c := onlyFinding(t, fs, ruleGlobalCritical.ID)
+				if !strings.Contains(c.Evidence, "object-dtype") {
+					t.Fatalf("critical evidence = %q", c.Evidence)
+				}
+				return
+			}
+			mustNotHave(t, fs, ruleGlobalCritical.ID)
+			onlyFinding(t, fs, ruleGlobalUnknown.ID)
+		})
+	}
+}

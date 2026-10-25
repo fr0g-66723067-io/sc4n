@@ -19,6 +19,14 @@ func init() {
 		fixtures: contentFixtures,
 		expectations: func() (malicious, benign map[string]expectation) {
 			return map[string]expectation{
+				"content_binary_blob.bin": {
+					Expect: []string{"SC4N-CONTENT-NOT-UTF8"},
+					Forbid: []string{"SC4N-UNICODE-ANOMALY"},
+					Notes: "Prose head (with a bidi override in it) then 64 KiB of a binary " +
+						"pattern: the not-UTF-8 skip is reported because the artifact opens as " +
+						"text, and the Unicode-shape pass is forbidden because the buffer is " +
+						"half binary.",
+				},
 				"content_auto_map/config.json": {
 					Expect: []string{"SC4N-CONFIG-AUTO-MAP"},
 					Notes: "A config.json whose auto_map imports modeling_x.CustomModel. The loader " +
@@ -93,6 +101,26 @@ func init() {
 }
 
 func contentFixtures(f *fixtureSet) {
+	// --- a binary blob that the fallback text claim used to accept --------------
+	// 256 bytes of prose (so "text with binary appended" is a reading of the
+	// artifact, and the head's printable run passes the classifier), a real bidi
+	// override inside that prose, then 64 KiB of a repeating binary pattern that
+	// makes the buffer half printable. The skip is reported (the artifact is not
+	// valid UTF-8) and the Unicode-shape pass is not run: on a half-binary buffer
+	// it decodes runes out of noise. Before the gate this shape produced
+	// SC4N-UNICODE-ANOMALY, and through the storage members of every torch
+	// checkpoint it produced 2,875 SC4N-CONTENT-NOT-UTF8 findings.
+	blob := []byte("the model card for this checkpoint is short and hides nothing here: ")
+	blob = append(blob, []byte("evil\xe2\x80\xae rhs-to-lhs override, then binary follows.\n")...)
+	for len(blob) < 256 {
+		blob = append(blob, ' ')
+	}
+	for i := 0; i < 64<<10/4; i++ {
+		blob = append(blob, 'a', 'b', 0, 0)
+	}
+	blob = append(blob, '}', '\n')
+	f.add("content_binary_blob.bin", blob)
+
 	f.addText("content_auto_map/config.json",
 		"{\n"+
 			"  \"architectures\": [\"LlamaForCausalLM\"],\n"+

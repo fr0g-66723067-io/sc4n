@@ -114,3 +114,149 @@ func TestNextZipSigFindsHeaderPastScanWindow(t *testing.T) {
 		t.Fatalf("nextZipSig = %d, want %d", got, want)
 	}
 }
+
+// descr16 is the 16-byte data descriptor torch writes after a member payload:
+// signature, CRC-32, compressed size, uncompressed size.
+func descr16(crc uint32, size uint32) []byte {
+	var b [16]byte
+	binary.LittleEndian.PutUint32(b[0:], sigDataDescr)
+	binary.LittleEndian.PutUint32(b[4:], crc)
+	binary.LittleEndian.PutUint32(b[8:], size)
+	binary.LittleEndian.PutUint32(b[12:], size)
+	return b[:]
+}
+
+func TestRecoverLocalMembersTrimsDataDescriptor16(t *testing.T) {
+	first := localHeader("archive/data.pkl", 0, 0x8, 0, 0)
+	second := localHeader("archive/byteorder", 0, 0x8, 0, 0)
+	payload := []byte("\x80\x04\x95\x0b\x00\x00\x00\x00\x00\x00\x00}")
+	data := append([]byte{}, first...)
+	data = append(data, payload...)
+	data = append(data, descr16(0xdeadbeef, uint32(len(payload)))...)
+	data = append(data, second...)
+	data = append(data, "little"...)
+	data = append(data, descr16(0x12345678, 6)...)
+
+	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	if len(ms) != 2 {
+		t.Fatalf("members = %d, want 2", len(ms))
+	}
+	if got := ms[0].dataEnd - ms[0].dataOff; got != int64(len(payload)) {
+		t.Fatalf("first span = %d, want %d (the descriptor was trimmed)", got, len(payload))
+	}
+	if got := ms[1].dataEnd - ms[1].dataOff; got != 6 {
+		t.Fatalf("second span = %d, want 6", got)
+	}
+	if ms[1].name != "archive/byteorder" {
+		t.Fatalf("second member name = %q (the walk did not advance past the descriptor)", ms[1].name)
+	}
+	// The payload bytes themselves must be untouched by the trim.
+	body, err := source.Mem("t.pt", data).Bytes(ms[0].dataOff, ms[0].dataEnd-ms[0].dataOff)
+	if err != nil || string(body) != string(payload) {
+		t.Fatalf("first member body = %q, err %v", body, err)
+	}
+}
+
+func TestRecoverLocalMembersTrimsDataDescriptor12(t *testing.T) {
+	// The signature-less form: CRC-32, compressed size, uncompressed size.
+	first := localHeader("data.pkl", 0, 0x8, 0, 0)
+	second := localHeader("byteorder", 0, 0x8, 0, 0)
+	payload := []byte("\x80\x04}\x94.")
+	var d12 [12]byte
+	binary.LittleEndian.PutUint32(d12[0:], 0x0badf00d)
+	binary.LittleEndian.PutUint32(d12[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(d12[8:], uint32(len(payload)))
+	data := append([]byte{}, first...)
+	data = append(data, payload...)
+	data = append(data, d12[:]...)
+	data = append(data, second...)
+	data = append(data, "l"...)
+
+	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	if len(ms) != 2 {
+		t.Fatalf("members = %d, want 2", len(ms))
+	}
+	if got := ms[0].dataEnd - ms[0].dataOff; got != int64(len(payload)) {
+		t.Fatalf("first span = %d, want %d", got, len(payload))
+	}
+}
+
+func TestRecoverLocalMembersTrimsDataDescriptor64(t *testing.T) {
+	// Zip64 descriptor: signature, CRC-32, 8-byte compressed and uncompressed
+	// sizes, so 24 bytes.
+	first := localHeader("data.pkl", 0, 0x8, 0, 0)
+	second := localHeader("byteorder", 0, 0x8, 0, 0)
+	payload := []byte("\x80\x04N.")
+	var d24 [24]byte
+	binary.LittleEndian.PutUint32(d24[0:], sigDataDescr)
+	binary.LittleEndian.PutUint32(d24[4:], 0xcafebabe)
+	binary.LittleEndian.PutUint64(d24[8:], uint64(len(payload)))
+	binary.LittleEndian.PutUint64(d24[16:], uint64(len(payload)))
+	data := append([]byte{}, first...)
+	data = append(data, payload...)
+	data = append(data, d24[:]...)
+	data = append(data, second...)
+	data = append(data, "l"...)
+
+	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	if len(ms) != 2 {
+		t.Fatalf("members = %d, want 2", len(ms))
+	}
+	if got := ms[0].dataEnd - ms[0].dataOff; got != int64(len(payload)) {
+		t.Fatalf("first span = %d, want %d", got, len(payload))
+	}
+}
+
+func TestRecoverLocalMembersKeepsBytesThatOnlyLookLikeADescriptor(t *testing.T) {
+	// Sixteen payload bytes that begin with the descriptor signature but whose
+	// size fields do not describe the span: a member's data must not be trimmed
+	// on a coincidence.
+	first := localHeader("data.bin", 0, 0x8, 0, 0)
+	second := localHeader("next.bin", 0, 0x8, 0, 0)
+	payload := append([]byte("\x80\x04N."), descr16(0x11111111, 0x9999)...)
+	data := append([]byte{}, first...)
+	data = append(data, payload...)
+	data = append(data, second...)
+	data = append(data, "l"...)
+
+	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	if len(ms) != 2 {
+		t.Fatalf("members = %d, want 2", len(ms))
+	}
+	if got := ms[0].dataEnd - ms[0].dataOff; got != int64(len(payload)) {
+		t.Fatalf("first span = %d, want %d (bytes were trimmed on a false match)", got, len(payload))
+	}
+}
+
+func TestRecoverLocalMembersDescriptorAtEOF(t *testing.T) {
+	first := localHeader("data.pkl", 0, 0x8, 0, 0)
+	payload := []byte("\x80\x04\x95\x05\x00\x00\x00\x00\x00\x00\x00.")
+	data := append([]byte{}, first...)
+	data = append(data, payload...)
+	data = append(data, descr16(0x0, uint32(len(payload)))...)
+
+	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	if len(ms) != 1 {
+		t.Fatalf("members = %d, want 1", len(ms))
+	}
+	if got := ms[0].dataEnd - ms[0].dataOff; got != int64(len(payload)) {
+		t.Fatalf("span = %d, want %d", got, len(payload))
+	}
+}
+
+func TestRecoverLocalMembersIgnoredWithoutBit3(t *testing.T) {
+	// Without general-purpose bit 3 the sizes are in the header and no descriptor
+	// follows, so descriptor-shaped trailing payload bytes stay part of the member.
+	payload := append([]byte("hello"), descr16(0x0, 5)...)
+	first := localHeader("a.bin", 0, 0, uint32(len(payload)), uint32(len(payload)))
+	data := append([]byte{}, first...)
+	data = append(data, payload...)
+
+	ms, _ := recoverLocalMembers(source.Mem("t.zip", data), limits.Default())
+	if len(ms) != 1 {
+		t.Fatalf("members = %d, want 1", len(ms))
+	}
+	if got := ms[0].dataEnd - ms[0].dataOff; got != int64(len(payload)) {
+		t.Fatalf("span = %d, want %d", got, len(payload))
+	}
+}
