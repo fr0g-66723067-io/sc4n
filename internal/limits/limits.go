@@ -9,7 +9,11 @@
 // artifact it had failed to read (modelscan issue #354).
 package limits
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
+)
 
 // Limits is the decoded form of the `scan` flags. It is passed by value so that
 // a parser cannot mutate the budget it was handed.
@@ -168,6 +172,29 @@ func (l Limits) withDefaults() Limits {
 
 // Normalize fills zero fields from Default and reports the first negative field,
 // which is a caller bug rather than an artifact property.
+// ReportLimits converts the scan limits into the subset a report embeds.
+//
+// It lives here rather than in cmd/sc4n because more than one caller builds a
+// report from a Limits value (the `hub` campaign does), and a second hand-copied
+// mapping is how a limit silently stops being reported.
+func (l Limits) ReportLimits() report.Limits {
+	return report.Limits{
+		MaxArtifactBytes:     l.MaxArtifactBytes,
+		MaxHeaderBytes:       l.MaxHeaderBytes,
+		MaxDepth:             l.MaxDepth,
+		MaxEntries:           l.MaxEntries,
+		MaxArrayElements:     l.MaxArrayElements,
+		MaxDecompressedBytes: l.MaxDecompressedBytes,
+		MaxRatio:             l.MaxRatio,
+		MaxStringBlob:        l.MaxStringBlob,
+		MaxRetainedText:      l.MaxRetainedText,
+		MaxHashBytes:         l.MaxHashBytes,
+		MaxSpillBytes:        l.MaxSpillBytes,
+		MaxFindings:          l.MaxFindings,
+		MaxStackDepth:        l.MaxStackDepth,
+	}
+}
+
 func (l Limits) Normalize() (Limits, error) {
 	for _, f := range []struct {
 		name string

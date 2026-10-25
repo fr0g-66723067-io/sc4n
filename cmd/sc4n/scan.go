@@ -279,23 +279,7 @@ func buildLimits(f scanFlags) (limits.Limits, error) {
 	return l.Normalize()
 }
 
-func reportLimits(l limits.Limits) report.Limits {
-	return report.Limits{
-		MaxArtifactBytes:     l.MaxArtifactBytes,
-		MaxHeaderBytes:       l.MaxHeaderBytes,
-		MaxDepth:             l.MaxDepth,
-		MaxEntries:           l.MaxEntries,
-		MaxArrayElements:     l.MaxArrayElements,
-		MaxDecompressedBytes: l.MaxDecompressedBytes,
-		MaxRatio:             l.MaxRatio,
-		MaxStringBlob:        l.MaxStringBlob,
-		MaxRetainedText:      l.MaxRetainedText,
-		MaxHashBytes:         l.MaxHashBytes,
-		MaxSpillBytes:        l.MaxSpillBytes,
-		MaxFindings:          l.MaxFindings,
-		MaxStackDepth:        l.MaxStackDepth,
-	}
-}
+func reportLimits(l limits.Limits) report.Limits { return l.ReportLimits() }
 
 // render writes rep in the requested format.
 // warnInertFlags prints one line for a flag that has no effect in this
