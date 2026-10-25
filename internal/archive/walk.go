@@ -278,6 +278,13 @@ func Scan(ctx *artifact.Ctx, s source.Source) error {
 
 	ms, err := Collect(s, ctx.Limits)
 	if err != nil {
+		// A header slice of a zip-backed checkpoint carries local file headers
+		// and nothing else: no central directory, no EOCD. Walking the local
+		// headers recovers the members that are present. When it recovers none the
+		// artifact keeps its parse-failure status.
+		if errors.Is(err, ErrNoEOCD) && recoverTruncatedZip(ctx, s) {
+			return nil
+		}
 		return err
 	}
 	ms.Check(ctx)
@@ -792,16 +799,26 @@ func init() {
 	// internal/artifact's magic table; register one only if it is absent so this
 	// package cannot collide with them.
 	for _, info := range []artifact.Info{
-		{Format: artifact.FormatZip, Magic: "PK\\x03\\x04", Depth: artifact.DepthStructural, Container: true,
-			Notes: "stored and deflate members (plus zip64) are read; encrypted entries, CRC mismatches, duplicate names, absolute or traversal paths, link members, local-vs-central name disagreements and bomb ratios are reported; members are never extracted to disk."},
-		{Format: artifact.FormatTar, Magic: "ustar at offset 257", Depth: artifact.DepthStructural, Container: true,
-			Notes: "ustar and GNU long-name members are read; absolute, traversal and link members are reported."},
-		{Format: artifact.FormatGzip, Magic: "\\x1f\\x8b", Depth: artifact.DepthStructural, Container: true,
-			Notes: "single-member streams are unwrapped and the payload re-dispatched, up to MaxDepth; the whole-file ratio is bounded by MaxRatio."},
-		{Format: artifact.FormatZlib, Magic: "\\x78 01|9c|da", Depth: artifact.DepthStructural, Container: true,
-			Notes: "zlib streams are unwrapped and re-dispatched; joblib's default compression is zlib, so this is the common path into a joblib payload."},
-		{Format: artifact.FormatBzip2, Magic: "BZh", Depth: artifact.DepthStructural, Container: true,
-			Notes: "bzip2 streams are unwrapped and re-dispatched; gzip(bzip2(pickle)) is the published modelscan double-compression bypass, so this wrapper is supported precisely because it is used that way."},
+		{
+			Format: artifact.FormatZip, Magic: "PK\\x03\\x04", Depth: artifact.DepthStructural, Container: true,
+			Notes: "stored and deflate members (plus zip64) are read; encrypted entries, CRC mismatches, duplicate names, absolute or traversal paths, link members, local-vs-central name disagreements and bomb ratios are reported; members are never extracted to disk.",
+		},
+		{
+			Format: artifact.FormatTar, Magic: "ustar at offset 257", Depth: artifact.DepthStructural, Container: true,
+			Notes: "ustar and GNU long-name members are read; absolute, traversal and link members are reported.",
+		},
+		{
+			Format: artifact.FormatGzip, Magic: "\\x1f\\x8b", Depth: artifact.DepthStructural, Container: true,
+			Notes: "single-member streams are unwrapped and the payload re-dispatched, up to MaxDepth; the whole-file ratio is bounded by MaxRatio.",
+		},
+		{
+			Format: artifact.FormatZlib, Magic: "\\x78 01|9c|da", Depth: artifact.DepthStructural, Container: true,
+			Notes: "zlib streams are unwrapped and re-dispatched; joblib's default compression is zlib, so this is the common path into a joblib payload.",
+		},
+		{
+			Format: artifact.FormatBzip2, Magic: "BZh", Depth: artifact.DepthStructural, Container: true,
+			Notes: "bzip2 streams are unwrapped and re-dispatched; gzip(bzip2(pickle)) is the published modelscan double-compression bypass, so this wrapper is supported precisely because it is used that way.",
+		},
 	} {
 		if _, ok := artifact.FormatInfo(info.Format); !ok {
 			artifact.RegisterFormat(info)

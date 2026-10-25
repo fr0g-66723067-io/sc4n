@@ -35,6 +35,17 @@
       ],
       "notes": "A zip carrying a zip64 end-of-central-directory record with non-saturated 32-bit fields (Python's zipfile and torch.save write this shape) and the HF Trainer member layout training_args/{data.pkl,byteorder}. The prefix base must come from the record that follows the directory, not from the EOCD, or the archive is reported unparseable and the members are never opened. Both the parse failure and the extension mismatch are forbidden: .bin accepts a zip because torch.load does."
     },
+    "archive/truncated_torch.pt": {
+      "expect": [
+        "SC4N-ARCHIVE-TRUNCATED",
+        "SC4N-PICKLE-GLOBAL-CRITICAL",
+        "SC4N-PICKLE-REDUCE"
+      ],
+      "forbid": [
+        "SC4N-PARSE-FAILED"
+      ],
+      "notes": "A 2 MiB header slice of a torch checkpoint: one local file header for archive/data.pkl with the data-descriptor flags torch writes, the pickle, and no central directory. Recovering the member from the local header is what makes the pickle visible; the artifact is reported as a partial container so a clean slice is not read as a clean file."
+    },
     "bin_gzip.bin": {
       "expect": [
         "SC4N-FORMAT-EXTENSION-MISMATCH"
@@ -1643,6 +1654,10 @@
     "benign/torch_state_dict.pkl": {
       "expect": null,
       "notes": "The pickle torch 2.x writes for one F32 tensor: torch._utils._rebuild_tensor_v2 (allowlisted), a (\"storage\", …) persistent id (the only shape the loader accepts), and opcodes that are all inside the weights-only accepted set. The correct output is no finding at all."
+    },
+    "benign/truncated_plain.zip": {
+      "expect": null,
+      "notes": "A truncated zip (no central directory) whose only member is plain text: the partial-container rule is informational and nothing above it may fire."
     },
     "benign/xgb_model.json": {
       "expect": null,

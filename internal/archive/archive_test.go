@@ -693,8 +693,12 @@ func TestZipTrailingDataIsScannedAndReported(t *testing.T) {
 // #354 shape: without the finding the member is invisible and the report says
 // clean.
 func TestNestedParseFailureIsReported(t *testing.T) {
+	// A container that carries no complete local header either: recovery has
+	// nothing to walk, so the member stays a parse failure. (A zip whose EOCD is
+	// merely damaged is now recoverable — see
+	// TestNestedTruncatedZipIsRecoveredNotReportedAsFailure.)
 	inner := buildZip(t, []zspec{{name: "payload.pkl", data: []byte("x")}}, false)
-	broken := inner[:len(inner)-10] // damage the end-of-central-directory record
+	broken := inner[:6]
 	outer := buildZip(t, []zspec{{name: "inner.zip", data: broken}}, false)
 
 	ctx, col := newCtx(t, "outer.zip", limits.Default())
@@ -713,6 +717,40 @@ func TestNestedParseFailureIsReported(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("nested parse failure not reported: %v", ids(col.Findings()))
+	}
+}
+
+// TestNestedTruncatedZipIsRecoveredNotReportedAsFailure pins the boundary the
+// header-slice recovery moved: a nested zip whose end-of-central-directory record
+// is damaged is *not* a parse failure any more, because the local file headers are
+// present and its members are scanned. The partial-container rule names the
+// nested artifact so the result is not read as a scan of the whole inner file.
+func TestNestedTruncatedZipIsRecoveredNotReportedAsFailure(t *testing.T) {
+	inner := buildZip(t, []zspec{{name: "archive/data.pkl", data: gadgetPickle()}}, false)
+	broken := inner[:len(inner)-10] // damage the end-of-central-directory record
+	outer := buildZip(t, []zspec{{name: "inner.zip", data: broken}}, false)
+
+	ctx, col := newCtx(t, "outer.zip", limits.Default())
+	ctx.Format = artifact.FormatZip
+	if err := archive.Scan(ctx, source.Mem("outer.zip", outer)); err != nil {
+		t.Fatalf("outer scan: %v", err)
+	}
+	var truncated, pickle bool
+	for _, f := range col.Findings() {
+		switch f.RuleID {
+		case "SC4N-ARCHIVE-TRUNCATED":
+			truncated = true
+			if f.Artifact != "outer.zip:inner.zip" {
+				t.Errorf("truncated finding names %q, want outer.zip:inner.zip", f.Artifact)
+			}
+		case "SC4N-PICKLE-GLOBAL-CRITICAL":
+			pickle = true
+		case artifact.RuleParseFailed.ID:
+			t.Errorf("parse failure reported for a recoverable slice: %+v", f)
+		}
+	}
+	if !truncated || !pickle {
+		t.Fatalf("truncated=%v pickle=%v; findings were %v", truncated, pickle, ids(col.Findings()))
 	}
 }
 
@@ -1005,4 +1043,76 @@ func hexLen(n int) string {
 		s += " "
 	}
 	return s
+}
+
+// --- truncated container: members recovered from local file headers ---------------
+
+// localHeader builds one zip local file header (no extra field, no data
+// descriptor, no central directory — the shape of a header slice).
+func localHeader(name string, method, flags uint16, comp, uncomp uint32) []byte {
+	var b [30]byte
+	binary.LittleEndian.PutUint32(b[0:], 0x04034b50)
+	binary.LittleEndian.PutUint16(b[4:], 20)
+	binary.LittleEndian.PutUint16(b[6:], flags)
+	binary.LittleEndian.PutUint16(b[8:], method)
+	binary.LittleEndian.PutUint32(b[18:], comp)
+	binary.LittleEndian.PutUint32(b[22:], uncomp)
+	binary.LittleEndian.PutUint16(b[26:], uint16(len(name)))
+	return append(b[:], name...)
+}
+
+// A slice of a torch checkpoint: a local header for archive/data.pkl with the
+// data-descriptor flags torch writes, the pickle the member holds, and nothing
+// after it. The pickle's global rule must be reachable, and the artifact must not
+// be reported as a parse failure.
+func TestTruncatedZipRecoversMembers(t *testing.T) {
+	pkl := gadgetPickle()
+	data := append([]byte{}, localHeader("archive/data.pkl", 0, 0x8, 0, 0)...)
+	data = append(data, pkl...)
+
+	got := scanZip(t, "best.pt", data, limits.Default())
+	want(t, got, "SC4N-ARCHIVE-TRUNCATED")
+	want(t, got, "SC4N-PICKLE-GLOBAL-CRITICAL")
+	want(t, got, "SC4N-PICKLE-REDUCE")
+	forbid(t, got, "SC4N-PARSE-FAILED")
+}
+
+// The same container with a plain-text member: the partial-container rule fires
+// (the container *is* truncated) and no pickle rule does.
+func TestTruncatedZipPlainMemberIsNotAPickle(t *testing.T) {
+	body := []byte("hello\n")
+	data := append([]byte{}, localHeader("notes.txt", 0, 0x8, 0, 0)...)
+	data = append(data, body...)
+
+	got := scanZip(t, "notes.zip", data, limits.Default())
+	want(t, got, "SC4N-ARCHIVE-TRUNCATED")
+	forbid(t, got, "SC4N-PICKLE-GLOBAL-CRITICAL")
+	forbid(t, got, "SC4N-PARSE-FAILED")
+}
+
+// A deflated member inside the slice: the inflater must reach the payload.
+func TestTruncatedZipInflatesDeflatedMember(t *testing.T) {
+	pkl := gadgetPickle()
+	packed := deflate(t, pkl)
+	data := append([]byte{}, localHeader("archive/data.pkl", 8, 0, uint32(len(packed)), uint32(len(pkl)))...)
+	data = append(data, packed...)
+
+	got := scanZip(t, "best.pt", data, limits.Default())
+	want(t, got, "SC4N-ARCHIVE-TRUNCATED")
+	want(t, got, "SC4N-PICKLE-REDUCE")
+	forbid(t, got, "SC4N-PARSE-FAILED")
+}
+
+// A zip-shaped prefix that carries no complete local header is still a parse
+// failure: recovery must not turn unreadable content into a clean verdict.
+func TestTruncatedZipWithNoMemberStaysAParseFailure(t *testing.T) {
+	data := []byte{'P', 'K', 3, 4, 20, 0, 0}
+	ctx, col := newCtx(t, "tiny.zip", limits.Default())
+	ctx.Format = artifact.FormatZip
+	if err := archive.Scan(ctx, source.Mem("tiny.zip", data)); err == nil {
+		t.Fatal("Scan accepted a truncated prefix with no member")
+	}
+	if ids(col.Findings())["SC4N-ARCHIVE-TRUNCATED"] {
+		t.Fatal("SC4N-ARCHIVE-TRUNCATED emitted without a recovered member")
+	}
 }

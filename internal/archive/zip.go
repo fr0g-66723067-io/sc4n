@@ -17,6 +17,12 @@ import (
 // not hash to the directory's CRC-32.
 var errCRC = errors.New("archive: member crc mismatch")
 
+// ErrNoEOCD is returned when a source begins like a zip but carries no
+// end-of-central-directory record anywhere in the file. It is distinct from a
+// corrupt directory because the caller can still recover members by walking the
+// local file headers (a truncated fetch, or a header slice).
+var ErrNoEOCD = errors.New("archive: no end-of-central-directory record")
+
 // zipEntry is one central-directory record. It is kept internal because the
 // public Member type is what parsers code against.
 type zipEntry struct {
@@ -119,7 +125,7 @@ func findEOCD(s source.Source) (int64, int64, error) {
 	if trailing >= 0 {
 		return pos, trailing, nil
 	}
-	return 0, 0, errors.New("archive: no end-of-central-directory record")
+	return 0, 0, ErrNoEOCD
 }
 
 // zipDirInfo carries the directory-level facts a caller needs to report.

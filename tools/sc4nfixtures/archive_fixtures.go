@@ -128,6 +128,37 @@ func archiveFixtures(f *fixtureSet) {
 		{name: "training_args/data.pkl", data: arcGadgetPickle(), method: 0},
 		{name: "training_args/byteorder", data: []byte("little"), method: 0},
 	}))
+
+	// --- header slice of a zip: local headers, no central directory --------------
+	// The campaign fetches the first 2 MiB of a large artifact, so a 474 MiB torch
+	// checkpoint reaches sc4n as local file headers followed by member data and
+	// nothing else: no central directory, no EOCD. The members are reachable by
+	// walking the local headers, and the pickle inside one must still be walked.
+	f.add("archive/truncated_torch.pt", arcTruncatedZip(
+		"archive/data.pkl", arcGadgetPickle()))
+
+	// --- benign: a truncated zip of a text file ---------------------------------
+	// Same container shape, harmless member: the partial-container rule fires
+	// (the container *is* truncated) and nothing else does.
+	f.add("benign/truncated_plain.zip", arcTruncatedZip(
+		"notes.txt", []byte("hello\n")))
+}
+
+// arcTruncatedZip returns a zip prefix with one stored member named name whose
+// local header carries the data-descriptor flags torch writes (bit 3, zero
+// compressed size) and no central directory at all.
+func arcTruncatedZip(name string, body []byte) []byte {
+	var buf bytes.Buffer
+	var b [30]byte
+	binary.LittleEndian.PutUint32(b[0:], 0x04034b50)
+	binary.LittleEndian.PutUint16(b[4:], 20)
+	binary.LittleEndian.PutUint16(b[6:], 0x8) // data descriptor follows the payload
+	binary.LittleEndian.PutUint16(b[8:], 0)   // stored
+	binary.LittleEndian.PutUint16(b[26:], uint16(len(name)))
+	buf.Write(b[:])
+	buf.WriteString(name)
+	buf.Write(body)
+	return buf.Bytes()
 }
 
 // arcSafetensorsTrailing returns a safetensors stream whose single U8 tensor
@@ -460,6 +491,15 @@ func archiveExpectations() (map[string]expectation, map[string]expectation) {
 				"It proves the member's *content* was parsed (zero-copy Section, no " +
 				"buffer, no temp file), not merely listed.",
 		},
+		"archive/truncated_torch.pt": {
+			Expect: []string{"SC4N-ARCHIVE-TRUNCATED", "SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"},
+			Forbid: []string{"SC4N-PARSE-FAILED"},
+			Notes: "A 2 MiB header slice of a torch checkpoint: one local file header " +
+				"for archive/data.pkl with the data-descriptor flags torch writes, the " +
+				"pickle, and no central directory. Recovering the member from the local " +
+				"header is what makes the pickle visible; the artifact is reported as a " +
+				"partial container so a clean slice is not read as a clean file.",
+		},
 		"archive/training_args_zip64.bin": {
 			Expect: []string{"SC4N-PICKLE-GLOBAL-CRITICAL", "SC4N-PICKLE-REDUCE"},
 			Forbid: []string{"SC4N-PARSE-FAILED", "SC4N-FORMAT-EXTENSION-MISMATCH"},
@@ -477,6 +517,11 @@ func archiveExpectations() (map[string]expectation, map[string]expectation) {
 		"benign/plain.zip": {
 			Notes: "A deflate-compressed text file in an ordinary zip: no traversal, no " +
 				"links, a correct CRC, and a member that is plain text.",
+		},
+		"benign/truncated_plain.zip": {
+			Notes: "A truncated zip (no central directory) whose only member is plain " +
+				"text: the partial-container rule is informational and nothing above it " +
+				"may fire.",
 		},
 	}
 	return malicious, benign

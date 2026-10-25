@@ -237,6 +237,23 @@ var (
 		Refs: []string{"https://cwe.mitre.org/data/definitions/436.html"},
 		Tags: []string{"polyglot", "structure"},
 	})
+
+	// ruleArchiveTruncated fires when the members were recovered from local file
+	// headers because the central directory is absent, which is the shape of a
+	// header slice of a zip-backed checkpoint.
+	ruleArchiveTruncated = report.DefineRule(report.Rule{
+		ID:         "SC4N-ARCHIVE-TRUNCATED",
+		Title:      "Zip has no central directory; members were recovered from local headers",
+		Severity:   report.SeverityInfo,
+		Confidence: report.ConfidenceHigh,
+		Class:      "format",
+		Description: "The file begins with zip local file headers but carries no end-of-central-directory " +
+			"record, which is what a 2 MiB header slice of a torch checkpoint looks like. sc4n walked the " +
+			"local headers forward and scanned every member they bound, so the findings under this artifact " +
+			"come from the part of the archive that is present. Members after the last header are not " +
+			"reachable and a member whose data descriptor is missing is bounded by the next header.",
+		Tags: []string{"partial", "archive"},
+	})
 )
 
 // algorithmName maps a zip compression method to the name used in evidence.
