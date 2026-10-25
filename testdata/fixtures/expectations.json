@@ -1119,6 +1119,15 @@
       ],
       "notes": "A SavedModel whose GraphDef has a PyFunc node and a ReadFile node with an absolute path: the code-callback and arbitrary-file-read surfaces of a TF graph."
     },
+    "tf_savedmodel_v2/saved_model.pb": {
+      "expect": [
+        "SC4N-TF-PYFUNC"
+      ],
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "The exporter's SavedModel wrapper: saved_model_schema_version in field 1, MetaGraphDef in field 2, an EagerPyFunc node inside. CoreML's probe accepts this shape, so the TensorFlow sniffer has to outrank it and probe field 2 as a MetaGraphDef; otherwise the graph is never walked and the artifact is reported only as an extension mismatch."
+    },
     "tfjs_flex/model.json": {
       "expect": [
         "SC4N-TFJS-FLEX-OP",

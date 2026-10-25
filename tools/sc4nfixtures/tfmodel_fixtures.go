@@ -70,6 +70,14 @@ func tfSavedModel(graphDef []byte) []byte {
 	return pbBytes(1, pbBytes(2, graphDef))
 }
 
+// tfSavedModelV2 wraps a GraphDef the way tensorflow's exporter writes it: the
+// wrapper's field 1 is saved_model_schema_version (a varint) and field 2 is the
+// MetaGraphDef. CoreML's probe accepts this shape (specificationVersion +
+// ModelDescription), so dispatch order is what names it correctly.
+func tfSavedModelV2(graphDef []byte) []byte {
+	return pbCat(pbVar(1, 1), pbBytes(2, pbBytes(2, graphDef)))
+}
+
 // --- TFLite flatbuffer builder -----------------------------------------
 
 // fbScalar is an inline scalar field.
@@ -350,6 +358,14 @@ func tfmodelFixtures(f *fixtureSet) {
 	f.add("tf_savedmodel_bad/assets/run.sh", []byte("#!/bin/sh\necho hi\n"))
 	f.add("tf_savedmodel_bad/assets/libevil.so", minimalELF())
 
+	// SavedModel in the exporter's layout: field 1 is a schema version and the
+	// MetaGraphDef sits in field 2, which is what high-level saved_model.save
+	// writes. Three Hub-unsafe artifacts named saved_model.pb were dispatched as
+	// coreml because only field 1 was probed, so the PyFunc op was never reached.
+	f.add("tf_savedmodel_v2/saved_model.pb", tfSavedModelV2(tfGraphDef(
+		tfNode("payload", "EagerPyFunc", tfAttr("token", "pyfn")),
+	)))
+
 	// Benign SavedModel: ordinary ops and no file IO.
 	savedModelBenign := tfSavedModel(tfGraphDef(
 		tfNode("input", "Placeholder", tfAttr("dtype", "float32")),
@@ -421,6 +437,15 @@ func tfmodelExpectations() (map[string]expectation, map[string]expectation) {
 			Expect: []string{"SC4N-HDF5-EXTERNAL-LINK"},
 			Notes: "An absolute path string in HDF5 data. v1 has no object-header reader, so the string " +
 				"cannot be proven to be an external-link value: the report is deliberately low confidence.",
+		},
+		"tf_savedmodel_v2/saved_model.pb": {
+			Expect: []string{"SC4N-TF-PYFUNC"},
+			Forbid: []string{"SC4N-FORMAT-EXTENSION-MISMATCH"},
+			Notes: "The exporter's SavedModel wrapper: saved_model_schema_version in " +
+				"field 1, MetaGraphDef in field 2, an EagerPyFunc node inside. CoreML's " +
+				"probe accepts this shape, so the TensorFlow sniffer has to outrank it " +
+				"and probe field 2 as a MetaGraphDef; otherwise the graph is never " +
+				"walked and the artifact is reported only as an extension mismatch.",
 		},
 		"tf_savedmodel_bad/saved_model.pb": {
 			Expect: []string{"SC4N-TF-PYFUNC", "SC4N-TF-FILE-IO"},

@@ -85,11 +85,23 @@ func sniffSavedModel(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		if !ok {
 			return artifact.FormatUnknown, false
 		}
-		if num != 1 {
-			continue
-		}
-		if probeMetaGraph(s, off, n) || probeGraph(s, off, n) || probeNode(s, off, n) {
-			return artifact.FormatTFSavedModel, true
+		// A SavedModel wrapper carries its MetaGraphDef in field 2 (meta_graphs); a
+		// legacy wrapper or a bare GraphDef carries a graph in field 1. Only those
+		// two fields are probed, and field 2 must satisfy probeMetaGraph
+		// specifically. Measured counter-examples: CoreML puts ModelDescription in
+		// field 2 and its ModelDescription satisfies probeNode (two adjacent
+		// printable strings), and ONNX puts GraphProto in field 7 whose NodeProto
+		// also satisfies probeNode — so either a probe of every field or the looser
+		// node probe on field 2 steals both formats.
+		switch num {
+		case 1:
+			if probeMetaGraph(s, off, n) || probeGraph(s, off, n) || probeNode(s, off, n) {
+				return artifact.FormatTFSavedModel, true
+			}
+		case 2:
+			if probeMetaGraph(s, off, n) {
+				return artifact.FormatTFSavedModel, true
+			}
 		}
 	}
 	return artifact.FormatUnknown, false
@@ -123,13 +135,18 @@ func (savedModelParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 			w.structAt(off, "top-level field "+itoa(int(num))+" declares a length past the end of the file")
 			break
 		}
-		if num != 1 {
-			continue
-		}
-		if !w.walkMetaGraph(o, n) {
-			// A bare GraphDef puts NodeDef directly at the top level; a
-			// MetaGraphDef always has a graph_def we would have found.
-			w.walkNode(o, n)
+		switch num {
+		case 1:
+			if !w.walkMetaGraph(o, n) {
+				// A bare GraphDef puts NodeDef directly at the top level; a
+				// MetaGraphDef always has a graph_def we would have found.
+				w.walkNode(o, n)
+			}
+		case 2:
+			// The SavedModel wrapper: field 2 is a MetaGraphDef (meta_graphs).
+			if !w.walkMetaGraph(o, n) {
+				w.structAt(off, "top-level field 2 does not decode as a MetaGraphDef")
+			}
 		}
 	}
 	return nil

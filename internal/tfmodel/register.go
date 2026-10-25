@@ -15,9 +15,15 @@ package tfmodel
 //     happens to open with a field-1 varint that ONNX's shape probe reads as a
 //     plausible ir_version. There is no magic to dispatch on, so the name
 //     suffix .index is the discriminator.
-//   - tf-savedmodel 58: below ONNX (60), so the more decisive ModelProto probe
-//     gets first refusal and the plan's "record the ambiguity, do not guess"
-//     posture is preserved.
+//   - tf-savedmodel 70: above coreml (65). A SavedModel wrapper's field 1 is a
+//     varint (saved_model_schema_version) and its field 2 is a MetaGraphDef
+//     message, which is exactly the shape CoreML's specificationVersion +
+//     ModelDescription probe accepts; measured on three Hub-unsafe artifacts
+//     named saved_model.pb that CoreML claimed, so the TensorFlow probe must get
+//     first refusal. The probe still has to find a GraphDef whose Node carries
+//     both a name and an op as printable strings, which a CoreML ModelDescription
+//     does not contain. Still above ONNX (60) for the same reason the ONNX probe
+//     exists: a field-1 varint reads as a plausible ir_version.
 //
 // HDF5 and TFLite need no sniffer: both have fixed magics that the magic table
 // already claims (HDF5 at offset 0, "TFL3" at offset 4), so only the parsers and
@@ -89,7 +95,7 @@ func init() {
 	artifact.RegisterSniffer("keras-zip", 103, sniffKeras)
 	artifact.RegisterSniffer("tfjs-model", 64, sniffTFJS)
 	artifact.RegisterSniffer("tf-checkpoint", 61, sniffCheckpoint)
-	artifact.RegisterSniffer("tf-savedmodel", 58, sniffSavedModel)
+	artifact.RegisterSniffer("tf-savedmodel", 70, sniffSavedModel)
 
 	artifact.RegisterParser(artifact.FormatKeras, kerasParser{})
 	artifact.RegisterParser(artifact.FormatHDF5, hdf5Parser{})
