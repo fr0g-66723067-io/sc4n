@@ -230,4 +230,22 @@ var (
 		},
 		Tags: []string{"unicode"},
 	})
+
+	// The EICAR self-test is not malware and is not a false positive either: it is
+	// the file every antivirus product on earth quarantines, and a corpus that
+	// ships one is a corpus that ships a scanner test artifact. Reporting it keeps
+	// "clean" honest without pretending the file is malicious.
+	ruleEICAR = report.DefineRule(report.Rule{
+		ID:         "SC4N-CONTENT-EICAR",
+		Title:      "Antivirus test file (EICAR) is present",
+		Severity:   report.SeverityLow,
+		Confidence: report.ConfidenceHigh,
+		Class:      "content",
+		Description: "The artifact contains the 68-byte EICAR antivirus test string. It is not malware: " +
+			"it is the industry's scanner self-test, and its presence means the file is a deliberate AV " +
+			"test sample (or a container that embeds one), which every antivirus product quarantines. " +
+			"Reported so a corpus is not read as clean when it ships a scanner test artifact.",
+		Refs: []string{"https://www.eicar.org/download-anti-malware-testfile/"},
+		Tags: []string{"test-file"},
+	})
 )

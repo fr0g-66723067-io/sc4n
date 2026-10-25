@@ -1,0 +1,1 @@
+EICAR is the antivirus test-file standard.

@@ -207,6 +207,15 @@
       ],
       "notes": "gzip(bzip2(os.system pickle)): the published modelscan double-compression bypass. sc4n recurses through both wrappers and reaches the pickle's global rule."
     },
+    "eicar/eicar_test_file": {
+      "expect": [
+        "SC4N-CONTENT-EICAR"
+      ],
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "The 68-byte EICAR antivirus self-test, verbatim. Low severity: it is not malware, but a scanner that stays silent reports the file as clean."
+    },
     "extension_mismatch.safetensors": {
       "expect": [
         "SC4N-FORMAT-EXTENSION-MISMATCH"
@@ -1355,6 +1364,13 @@
     "benign/dup_output_distinct.safetensors": {
       "expect": [],
       "notes": "Two genuinely distinct tensors with contiguous, non-overlapping extents. It is the control for the duplicate-top-level-key fixture: a de-duplication implemented by dropping tensors, or by silencing the contiguity pass, has to fail somewhere, and it must not fail here."
+    },
+    "benign/eicar_prose.txt": {
+      "expect": null,
+      "forbid": [
+        "SC4N-CONTENT-EICAR"
+      ],
+      "notes": "Prose naming the standard without reproducing the marker."
     },
     "benign/empty.bin": {
       "expect": null,

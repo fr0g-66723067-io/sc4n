@@ -45,7 +45,7 @@ func TestIndicatorTableIsWellFormed(t *testing.T) {
 	}
 	// Every rule declared in this package must be reachable from the table, or it
 	// is a rule nothing can ever report.
-	for _, r := range []*report.Rule{ruleC2, ruleCredential, ruleSecretValue, ruleShell, ruleDecoder, ruleLoaderFlag, ruleInjection, ruleMetadataCode} {
+	for _, r := range []*report.Rule{ruleC2, ruleCredential, ruleSecretValue, ruleShell, ruleDecoder, ruleLoaderFlag, ruleInjection, ruleMetadataCode, ruleEICAR} {
 		found := false
 		for _, id := range ruleIDsFor() {
 			if id == r.ID {
@@ -434,6 +434,33 @@ func TestCredentialEnvironmentNameNeedsARead(t *testing.T) {
 // names them (a Markdown table cell, an install command, a credential file name
 // in documentation) must not produce the high shell/credential findings, while a
 // decoder chain still reports the fragments it is about to run.
+// eicarMarker is the 68-byte EICAR antivirus self-test.
+const eicarMarker = `X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*`
+
+func TestEICARTestFileIsReported(t *testing.T) {
+	hits := ScanString(eicarMarker)
+	n := 0
+	for _, h := range hits {
+		if h.Rule.ID == ruleEICAR.ID {
+			n++
+			if h.Off != 0 {
+				t.Errorf("offset = %d, want 0", h.Off)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("EICAR marker produced %d findings, want 1: %v", n, hits)
+	}
+	// The marker survives the KindSecrets filter: a tokenizer vocabulary that
+	// contains it is still an AV test artifact.
+	if !Kind(KindSecrets).allows(Hit{Rule: ruleEICAR}) {
+		t.Error("the EICAR marker is dropped in a KindSecrets region")
+	}
+	if hits := ScanString("EICAR is the antivirus test-file standard."); len(hits) != 0 {
+		t.Fatalf("prose about EICAR produced %v", hits)
+	}
+}
+
 func TestProseShapedIndicatorsNeedAUse(t *testing.T) {
 	note := "| shape |\n" +
 		"Run chmod +x run.sh, then python -c \"print(1)\"\n" +

@@ -103,6 +103,7 @@ var ruleTiers = map[*report.Rule]tier{
 	ruleRawIPURL:    tierSecret,
 	ruleCredential:  tierSecret,
 	ruleSecretValue: tierSecret,
+	ruleEICAR:       tierSecret,
 }
 
 func tierOf(r *report.Rule) tier {
@@ -350,6 +351,15 @@ func buildIndicatorTable() []indicator {
 			`getenv("`+n+`")`, "getenv('"+n+"')",
 		)
 	}
+
+	// The EICAR self-test is a marker, not a shape: it is long enough and specific
+	// enough that a false positive is not a realistic outcome. The literal is the
+	// folded form (the automaton lowercases), and it is a raw string because the
+	// real marker carries one backslash.
+	add(
+		ruleEICAR, "eicar-test-file", false,
+		`x5o!p%@ap[4\pzx54(p^)7cc)7}$eicar-standard-antivirus-test-file!$h+h*`,
+	)
 
 	// A literal `NAME=` followed by a value is the shape a hard-coded secret takes.
 	// These are the redacting indicators: the match itself is secret material.
