@@ -253,6 +253,13 @@ func Join(o Options) (*CampaignReport, error) {
 	totals.Low = sevCount[report.SeverityLow]
 	totals.Info = sevCount[report.SeverityInfo]
 
+	// A verdict file that changed after the fetch (a -refresh, or a repo the Hub
+	// flagged since) would leave repos selected but never fetched, and the report
+	// would under-count coverage without saying so. The two stage files must agree.
+	if err := checkStagesAgree(vs, fd, o.Level); err != nil {
+		return nil, err
+	}
+
 	verdictByID := make(map[string]RepoVerdict, len(vs.Repos))
 	for _, v := range vs.Repos {
 		verdictByID[v.ID] = v
@@ -370,6 +377,48 @@ func Join(o Options) (*CampaignReport, error) {
 	sort.Slice(repos, func(i, j int) bool { return repos[i].ID < repos[j].ID })
 	rep.Repos = repos
 	return rep, nil
+}
+
+// checkStagesAgree refuses a verdict/fetch pair that names different repo sets.
+//
+// Fetch writes exactly the repos selected from the verdict file it read, so any
+// difference means one of the two files was recomputed alone: the fetch is stale
+// (a repo the Hub flagged since is missing) or the verdicts are (a repo that is no
+// longer flagged is still fetched). Either way the join would silently drop or
+// add rows, which is the failure mode the stage split is meant to prevent.
+func checkStagesAgree(vs VerdictsFile, fd FetchDoc, level string) error {
+	selected := make(map[string]bool)
+	for _, r := range selectedRepos(vs.Repos, level) {
+		selected[r.ID] = true
+	}
+	fetched := make(map[string]bool)
+	for _, r := range fd.Repos {
+		fetched[r.ID] = true
+	}
+	var missing, stale []string
+	for id := range selected {
+		if !fetched[id] {
+			missing = append(missing, id)
+		}
+	}
+	for id := range fetched {
+		if !selected[id] {
+			stale = append(stale, id)
+		}
+	}
+	if len(missing) == 0 && len(stale) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	sort.Strings(stale)
+	msg := fmt.Sprintf("hubcampaign: %s and %s disagree at level %s", fileVerdicts, fileFetch, level)
+	if len(missing) > 0 {
+		msg += fmt.Sprintf(": %d selected repo(s) not fetched, e.g. %s", len(missing), missing[0])
+	}
+	if len(stale) > 0 {
+		msg += fmt.Sprintf(": %d fetched repo(s) no longer selected, e.g. %s", len(stale), stale[0])
+	}
+	return fmt.Errorf("%s; re-run -stage fetch", msg)
 }
 
 // reasonFor explains a file with no sc4n finding. A covered file with no finding

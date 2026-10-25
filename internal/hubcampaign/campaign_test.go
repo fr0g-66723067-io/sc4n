@@ -527,3 +527,28 @@ func readFetchDoc(t *testing.T, dir string) FetchDoc {
 }
 
 var _ = fmt.Sprintf
+
+// TestJoinRefusesStaleStages: a verdict file recomputed alone leaves a repo
+// selected but never fetched, and the report would under-count coverage silently.
+func TestJoinRefusesStaleStages(t *testing.T) {
+	dir := t.TempDir()
+	o := Options{Dir: dir, Level: "unsafe", Limit: 10, Stderr: io.Discard}
+	if err := writeJSON(filepath.Join(dir, fileVerdicts), VerdictsFile{Version: Version, Level: "unsafe", Repos: []RepoVerdict{
+		{ID: "o/one", Status: "ok", Files: []hubapi.FileIssue{{Path: "a", Level: "unsafe"}}},
+		{ID: "o/two", Status: "ok", Files: []hubapi.FileIssue{{Path: "b", Level: "unsafe"}}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(dir, fileFetch), FetchDoc{Version: Version, Level: "unsafe", Repos: []RepoFetch{
+		{ID: "o/one", Status: "ok"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(dir, fileScan), map[string]any{"findings": []any{}, "artifacts": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Join(o)
+	if err == nil || !strings.Contains(err.Error(), "o/two") || !strings.Contains(err.Error(), "-stage fetch") {
+		t.Fatalf("err = %v, want a stale-fetch error naming o/two", err)
+	}
+}
