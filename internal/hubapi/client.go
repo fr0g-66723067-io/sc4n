@@ -198,6 +198,32 @@ func (c *Client) Files(ctx context.Context, id string) ([]RepoFile, error) {
 	return out, nil
 }
 
+// ModelInfo returns a repo's gate mode and state. It costs one request, so the
+// campaign calls it only after a 403.
+func (c *Client) ModelInfo(ctx context.Context, id string) (ModelInfo, error) {
+	var raw struct {
+		// gated is `false` or a string ("auto" / "manual"), so it cannot be typed.
+		Gated    any  `json:"gated"`
+		Private  bool `json:"private"`
+		Disabled bool `json:"disabled"`
+	}
+	if err := c.getJSON(ctx, c.raw("/api/models/"+escapePath(id)), &raw); err != nil {
+		return ModelInfo{}, err
+	}
+	out := ModelInfo{Private: raw.Private, Disabled: raw.Disabled}
+	switch v := raw.Gated.(type) {
+	case string:
+		out.Gated = v
+	case bool:
+		if v {
+			// Not a documented spelling, but a repo that says `true` is gated and
+			// saying so is better than reporting it ungated.
+			out.Gated = "auto"
+		}
+	}
+	return out, nil
+}
+
 // Download fetches one file into w. When max > 0 it requests the range
 // [off, off+max) and copies at most max bytes; when max <= 0 it fetches the whole
 // file. The caller owns w and must not reuse a partially written file as if it
@@ -295,9 +321,9 @@ func (c *Client) downloadOnce(ctx context.Context, id, path string, off, max, wr
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
-		return 0, resp.StatusCode, ErrAuth
+		return 0, resp.StatusCode, statusError(resp, ErrAuth)
 	case http.StatusForbidden:
-		return 0, resp.StatusCode, ErrGated
+		return 0, resp.StatusCode, statusError(resp, ErrGated)
 	case http.StatusNotFound:
 		return 0, resp.StatusCode, ErrNotFound
 	case http.StatusOK:
@@ -385,6 +411,28 @@ func (c *Client) getJSON(ctx context.Context, raw string, v any) error {
 	}
 }
 
+// statusError turns a 401/403 into the matching sentinel plus the Hub's
+// explanation. The Hub answers `X-Error-Message: Access to model <id> is restricted
+// and you are not in the authorized list. Visit <url> to ask for access.` — the
+// reason and the URL are exactly what an operator needs, and a bare sentinel threw
+// both away.
+func statusError(resp *http.Response, sentinel error) error {
+	defer resp.Body.Close()
+	msg := strings.TrimSpace(resp.Header.Get("X-Error-Message"))
+	if msg == "" {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		msg = strings.TrimSpace(string(b))
+	}
+	msg = strings.Join(strings.Fields(msg), " ")
+	if msg == "" {
+		return sentinel
+	}
+	if len(msg) > 300 {
+		msg = msg[:300] + "..."
+	}
+	return fmt.Errorf("%w: %s", sentinel, msg)
+}
+
 // send runs one request, maps the status and returns the response with its body
 // open. The caller closes it.
 func (c *Client) send(req *http.Request, jsonAccept bool) (*http.Response, error) {
@@ -400,11 +448,9 @@ func (c *Client) send(req *http.Request, jsonAccept bool) (*http.Response, error
 	case http.StatusOK:
 		return resp, nil
 	case http.StatusUnauthorized:
-		resp.Body.Close()
-		return nil, ErrAuth
+		return nil, statusError(resp, ErrAuth)
 	case http.StatusForbidden:
-		resp.Body.Close()
-		return nil, ErrGated
+		return nil, statusError(resp, ErrGated)
 	case http.StatusNotFound:
 		resp.Body.Close()
 		return nil, ErrNotFound

@@ -46,6 +46,19 @@ type ScanVerdict struct {
 	Files     []FileIssue `json:"filesWithIssues"`
 }
 
+// ModelInfo is the subset of GET /api/models/{id} that says why a repo may refuse
+// a file. Gated is "" or "false" for an ungated repo, "auto" when access is granted
+// as soon as the user accepts the terms and shares the gated fields, and "manual"
+// when the owner has to approve the account.
+type ModelInfo struct {
+	Gated    string
+	Disabled bool
+	Private  bool
+}
+
+// HasGate reports whether the repo has an access gate of either mode.
+func (m ModelInfo) HasGate() bool { return m.Gated == "auto" || m.Gated == "manual" }
+
 // RepoFile is one sibling of a repo listing. Size is -1 when the Hub does not
 // report one.
 type RepoFile struct {

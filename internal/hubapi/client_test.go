@@ -564,3 +564,45 @@ func TestDownloadRecoversFromStall(t *testing.T) {
 		t.Fatalf("got %d bytes in %d attempts", buf.Len(), hits)
 	}
 }
+
+func TestModelInfo(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want string
+	}{
+		{`{"gated":false,"siblings":[]}`, ""},
+		{`{"gated":"auto"}`, "auto"},
+		{`{"gated":"manual","disabled":false}`, "manual"},
+		{`{"gated":true}`, "auto"},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(tc.body))
+		}))
+		c := testClient(t, srv.URL, "")
+		info, err := c.ModelInfo(context.Background(), "org/name")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		if info.Gated != tc.want {
+			t.Errorf("%s: gated = %q, want %q", tc.body, info.Gated, tc.want)
+		}
+		srv.Close()
+	}
+}
+
+func TestGated403CarriesTheHubMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Error-Message", "Access to model org/name is restricted and you are not in the authorized list. Visit https://huggingface.co/org/name to ask for access.")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL, "")
+	var buf bytes.Buffer
+	_, err := c.Download(context.Background(), "org/name", "a.bin", 0, 0, &buf)
+	if !errors.Is(err, ErrGated) {
+		t.Fatalf("err = %v, want ErrGated", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("huggingface.co/org/name")) {
+		t.Fatalf("err = %v, want the Hub's explanation with the URL", err)
+	}
+}

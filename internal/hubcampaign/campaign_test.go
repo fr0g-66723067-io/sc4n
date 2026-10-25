@@ -29,6 +29,9 @@ type fakeHub struct {
 	files    map[string][]byte
 	status   map[string]int // "id/path" -> HTTP status to answer with
 	slice    int
+	// gate maps a repo id to its `gated` value ("auto"/"manual"), served by the
+	// metadata endpoint and by every resolve request.
+	gate map[string]string
 }
 
 func (h *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +52,11 @@ func (h *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, body)
 	case strings.HasPrefix(r.URL.Path, "/api/models/"):
 		id := strings.TrimPrefix(r.URL.Path, "/api/models/")
-		json.NewEncoder(w).Encode(map[string]any{"siblings": h.siblings[id]})
+		gated := any(false)
+		if g, ok := h.gate[id]; ok {
+			gated = g
+		}
+		json.NewEncoder(w).Encode(map[string]any{"siblings": h.siblings[id], "gated": gated})
 	case strings.Contains(r.URL.Path, "/resolve/main/"):
 		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/resolve/main/", 2)
 		if len(parts) != 2 {
@@ -58,6 +65,7 @@ func (h *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		key := parts[0] + "/" + parts[1]
 		if st, ok := h.status[key]; ok {
+			w.Header().Set("X-Error-Message", "Access to model "+parts[0]+" is restricted and you are not in the authorized list. Visit https://huggingface.co/"+parts[0]+" to ask for access.")
 			w.WriteHeader(st)
 			return
 		}
@@ -273,6 +281,7 @@ func TestGatedIsRecorded(t *testing.T) {
 		},
 		siblings: map[string][]map[string]any{"o/evil": {sibling("evil.pkl", 30)}},
 		status:   map[string]int{"o/evil/evil.pkl": http.StatusForbidden},
+		gate:     map[string]string{"o/evil": "manual"},
 	}
 	srv := httptest.NewServer(hub)
 	defer srv.Close()
@@ -283,11 +292,47 @@ func TestGatedIsRecorded(t *testing.T) {
 	if f.Fetch != "gated" || f.Coverage != "none" || f.Sc4n != "none" || f.Reason != "gated" {
 		t.Fatalf("file = %+v", f)
 	}
+	ff := readFetchDoc(t, dir).Repos[0].Files[0]
+	if !strings.Contains(ff.Detail, "manual approval") || !strings.Contains(ff.Detail, "huggingface.co/o/evil") {
+		t.Fatalf("detail = %q, want the manual-approval explanation and the URL", ff.Detail)
+	}
 	if rep.Repos[0].Status != "gated" {
 		t.Errorf("repo status = %q", rep.Repos[0].Status)
 	}
 	if rep.Totals.NotCovered != 1 || rep.Totals.BySc4n["none"] != 1 {
 		t.Errorf("totals = %+v", rep.Totals)
+	}
+}
+
+// TestGateAutoIsNamed: the two gate modes need different advice, because only one
+// of them is the account holder's to resolve.
+func TestGateAutoIsNamed(t *testing.T) {
+	hub := &fakeHub{
+		repos: []string{"o/evil"},
+		scans: map[string]string{
+			"o/evil": `{"scansDone":true,"filesWithIssues":[{"path":"evil.pkl","level":"unsafe"}]}`,
+		},
+		siblings: map[string][]map[string]any{"o/evil": {sibling("evil.pkl", 30)}},
+		status:   map[string]int{"o/evil/evil.pkl": http.StatusForbidden},
+		gate:     map[string]string{"o/evil": "auto"},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	for _, stage := range []func(context.Context, Options) error{
+		func(c context.Context, o Options) error { _, err := Candidates(c, o); return err },
+		func(c context.Context, o Options) error { _, err := Verdicts(c, o); return err },
+		func(c context.Context, o Options) error { _, err := Fetch(c, o); return err },
+	} {
+		if err := stage(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ff := readFetchDoc(t, dir).Repos[0].Files[0]
+	if !strings.Contains(ff.Detail, "automatic approval") || !strings.Contains(ff.Detail, "accept them at") {
+		t.Fatalf("detail = %q, want the terms-acceptance advice", ff.Detail)
 	}
 }
 

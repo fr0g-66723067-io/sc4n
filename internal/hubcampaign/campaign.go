@@ -77,8 +77,7 @@ const (
 	// files fetched only as slices, and one 2.4 GiB file stays a slice whatever the
 	// cap. An operator scanning a bigger universe lowers it.
 	defaultTotalBudget = 9 << 30
-	defaultSliceSize    = 2 << 20
-
+	defaultSliceSize   = 2 << 20
 )
 
 // Sel is one candidate query. Kind is "search", "tag" or "author".

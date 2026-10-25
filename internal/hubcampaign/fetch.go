@@ -92,7 +92,7 @@ func Fetch(ctx context.Context, o Options) ([]RepoFetch, error) {
 		}
 	}
 
-	f := &fetcher{o: o, ctx: ctx, left: o.TotalBudget, prior: prior}
+	f := &fetcher{o: o, ctx: ctx, left: o.TotalBudget, prior: prior, gates: map[string]string{}}
 	selected := selectedRepos(vs.Repos, o.Level)
 	out := make([]RepoFetch, 0, len(selected))
 	var total int64
@@ -115,6 +115,9 @@ type fetcher struct {
 	ctx   context.Context
 	left  int64
 	prior map[string]FetchFile
+	// gates caches the per-repo explanation of a 403, so a repo with five gated
+	// files costs one metadata request, not five.
+	gates map[string]string
 }
 
 func (f *fetcher) repo(v RepoVerdict) RepoFetch {
@@ -268,9 +271,12 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 		os.Remove(part)
 		ff.HTTP = res.Status
 		switch {
-		case errors.Is(derr, hubapi.ErrGated), errors.Is(derr, hubapi.ErrAuth):
+		case errors.Is(derr, hubapi.ErrGated):
 			ff.Status = "gated"
-			ff.Detail = "the Hub refused the file (gate or token)"
+			ff.Detail = f.gateDetail(id, derr)
+		case errors.Is(derr, hubapi.ErrAuth):
+			ff.Status = "gated"
+			ff.Detail = "the Hub rejected the token (401); check -token-file / HF_TOKEN"
 		case errors.Is(derr, hubapi.ErrNotFound):
 			ff.Status = "missing"
 			ff.Detail = "the Hub has no such file (repo disabled after being flagged?)"
@@ -294,6 +300,36 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 		ff.Detail = fmt.Sprintf("the Hub listed %d bytes and served %d", e.size, res.Bytes)
 	}
 	return ff
+}
+
+// gateDetail says why the Hub refused the file and what, if anything, the operator
+// can do about it.
+//
+// The distinction is the whole answer to "can the tool handle this gate": with
+// automatic approval the account accepts the terms once (in a browser — accepting
+// legal terms is the account holder's act, not the scanner's) and the same token
+// then downloads the file; with manual approval nothing but the owner can grant
+// access, and no client-side retry can change that.
+func (f *fetcher) gateDetail(id string, err error) string {
+	if d, ok := f.gates[id]; ok {
+		return d
+	}
+	var d string
+	info, ierr := f.o.Client.ModelInfo(f.ctx, id)
+	switch {
+	case ierr == nil && info.Disabled:
+		d = "gated: the repository is disabled on the Hub; nothing client-side can reopen it"
+	case ierr == nil && info.Gated == "manual":
+		d = fmt.Sprintf("gated: manual approval — the owner must grant this account access; request it at https://huggingface.co/%s", id)
+	case ierr == nil && info.Gated == "auto":
+		d = fmt.Sprintf("gated: automatic approval — this account has not accepted the terms; accept them at https://huggingface.co/%s and re-run -stage fetch", id)
+	case ierr != nil:
+		d = fmt.Sprintf("gated: %v (gate mode unknown: %v)", err, ierr)
+	default:
+		d = fmt.Sprintf("gated: %v", err)
+	}
+	f.gates[id] = d
+	return d
 }
 
 // sliceNeed is the byte count a header slice of e costs.

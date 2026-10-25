@@ -77,7 +77,11 @@ Each stage is a file -> file transform over one directory (`candidates.json`,
 re-run over the same stage files is byte-identical. Nothing is dropped silently:
 a gated file, a budget refusal, a traversal path and an unrecognised format each
 become a status with a reason, and `campaign.md` lists the files that were fully
-covered and produced no finding — the misses are the visible artifact.
+covered and produced no finding — the misses are the visible artifact. A gated
+file's reason names the gate mode and the URL: `automatic approval` means the
+account accepts the terms once (in a browser) and the same token then works,
+`manual approval` means only the repository owner can grant access, so no client
+retry can change the outcome.
 
 `sc4n scan` never touches the network. Only `hub` does, and it writes only under
 `-out`. The token is read from `-token-file`, `$HF_TOKEN`,
