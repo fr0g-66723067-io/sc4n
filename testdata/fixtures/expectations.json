@@ -1241,6 +1241,16 @@
       ],
       "notes": "The HF Trainer shape: a zip of training_args/{data.pkl,byteorder} named .bin. torch.load reads it and the archive reader opens its members, so the extension must not be reported as a mismatch. The member here is the benign state dict, so the fixture is about the container and nothing else."
     },
+    "trt/engine_with_indicator.engine": {
+      "expect": [
+        "SC4N-TRT-UNVERIFIED",
+        "SC4N-METADATA-CODE"
+      ],
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A serialized engine whose section-table region names `os.system` at 4096. The indicator engine covers the head window, so the call is reported inside an artifact that no Python parser would ever open."
+    },
     "unsupported.zst": {
       "expect": [
         "SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION"
@@ -1570,6 +1580,14 @@
         "SC4N-TF-STRUCT"
       ],
       "notes": "A SavedModel with Placeholder/Mul/Identity ops and no file IO."
+    },
+    "benign/tiny.engine": {
+      "expect": null,
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH",
+        "SC4N-METADATA-CODE"
+      ],
+      "notes": "A bare `ftrt` header: recognised, shallow, and nothing above info."
     },
     "benign/tiny.mlmodel": {
       "expect": null,

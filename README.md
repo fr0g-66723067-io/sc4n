@@ -32,7 +32,7 @@ headers, Python source, chat templates, cards — and never by running anything.
 |---|---|
 | pickle | bare pickle, joblib (zlib/gzip/bzip2 unwrapped; lzma/xz/lz4/zstd recognised and reported, not decompressed), torch zip, torch legacy, TorchScript, `.pt2` export archives |
 | numeric | safetensors, `.npy`/`.npz` (including object dtype), msgpack (Flax/JAX/MLX), XGBoost UBJSON |
-| model | GGUF, ONNX, TF SavedModel/GraphDef and checkpoints, Keras `.keras`/`.h5`, TFLite, CoreML `.mlmodel`/`.mlpackage`, ExecuTorch `.pte` |
+| model | GGUF, ONNX, TF SavedModel/GraphDef and checkpoints, Keras `.keras`/`.h5`, TFLite, CoreML `.mlmodel`/`.mlpackage`, ExecuTorch `.pte`, TensorRT `.engine`/`.plan` (magic only) |
 | containers | zip (including zip64, prefixed archives and large stored members), tar, gzip, zlib, bzip2 (xz/lzma/lz4/zstd/7z/rar are recognised and reported, never decompressed — see `sc4n formats`) |
 | code and metadata | Python source, notebooks, Jinja chat templates, model/dataset cards, `config.json`/`tokenizer_config.json`/`adapter_config.json`, `setup.py`, `pyproject.toml`, `.pth`, `*.start`, GitHub workflows, wheels inside a repo |
 

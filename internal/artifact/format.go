@@ -86,6 +86,9 @@ const (
 
 	// Images whose text metadata is parsed.
 	FormatImageMeta // PNG or JPEG: metadata chunks only, pixels skipped
+
+	// Serialized inference engines.
+	FormatTRTEngine // TensorRT serialized engine: "ftrt" magic at offset 0
 )
 
 var formatNames = map[Format]string{
@@ -133,6 +136,7 @@ var formatNames = map[Format]string{
 	FormatText:             "text",
 	FormatNative:           "native",
 	FormatImageMeta:        "image-metadata",
+	FormatTRTEngine:        "trt-engine",
 }
 
 func (f Format) String() string {
@@ -414,6 +418,9 @@ var extensions = map[string][]Format{
 	"jpg":         {FormatImageMeta},
 	"jpeg":        {FormatImageMeta},
 	"jfif":        {FormatImageMeta},
+	"engine":      {FormatTRTEngine},
+	"plan":        {FormatTRTEngine},
+	"trt":         {FormatTRTEngine},
 	"so":          {FormatNative},
 	"dll":         {FormatNative},
 	"dylib":       {FormatNative},

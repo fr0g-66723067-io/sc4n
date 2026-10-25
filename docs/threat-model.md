@@ -636,6 +636,10 @@ unsigned.
    in a structure the scan does not reach is missed.
 3. **ExecuTorch `.pte` is header-verified and shallow** (`SC4N-PTE-UNVERIFIED`);
    the flatbuffer is not deep-parsed.
+   **TensorRT engines** (`.engine`, `.plan`, `.trt`) are recognised by `ftrt` only
+   (`SC4N-TRT-UNVERIFIED`, info): the section table is unpublished and not
+   interpreted, and the indicator pass covers the first 4 MiB and last 1 MiB, so a
+   payload in the serialized weights between those windows is out of scope.
 4. **Weight-level backdoors are out of band** (§6).
 5. **Windows and macOS hosts** get the in-memory source path rather than mmap;
    behaviour is identical, memory is not.
