@@ -58,6 +58,32 @@ go build -o sc4n ./cmd/sc4n
 ./sc4n scan -format sarif -out sc4n.sarif -fail-on high .
 ```
 
+## Campaigns: the Hugging Face unsafe round
+
+The Hub runs its own scanner and exposes the verdict per repo
+(`/api/models/{id}/scan`); it has no listing filter for that verdict, so the only
+complete method is to enumerate candidates and probe each one. `sc4n hub` does
+exactly that, then fetches the flagged files, scans them, and joins the two
+verdicts into one report:
+
+```sh
+./sc4n hub -out hf-campaign -stage all      # the whole round
+./sc4n hub -out hf-campaign -stage fetch    # resume at one stage
+```
+
+Each stage is a file -> file transform over one directory (`candidates.json`,
+`verdicts.json`, `fetch.json`, `repos/`, `scan.json`, then `campaign.json` and
+`campaign.md`), so a campaign can be interrupted, inspected and resumed, and a
+re-run over the same stage files is byte-identical. Nothing is dropped silently:
+a gated file, a budget refusal, a traversal path and an unrecognised format each
+become a status with a reason, and `campaign.md` lists the files that were fully
+covered and produced no finding — the misses are the visible artifact.
+
+`sc4n scan` never touches the network. Only `hub` does, and it writes only under
+`-out`. The token is read from `-token-file`, `$HF_TOKEN`,
+`$HUGGING_FACE_HUB_TOKEN` or `$HF_HOME/token`; without one the campaign runs
+anonymously and reports the gated files instead of hiding them.
+
 ## Flags
 
 `sc4n scan` (all flags are also in `sc4n scan -h`):

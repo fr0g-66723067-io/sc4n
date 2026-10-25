@@ -58,6 +58,9 @@ Two invariants hold across the whole graph:
 | `internal/utf16text`, `internal/imgmeta` | text encodings and image metadata: UTF-16 text is decoded to UTF-8 and re-dispatched (SC4N-CONTENT-UTF16); PNG tEXt/zTXt/iTXt/eXIf and JPEG EXIF/XMP/COM strings reach the indicator engine at their absolute offsets, while pixels and entropy-coded data are skipped by declared length (SC4N-IMG-METADATA, SC4N-IMG-STRUCT) |
 | `internal/policy` | exit-code verdicts and baseline suppression |
 | `internal/hfcache` | the Hugging Face cache expander: symlink resolution, revision labels, blob de-duplication |
+| `internal/hubapi` | the Hub client the campaign runs on: listing, per-repo verdict, sibling sizes, ranged download; token resolution, redirect and retry policy |
+| `internal/hubcampaign` | the campaign pipeline as resumable file → file stages (candidates → verdicts → fetch → scan → join → report) over one campaign directory |
+| `internal/trt` | TensorRT serialized engines: the `ftrt` magic is recognised, the section table is not interpreted, and the indicator pass covers the first 4 MiB and last 1 MiB (`SC4N-TRT-UNVERIFIED`) |
 | `internal/formats` | blank-imports every parser package so a binary states what it contains |
 | `cmd/sc4n` | flag parsing, output selection, exit codes |
 
