@@ -850,6 +850,12 @@
       ],
       "notes": "os.getenv token sent with requests.post to a webhook"
     },
+    "python_reduce_builder/build_pickles.py": {
+      "expect": [
+        "SC4N-CODE-REDUCE-BUILDER"
+      ],
+      "notes": "a class whose __reduce__ returns exec plus a pickle.dump of it: the published payload-generator shape, and the human-readable half of the pickle the engine reports when the dumped file is scanned"
+    },
     "python_taint/modeling_x.py": {
       "expect": [
         "SC4N-CODE-TAINT-EXEC",
@@ -1569,6 +1575,20 @@
     "benign/random.bin": {
       "expect": null,
       "notes": "fixed-seed pseudo-random bytes with no magic at any anchor: the universal layer must stay silent on it, so no magic scan may be driven by a byte pattern that ordinary data satisfies."
+    },
+    "benign/reduce_no_dump.py": {
+      "expect": null,
+      "forbid": [
+        "SC4N-CODE-REDUCE-BUILDER"
+      ],
+      "notes": "an exec-returning __reduce__ with no serialiser dump never reaches disk"
+    },
+    "benign/reduce_plain.py": {
+      "expect": null,
+      "forbid": [
+        "SC4N-CODE-REDUCE-BUILDER"
+      ],
+      "notes": "a reducing class returning a plain callable is not a payload builder"
     },
     "benign/text_coverage_json/config.json": {
       "expect": null,

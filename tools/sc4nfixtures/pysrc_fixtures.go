@@ -98,6 +98,46 @@ payload = base64.b64decode('ZXhlYygncHJpbnQoMSknKQ==ZXhlYygncHJpbnQoMSknKQ==')
 exec(payload)
 `)
 
+			// A pickle payload generator: a class whose __reduce__ returns exec, and a
+			// dump of it. This is the published build_pickles.py shape (abrar0503,
+			// mcpotato, kemalik, mss-jpmc in the unsafe corpus).
+			f.addText("python_reduce_builder/build_pickles.py", `import pickle
+
+
+class Evil:
+    def __init__(self, cmd):
+        self._cmd = cmd
+
+    def __reduce__(self):
+        return exec, (self._cmd,)
+
+
+pickle.dump(Evil("print(1)"), open("payload.pkl", "wb"))
+`)
+
+			// Benign: a reducing class that returns a plain callable, and one whose
+			// exec return is never dumped. Neither is a payload generator.
+			f.addText("benign/reduce_plain.py", `import pickle
+
+
+class Plain:
+    def __init__(self):
+        self.x = 1
+
+    def __reduce__(self):
+        return (self.x, ())
+
+
+pickle.dump(Plain(), open("plain.pkl", "wb"))
+`)
+			f.addText("benign/reduce_no_dump.py", `class Inert:
+    def __reduce__(self):
+        return exec, ("print(1)",)
+
+
+value = Inert()
+`)
+
 			// Benign: guarded loader with a pinned revision, no taint.
 			f.addText("benign/model.py", `import torch
 from transformers import AutoModel
@@ -146,11 +186,19 @@ def load(path):
 					Notes: "os.getenv token sent with requests.post to a webhook"},
 				"python_taint/modeling_x.py": {Expect: []string{"SC4N-CODE-TAINT-EXEC", "SC4N-CODE-ENCODED-PAYLOAD"},
 					Notes: "base64.b64decode source flows into exec"},
+				"python_reduce_builder/build_pickles.py": {Expect: []string{"SC4N-CODE-REDUCE-BUILDER"},
+					Notes: "a class whose __reduce__ returns exec plus a pickle.dump of it: the " +
+						"published payload-generator shape, and the human-readable half of the pickle " +
+						"the engine reports when the dumped file is scanned"},
 			}, map[string]expectation{
 				"benign/model.py": {Forbid: []string{"SC4N-LOADER-TORCH-UNSAFE", "SC4N-LOADER-NO-REVISION", "SC4N-LOADER-NO-LOCAL-ONLY", "SC4N-CODE-TAINT-EXEC", "SC4N-CODE-TAINT-SHELL", "SC4N-CODE-OBFUSCATION"},
 					Notes: "torch.load(weights_only=True) and a 40-hex revision pin must not be reported"},
 				"benign/clean.ipynb": {Forbid: []string{"SC4N-CODE-NOTEBOOK-MAGIC", "SC4N-CODE-TAINT-EXEC"},
 					Notes: "a plain print cell must produce no findings"},
+				"benign/reduce_plain.py": {Forbid: []string{"SC4N-CODE-REDUCE-BUILDER"},
+					Notes: "a reducing class returning a plain callable is not a payload builder"},
+				"benign/reduce_no_dump.py": {Forbid: []string{"SC4N-CODE-REDUCE-BUILDER"},
+					Notes: "an exec-returning __reduce__ with no serialiser dump never reaches disk"},
 			}
 		},
 	})

@@ -342,3 +342,75 @@ func TestSniffPythonNameGate(t *testing.T) {
 		}
 	}
 }
+
+// TestReduceBuilder pins the payload-generator rule: a reducing class that returns
+// a code-executing callable *and* a serialiser dump in the same artifact. The two
+// published shapes are covered, and each half alone must not fire.
+func TestReduceBuilder(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"bare tuple return", `import pickle
+
+
+class E:
+    def __reduce__(self):
+        return eval, ("1+1",)
+
+
+pickle.dump(E(), open("p.pkl", "wb"))
+`, true},
+		{"parenthesised return", `import dill
+
+
+class E:
+    def __reduce__(self):
+        return (exec, ("print(1)",))
+
+
+dill.dump(E(), open("p.pkl", "wb"))
+`, true},
+		{"torch.save", `import torch
+
+
+class E:
+    def __reduce__(self):
+        return os.system, ("id",)
+
+
+torch.save(E(), "p.pt")
+`, true},
+		{"plain callable and a dump", `import pickle
+
+
+class P:
+    def __reduce__(self):
+        return (self.x, ())
+
+
+pickle.dump(P(), open("p.pkl", "wb"))
+`, false},
+		{"exec return but no dump", `class I:
+    def __reduce__(self):
+        return exec, ("print(1)",)
+
+
+x = I()
+`, false},
+		{"dump but no reducing class", `import pickle
+
+pickle.dump({"a": 1}, open("p.pkl", "wb"))
+`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := analyzeOK(t, c.src)
+			if got["SC4N-CODE-REDUCE-BUILDER"] != c.want {
+				t.Fatalf("SC4N-CODE-REDUCE-BUILDER = %v, want %v (findings %v)",
+					got["SC4N-CODE-REDUCE-BUILDER"], c.want, keys(got))
+			}
+		})
+	}
+}

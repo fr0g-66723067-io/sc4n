@@ -342,6 +342,26 @@ var (
 		Tags: []string{"loader", "keras"},
 	})
 
+	// ruleCodeReduceBuilder fires for a class that defines __reduce__ returning a
+	// code-executing callable *and* a serialiser dump in the same file: the pair is
+	// a pickle payload generator, whose output the pickle engine reports when it
+	// meets the dumped file.
+	ruleCodeReduceBuilder = report.DefineRule(report.Rule{
+		ID:         "SC4N-CODE-REDUCE-BUILDER",
+		Title:      "Python source builds a pickle payload with __reduce__",
+		Severity:   report.SeverityHigh,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-502", "CWE-94"},
+		Class:      "code",
+		Description: "A class in this file defines __reduce__ or __reduce_ex__ returning a callable that " +
+			"executes code (eval, exec, os.system, subprocess.*, __import__, marshal.loads, pickle.loads, " +
+			"ctypes.*) together with a serialiser dump (pickle/dill/cloudpickle/joblib dump, torch.save). " +
+			"The pair is what a pickle payload generator looks like: the class is inert until something " +
+			"unpickles the file it was dumped into, so the generator is the human-readable half of the attack.",
+		Refs: []string{"https://cwe.mitre.org/data/definitions/502.html"},
+		Tags: []string{"payload-builder", "pickle"},
+	})
+
 	ruleLoaderKerasLambda = report.DefineRule(report.Rule{
 		ID:         "SC4N-LOADER-KERAS-LAMBDA",
 		Title:      "keras.layers.Lambda constructs a layer from a Python function",
@@ -383,6 +403,20 @@ func analyze(ctx *artifact.Ctx, src []byte, cellLines []int) {
 	for _, st := range stmts {
 		a.stmt(st)
 	}
+	a.finish()
+}
+
+// finish emits the artifact-level rule that pairs a reducing class with a
+// serialiser dump. One finding per artifact: the first hit names the class.
+func (a *analyzer) finish() {
+	if !a.dumped || len(a.reduceHits) == 0 {
+		return
+	}
+	h := a.reduceHits[0]
+	line, col := a.at(h.off)
+	a.ctx.Sink.EmitAtExtra(ruleCodeReduceBuilder, line, col,
+		"class defines __reduce__ returning "+h.callable+"; the file serialises it with a pickle dump",
+		map[string]string{"callable": h.callable})
 }
 
 // capSource enforces MaxStringBlob on a source buffer. A truncated buffer is
@@ -443,6 +477,21 @@ type analyzer struct {
 	callBudget   int64
 	callRead     int64
 	callReported bool
+	// reducing is set while the current function is a __reduce__ or __reduce_ex__
+	// definition, so a return inside it can be read as the payload the class will
+	// hand the unpickler.
+	reducing bool
+	// reduceHits are the dangerous callables those methods return.
+	reduceHits []reduceHit
+	// dumped records that the file serialises an object with a pickle-family dump,
+	// which is what turns a reducing class into an on-disk payload.
+	dumped bool
+}
+
+// reduceHit is one __reduce__ return that names a code-executing callable.
+type reduceHit struct {
+	off      int32
+	callable string
 }
 
 // maxCallTokens bounds the total statement tokens one artifact's call analysis
@@ -489,6 +538,87 @@ func (a *analyzer) at(off int32) (int, int) {
 	return line, col
 }
 
+// reducedCallable reads the first expression of a return statement, skipping an
+// opening parenthesis, and returns its text and offset. Both published generator
+// shapes are covered: a bare `return eval, (payload,), None, None, None` and a
+// parenthesised `return (exec, (cmd,))`.
+func reducedCallable(src []byte, st []Token) (string, int32, bool) {
+	start := -1
+	for i := 1; i < len(st); i++ {
+		if i == 1 && st[i].Text(src) == "(" {
+			continue
+		}
+		start = int(st[i].Off)
+		break
+	}
+	if start < 0 || start >= len(src) {
+		return "", 0, false
+	}
+	limit := len(src)
+	if n := len(st); n > 0 {
+		limit = int(st[n-1].End)
+	}
+	depth := 0
+	end := start
+scan:
+	for ; end < limit; end++ {
+		switch src[end] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth == 0 {
+				break scan
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				break scan
+			}
+		}
+	}
+	name := strings.TrimSpace(string(src[start:end]))
+	return name, int32(start), name != ""
+}
+
+// isReduceSink reports whether the callable a __reduce__ returns executes code or
+// imports a module. A prefix entry matches the callable itself and every member of
+// its family (os.execv, subprocess.Popen, ctypes.CDLL).
+func isReduceSink(name string) bool {
+	switch name {
+	case "eval", "exec", "compile", "__import__", "importlib.import_module",
+		"os.system", "os.popen", "marshal.loads", "pickle.loads", "dill.loads",
+		"builtins.eval", "builtins.exec":
+		return true
+	}
+	for _, p := range []string{"os.exec", "os.spawn", "subprocess.", "ctypes."} {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSerializerDump reports whether one of the statement's calls writes an object
+// with a pickle-family serialiser.
+func isSerializerDump(calls []Call) bool {
+	for _, c := range calls {
+		d := c.Dotted
+		if d == "torch.save" {
+			return true
+		}
+		last := dottedLast(d)
+		if last != "dump" && last != "dumps" {
+			continue
+		}
+		for _, pkg := range []string{"pickle.", "dill.", "cloudpickle.", "joblib."} {
+			if strings.HasPrefix(d, pkg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (a *analyzer) emitAt(r *report.Rule, off int32, ev string) {
 	line, col := a.at(off)
 	a.ctx.Sink.EmitAt(r, line, col, report.TruncateEvidence(ev, 160))
@@ -499,15 +629,28 @@ func (a *analyzer) stmt(st []Token) {
 		return
 	}
 	if st[0].Kind == TokKeyword {
-		switch st[0].Text(a.src) {
+		switch kw := st[0].Text(a.src); kw {
 		case "def", "class":
 			// A new function body starts with a clean taint set: sc4n does not model
 			// closure capture across a def boundary.
 			a.tainted = map[string]bool{}
 			a.netTainted = map[string]bool{}
+			// A reducing method is reducing only inside its own body: a nested def
+			// ends the state, as does any other def or class.
+			a.reducing = kw == "def" && len(st) > 1 &&
+				(st[1].Text(a.src) == "__reduce__" || st[1].Text(a.src) == "__reduce_ex__")
+		case "return":
+			if a.reducing {
+				if name, off, ok := reducedCallable(a.src, st); ok && isReduceSink(name) {
+					a.reduceHits = append(a.reduceHits, reduceHit{off: off, callable: name})
+				}
+			}
 		}
 	}
 	calls := a.callsFor(st)
+	if !a.dumped && isSerializerDump(calls) {
+		a.dumped = true
+	}
 	text := spanText(a.src, Span{st[0].Off, st[len(st)-1].End})
 
 	// Loader lint and standalone obfuscation detectors run on every statement.
