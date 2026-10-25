@@ -51,6 +51,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRules(rest, stdout, stderr)
 	case "formats":
 		return runFormats(rest, stdout, stderr)
+	case "hub":
+		return runHub(rest, stdout, stderr)
 	case "hash":
 		return runHash(rest, stdout, stderr)
 	case "version", "-version", "--version":
@@ -74,6 +76,8 @@ usage:
   sc4n scan [flags] <path...>   scan files and directories
   sc4n rules  [-format md|json] print the rule catalogue
   sc4n formats                  print the format capability matrix
+  sc4n hub    [flags]           run a Hugging Face campaign: enumerate repos the
+                                Hub scans at a level, fetch, scan and join
   sc4n hash   <path>            print sha256 and sha1 of a file
   sc4n version                  print the version
 
@@ -103,9 +107,30 @@ scan flags:
   -quiet                       print only rule counts and the summary line (text only)
   -color                       force ANSI colour (text only; default: only on a terminal)
 
+hub flags:
+  -out DIR                     campaign directory (required; the only path written)
+  -stage all|candidates|verdicts|fetch|scan|report
+                               run one stage to resume a campaign (default all)
+  -search/-tag/-author TERM    selectors (repeatable); -search-file reads a list
+  -defaults                    include the built-in universe (default true)
+  -level unsafe|suspicious|caution|error
+                               Hub verdict level that selects a repo (default unsafe)
+  -full-limit/-flagged-limit/-slice/-repo-budget/-total-budget SIZE
+                               what to fetch whole, slice, or refuse (32MiB/1GiB/2MiB/512MiB/6GiB)
+  -api URL                     Hub base URL (default https://huggingface.co)
+  -token-file FILE             token (default $HF_TOKEN, then $HF_HOME/token)
+  -refresh                     recompute a stage that already wrote its file
+  -fail-on LEVEL|none          exit 1 when a campaign finding is at or above (default none)
+  -json                        also print campaign.json to stdout
+
+sc4n scan never touches the network. Only "sc4n hub" does, and it writes only
+under -out: the fetched bytes, the stage files and the reports all live there.
+
 exit codes: 0 clean, 1 findings at or above -fail-on, 2 usage error,
             3 a named path could not be opened, or the scan was cancelled by
-            -timeout (the report then carries "cancelled": true).
+            -timeout (the report then carries "cancelled": true). A failed hub
+            stage (network unreachable, IO error, missing stage input) also
+            exits 3.
 
 sc4n never executes, extracts or rewrites anything it scans; -out is the only path
 it writes permanently. A member too large to hold in memory is materialised in an

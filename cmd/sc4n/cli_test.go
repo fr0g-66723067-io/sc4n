@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +34,12 @@ func TestRunExitCodes(t *testing.T) {
 		{"bad output format", []string{"scan", "-format", "xml", dir}, exitUsage},
 		{"missing path", []string{"scan", filepath.Join(dir, "absent")}, exitUnreadable},
 		{"clean scan", []string{"scan", dir}, exitClean},
+		{"hub without -out", []string{"hub"}, exitUsage},
+		{"hub bad stage", []string{"hub", "-out", dir, "-stage", "nope"}, exitUsage},
+		{"hub bad level", []string{"hub", "-out", dir, "-level", "nope"}, exitUsage},
+		{"hub bad fail-on", []string{"hub", "-out", dir, "-fail-on", "bogus"}, exitUsage},
+		{"hub bad size", []string{"hub", "-out", dir, "-slice", "abc"}, exitUsage},
+		{"hub stray argument", []string{"hub", "-out", dir, "extra"}, exitUsage},
 		{"help", []string{"help"}, exitClean},
 		{"version", []string{"version"}, exitClean},
 	}
@@ -42,6 +50,40 @@ func TestRunExitCodes(t *testing.T) {
 				t.Fatalf("run(%v) = %d, want %d (stderr: %s)", tc.args, got, tc.want, errOut.String())
 			}
 		})
+	}
+}
+
+// TestHubCandidatesStage drives one stage against a fake Hub, which is the whole
+// point of the stage split: a campaign can be resumed one stage at a time.
+func TestHubCandidatesStage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.URL.Query().Get("search"); got != "evil" {
+			t.Errorf("search = %q", got)
+		}
+		w.Write([]byte(`[{"id":"o/evil"}]`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	code := run([]string{"hub", "-out", dir, "-stage", "candidates", "-defaults=false",
+		"-search", "evil", "-api", srv.URL}, &out, &errOut)
+	if code != exitClean {
+		t.Fatalf("exit = %d (stderr: %s)", code, errOut.String())
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "candidates.json"))
+	if err != nil {
+		t.Fatalf("candidates.json: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"o/evil"`)) || !bytes.Contains(b, []byte(`search:evil`)) {
+		t.Fatalf("candidates.json = %s", b)
+	}
+	if !strings.Contains(errOut.String(), "candidates: 1 repos") {
+		t.Errorf("stderr = %q, want the stage progress line", errOut.String())
 	}
 }
 
