@@ -378,3 +378,43 @@ func TestEscapePath(t *testing.T) {
 		}
 	}
 }
+
+// The Hub's /scan endpoint answers 200 with an empty body while it is busy. Two
+// such answers in a 2390-repo probe marked the repos `error` and lost their
+// verdicts for the whole campaign, so the empty body is retried.
+func TestEmptyBodyIsRetried(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&n, 1) < 3 {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Write([]byte(`{"scansDone":false,"filesWithIssues":[]}`))
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL, "")
+	v, err := c.Scan(context.Background(), "org/name")
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if v.ScansDone || n != 3 {
+		t.Fatalf("verdict = %+v after %d attempts", v, n)
+	}
+}
+
+func TestEmptyBodyGivesUp(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&n, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL, "")
+	_, err := c.Scan(context.Background(), "org/name")
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("empty body")) {
+		t.Fatalf("err = %v, want an empty-body error", err)
+	}
+	if n != maxAttempts {
+		t.Fatalf("attempts = %d, want %d", n, maxAttempts)
+	}
+}

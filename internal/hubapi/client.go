@@ -1,6 +1,7 @@
 package hubapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -235,40 +236,75 @@ func (c *Client) Download(ctx context.Context, id, path string, off, max int64, 
 }
 
 // getJSON performs one GET and decodes a size-capped JSON body.
+//
+// An empty 200 body is retried before it is an error. The Hub's per-repo `/scan`
+// endpoint answers 200 with no content while it is busy — observed twice in a
+// 2390-repo probe, both fine seconds later — and a body-less 200 was previously
+// reported as "unexpected end of JSON input", which marked the repo `error` and
+// lost its verdict for the whole campaign.
 func (c *Client) getJSON(ctx context.Context, raw string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
 	if err != nil {
 		return err
 	}
+	for attempt := 0; ; attempt++ {
+		resp, err := c.send(req, true)
+		if err != nil {
+			return err
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
+		resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		if len(bytes.TrimSpace(body)) == 0 {
+			if attempt+1 < maxAttempts {
+				if !sleepContext(ctx, retryBaseDelay<<uint(attempt), "") {
+					return ctx.Err()
+				}
+				req = req.Clone(ctx)
+				continue
+			}
+			return fmt.Errorf("hubapi: GET %s: empty body after %d attempts (the Hub answers 200 with no content while a scan is unavailable; re-run the stage)",
+				req.URL.Path, maxAttempts)
+		}
+		if int64(len(body)) > c.maxBody {
+			return fmt.Errorf("hubapi: response exceeds MaxBody (%d bytes)", c.maxBody)
+		}
+		if err := json.Unmarshal(body, v); err != nil {
+			return fmt.Errorf("hubapi: GET %s: %w", req.URL.Path, err)
+		}
+		return nil
+	}
+}
+
+// send runs one request, maps the status and returns the response with its body
+// open. The caller closes it.
+func (c *Client) send(req *http.Request, jsonAccept bool) (*http.Response, error) {
 	c.auth(req)
-	req.Header.Set("Accept", "application/json")
+	if jsonAccept {
+		req.Header.Set("Accept", "application/json")
+	}
 	resp, err := c.do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK:
+		return resp, nil
 	case http.StatusUnauthorized:
-		return ErrAuth
+		resp.Body.Close()
+		return nil, ErrAuth
 	case http.StatusForbidden:
-		return ErrGated
+		resp.Body.Close()
+		return nil, ErrGated
 	case http.StatusNotFound:
-		return ErrNotFound
+		resp.Body.Close()
+		return nil, ErrNotFound
 	default:
-		return fmt.Errorf("hubapi: GET %s: HTTP %d", req.URL.Path, resp.StatusCode)
+		resp.Body.Close()
+		return nil, fmt.Errorf("hubapi: GET %s: HTTP %d", req.URL.Path, resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(body)) > c.maxBody {
-		return fmt.Errorf("hubapi: response exceeds MaxBody (%d bytes)", c.maxBody)
-	}
-	if err := json.Unmarshal(body, v); err != nil {
-		return fmt.Errorf("hubapi: GET %s: %w", req.URL.Path, err)
-	}
-	return nil
 }
 
 // do runs one request with the retry policy: only 429 and 5xx are retried, at most
