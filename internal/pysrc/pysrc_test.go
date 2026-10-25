@@ -515,3 +515,54 @@ tool = load_tool(name)
 		})
 	}
 }
+
+// TestAgentCodeExec pins the agent-with-a-code-executor shape: a code executor, an
+// agent constructor and a tool surface that reaches outside the process. Any one of
+// the three alone is an ordinary import.
+func TestAgentCodeExec(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"executor plus MCP tools", `from google.adk.agents import Agent
+from google.adk.code_executors import BuiltInCodeExecutor
+from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
+
+helper = Agent(
+    name="ops",
+    tools=[BuiltInCodeExecutor, MCPToolset],
+)
+`, true},
+		{"executor plus retrieval", `from google.adk.agents import LlmAgent
+from google.adk.code_executors import BuiltInCodeExecutor
+from google.adk.tools.retrieval.vertex_ai_rag_retrieval import VertexAiRagRetrieval
+
+docs = VertexAiRagRetrieval(name="docs")
+agent = LlmAgent(name="r", tools=[BuiltInCodeExecutor], sub_agents=[docs])
+`, true},
+		{"agent and tools without an executor", `from google.adk.agents import LlmAgent
+from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
+
+agent = LlmAgent(name="r", tools=[MCPToolset])
+`, false},
+		{"executor with no agent", `from google.adk.code_executors import BuiltInCodeExecutor
+
+tools = [BuiltInCodeExecutor]
+`, false},
+		{"agent with an executor but no tool surface", `from google.adk.agents import Agent
+from google.adk.code_executors import BuiltInCodeExecutor
+
+agent = Agent(name="calc", tools=[BuiltInCodeExecutor])
+`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := analyzeOK(t, c.src)
+			if got["SC4N-CODE-AGENT-CODE-EXEC"] != c.want {
+				t.Fatalf("SC4N-CODE-AGENT-CODE-EXEC = %v, want %v (findings %v)",
+					got["SC4N-CODE-AGENT-CODE-EXEC"], c.want, keys(got))
+			}
+		})
+	}
+}

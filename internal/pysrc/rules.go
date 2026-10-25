@@ -369,6 +369,24 @@ var (
 	// a string literal counts the same as the code it runs.
 	// ruleCodeRemoteToolLoader fires for transformers.load_tool('org/repo'), which
 	// imports and runs the code of a Hub repository inside the current process.
+	// ruleCodeAgentCodeExec fires for an agent that is constructed with a code
+	// executor, i.e. a model whose tool output is executed rather than returned.
+	ruleCodeAgentCodeExec = report.DefineRule(report.Rule{
+		ID:         "SC4N-CODE-AGENT-CODE-EXEC",
+		Title:      "Agent is constructed with a code executor",
+		Severity:   report.SeverityMedium,
+		Confidence: report.ConfidenceMedium,
+		CWE:        []string{"CWE-94"},
+		Class:      "code",
+		Description: "The source builds an agent (Agent, LlmAgent, AgentTool) whose tools include a code " +
+			"executor (BuiltInCodeExecutor, code_executor=/CodeExecutor) and that also exposes an MCP " +
+			"session, a retrieval corpus or HTTP requests. Together they describe an agent that can be " +
+			"driven to execute code and to reach the network, so the artifact's behaviour depends on " +
+			"inputs it fetches at run time rather than on the code in the file.",
+		Refs: []string{"https://cwe.mitre.org/data/definitions/94.html"},
+		Tags: []string{"agent", "code-execution"},
+	})
+
 	ruleCodeRemoteToolLoader = report.DefineRule(report.Rule{
 		ID:         "SC4N-CODE-REMOTE-TOOL-LOADER",
 		Title:      "Python source loads and runs code from a Hub repository",
@@ -445,11 +463,56 @@ func analyze(ctx *artifact.Ctx, src []byte, cellLines []int) {
 		callBudget: maxCallTokens,
 	}
 	a.reverseShell()
+	a.agentCodeExec()
 	stmts := Statements(src, Lex(src))
 	for _, st := range stmts {
 		a.stmt(st)
 	}
 	a.finish()
+}
+
+// agentCodeExec reports an agent constructed with a code executor and a tool
+// surface that reaches outside the process.
+func (a *analyzer) agentCodeExec() {
+	off, markers, ok := agentCodeExecMarkers(a.src)
+	if !ok {
+		return
+	}
+	line, col := a.at(off)
+	a.ctx.Sink.EmitAtExtra(ruleCodeAgentCodeExec, line, col,
+		"agent with a code-execution tool: "+strings.Join(markers, ","),
+		map[string]string{"markers": strings.Join(markers, ",")})
+}
+
+// agentCodeExecMarkers reports whether src builds an agent wired to a code
+// executor. It needs a code-executor marker, an agent constructor and a tool
+// surface: any one of them alone is an ordinary import.
+func agentCodeExecMarkers(src []byte) (int32, []string, bool) {
+	exec := -1
+	for _, m := range []string{"BuiltInCodeExecutor", "code_executor=", "CodeExecutor"} {
+		if i := bytes.Index(src, []byte(m)); i >= 0 && (exec < 0 || i < exec) {
+			exec = i
+		}
+	}
+	if exec < 0 {
+		return 0, nil, false
+	}
+	if !hasAnyMarker(src, "Agent(", "LlmAgent(", "AgentTool(") {
+		return 0, nil, false
+	}
+	if !hasAnyMarker(src, "MCPToolset", "mcp_session", "VertexAiRagRetrieval", "requests.") {
+		return 0, nil, false
+	}
+	markers := make([]string, 0, 8)
+	for _, m := range []string{
+		"BuiltInCodeExecutor", "code_executor=", "Agent(", "LlmAgent(", "AgentTool(",
+		"MCPToolset", "mcp_session", "VertexAiRagRetrieval", "requests.",
+	} {
+		if bytes.Contains(src, []byte(m)) {
+			markers = append(markers, m)
+		}
+	}
+	return int32(exec), markers, true
 }
 
 // reverseShell reports an artifact that combines a socket constructor, a connect

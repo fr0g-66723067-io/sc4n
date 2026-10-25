@@ -844,6 +844,12 @@
       ],
       "notes": "PEP 517 build-backend outside the known-good set is imported and run at build time"
     },
+    "python_agent_code_exec/agent.py": {
+      "expect": [
+        "SC4N-CODE-AGENT-CODE-EXEC"
+      ],
+      "notes": "an agent constructed with a code executor and an MCP tool set: the model's output can be executed and the agent can be driven from outside the file"
+    },
     "python_exfil/model.py": {
       "expect": [
         "SC4N-CODE-TAINT-NETWORK"

@@ -131,6 +131,18 @@ def rev_shell():
 """).strip()
 `)
 
+			// An agent built with a code executor and a tool surface that reaches
+			// outside the process: the model's output can be executed and fed.
+			f.addText("python_agent_code_exec/agent.py", `from google.adk.agents import Agent
+from google.adk.code_executors import BuiltInCodeExecutor
+from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
+
+ops_agent = Agent(
+    name="ops",
+    tools=[BuiltInCodeExecutor, MCPToolset],
+)
+`)
+
 			// A call that imports and runs a Hub repository's code in this process.
 			f.addText("python_remote_tool/exploit.py", `import transformers
 
@@ -219,6 +231,9 @@ def load(path):
 					Notes: "os.getenv token sent with requests.post to a webhook"},
 				"python_taint/modeling_x.py": {Expect: []string{"SC4N-CODE-TAINT-EXEC", "SC4N-CODE-ENCODED-PAYLOAD"},
 					Notes: "base64.b64decode source flows into exec"},
+				"python_agent_code_exec/agent.py": {Expect: []string{"SC4N-CODE-AGENT-CODE-EXEC"},
+					Notes: "an agent constructed with a code executor and an MCP tool set: the model's " +
+						"output can be executed and the agent can be driven from outside the file"},
 				"python_remote_tool/exploit.py": {Expect: []string{"SC4N-CODE-REMOTE-TOOL-LOADER"},
 					Notes: "load_tool('org/repo') imports a Hub repository's Python module into this " +
 						"process: the repository's code runs with the caller's privileges"},
