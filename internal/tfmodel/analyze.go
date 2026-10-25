@@ -321,6 +321,65 @@ func pathEscapeReason(v string) string {
 	return ""
 }
 
+// pathLike reports whether a printable run has the shape of a path: at least two
+// components, one of them a plausible filename, a majority of filename bytes
+// overall, and at least two letters.
+//
+// This gate exists because the runs come out of tensor bytes, where anything that
+// starts with '/' and reaches eight characters was reported as an absolute path.
+// Measured on the unsafe corpus, 14 of 15 SC4N-HDF5-EXTERNAL-LINK findings were
+// runs like "/;^a(<(=!", "/<.B*<@`", "/4DRE5KR" and "/^y=6H/>": each has a single
+// component or none that is made of filename characters. The one true positive is
+// "../../../../etc/passwd", which has "etc" and "passwd" as components. A
+// single-component absolute path is deliberately not enough: a loader path of that
+// form is rare, and that shape is exactly what binary noise produces.
+func pathLike(run string) bool {
+	components, strong := 0, false
+	for _, seg := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == "" {
+			continue
+		}
+		components++
+		if len(seg) >= 3 && isFilenameComponent(seg) {
+			strong = true
+		}
+	}
+	filenameBytes, letters := 0, 0
+	for i := 0; i < len(run); i++ {
+		c := run[i]
+		if !isFilenameByte(c) {
+			continue
+		}
+		filenameBytes++
+		if isDriveLetter(c) {
+			letters++
+		}
+	}
+	return components >= 2 && strong && filenameBytes*2 >= len(run) && letters >= 2
+}
+
+// isFilenameComponent reports whether every byte is a filename byte.
+func isFilenameComponent(seg string) bool {
+	for i := 0; i < len(seg); i++ {
+		if !isFilenameByte(seg[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isFilenameByte is the set a path component is normally made of: letters,
+// digits, and the separators/dots that join and extend them.
+func isFilenameByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '/', c == '.', c == '_', c == '-':
+		return true
+	}
+	return false
+}
+
 func isDriveLetter(c byte) bool {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
@@ -492,6 +551,9 @@ func scanExternalPaths(ctx *artifact.Ctx, base int64, data []byte) {
 			continue
 		}
 		if !strings.ContainsAny(run, `/\`) {
+			continue
+		}
+		if !pathLike(run) {
 			continue
 		}
 		why := pathEscapeReason(run)

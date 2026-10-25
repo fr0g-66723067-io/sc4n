@@ -496,3 +496,28 @@ func TestTFLiteBudgetEvidenceCarriesTheRealNumbers(t *testing.T) {
 		}
 	}
 }
+
+// pathLike is the gate that keeps SC4N-HDF5-EXTERNAL-LINK from firing on the
+// binary noise that tensor bytes produce. The accept cases are real path shapes;
+// the reject cases are the exact runs measured as high-severity false positives
+// on the unsafe corpus.
+func TestPathLike(t *testing.T) {
+	accept := []string{
+		"/etc/passwd", "~/.ssh/id_rsa", `C:\Windows\x`, "https://h/a.b",
+		"../../../../etc/passwd", "/etc/shadow",
+	}
+	for _, s := range accept {
+		if !pathLike(s) {
+			t.Errorf("pathLike(%q) = false, want true", s)
+		}
+	}
+	reject := []string{
+		"/;^a(<(=!", "/<.B*<@`", "/d=t", "J:=J.", "/4DRE5KR", `/9cZ.8p\`,
+		"/^y=6H/>", "/<4d#<B]/<JG", "/BS=9?>", "/H~..TVd-",
+	}
+	for _, s := range reject {
+		if pathLike(s) {
+			t.Errorf("pathLike(%q) = true, want false", s)
+		}
+	}
+}
