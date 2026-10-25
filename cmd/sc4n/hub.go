@@ -44,7 +44,7 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		limit      = fs.Int("limit", 100, "results per query (1..1000)")
 		level      = fs.String("level", "unsafe", "Hub verdict level that selects a repo: unsafe|suspicious|caution|error")
 		jobs       = fs.Int("jobs", 8, "concurrent Hub requests")
-		timeout    = fs.Duration("timeout", 30*time.Second, "per-request timeout")
+		timeout    = fs.Duration("timeout", 30*time.Second, "request timeout; for a download, the longest stall tolerated")
 		api        = fs.String("api", "https://huggingface.co", "Hub base URL (https; http only for loopback)")
 		tokenFile  = fs.String("token-file", "", "token file (default $HF_HOME/token)")
 		fullLimit  = fs.String("full-limit", "32MiB", "fetch a file whole at or below this size")

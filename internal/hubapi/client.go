@@ -27,7 +27,9 @@ type Config struct {
 	// Jobs is the caller's intended concurrency. The client is safe for
 	// concurrent use; the field is carried so one Config describes the campaign.
 	Jobs int
-	// Timeout bounds one request, including the body copy.
+	// Timeout bounds one JSON request, and for a download it bounds a *stall*: a
+	// transfer that keeps delivering bytes is not cut off, one that delivers none
+	// for Timeout is.
 	Timeout time.Duration
 	// MaxBody caps a JSON response; a larger one is an error, not a truncation.
 	MaxBody int64
@@ -40,7 +42,11 @@ type Client struct {
 	ua      string
 	jobs    int
 	maxBody int64
+	timeout time.Duration
 	hc      *http.Client
+	// dl is the client for downloads: no whole-exchange deadline, because Timeout
+	// means "no data for this long" there.
+	dl *http.Client
 }
 
 const (
@@ -86,23 +92,23 @@ func New(cfg Config) (*Client, error) {
 		ua:      ua,
 		jobs:    jobs,
 		maxBody: maxBody,
+		timeout: timeout,
 	}
 	first := u.Host
-	c.hc = &http.Client{
-		Timeout: timeout,
-		// The Hub answers a file download with a redirect to its CDN. The bearer
-		// token is for huggingface.co only; carrying it to another host would hand
-		// a credential to whatever the Location names.
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) > 0 && req.URL.Host != first {
-				req.Header.Del("Authorization")
-			}
-			if len(via) >= 10 {
-				return errors.New("hubapi: stopped after 10 redirects")
-			}
-			return nil
-		},
+	// The Hub answers a file download with a redirect to its CDN. The bearer token
+	// is for huggingface.co only; carrying it to another host would hand a
+	// credential to whatever the Location names.
+	redirect := func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && req.URL.Host != first {
+			req.Header.Del("Authorization")
+		}
+		if len(via) >= 10 {
+			return errors.New("hubapi: stopped after 10 redirects")
+		}
+		return nil
 	}
+	c.hc = &http.Client{Timeout: timeout, CheckRedirect: redirect}
+	c.dl = &http.Client{CheckRedirect: redirect}
 	return c, nil
 }
 
@@ -196,43 +202,144 @@ func (c *Client) Files(ctx context.Context, id string) ([]RepoFile, error) {
 // [off, off+max) and copies at most max bytes; when max <= 0 it fetches the whole
 // file. The caller owns w and must not reuse a partially written file as if it
 // were complete — the campaign writes to a temp path and renames.
+//
+// Two properties matter for a 700 MiB checkpoint on a slow link, and both were
+// learned from a real failure (the round's 699 MiB llamafile was reported as
+// `error: context deadline exceeded ... while reading body`):
+//
+//   - Timeout bounds a *stall*, not the transfer: the request context is cancelled
+//     only when no bytes have arrived for Timeout, so a large file that keeps
+//     flowing is not cut off at 30s.
+//   - A copy that fails mid-body is retried from the next byte with a Range
+//     request, so a reset costs the remainder rather than the whole file. A server
+//     that ignores the resume Range (200 instead of 206) is an error, because
+//     appending a second full copy to w would corrupt the file.
 func (c *Client) Download(ctx context.Context, id, path string, off, max int64, w io.Writer) (DownloadResult, error) {
+	var (
+		written  int64
+		res      DownloadResult
+		lastErr  error
+		firstErr error
+	)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			if !sleepContext(ctx, retryBaseDelay<<uint(attempt-1), "") {
+				return res, ctx.Err()
+			}
+		}
+		n, status, err := c.downloadOnce(ctx, id, path, off, max, written, w)
+		res.Status = status
+		written += n
+		res.Bytes = written
+		if err == nil {
+			return res, nil
+		}
+		lastErr = err
+		if firstErr == nil {
+			firstErr = err
+		}
+		if errors.Is(err, ErrGated) || errors.Is(err, ErrAuth) || errors.Is(err, ErrNotFound) {
+			return res, err
+		}
+		if errors.Is(err, errNoResume) {
+			// The resume was the recovery attempt: report why it was needed, or the
+			// message names the symptom and hides the cause.
+			return res, fmt.Errorf("hubapi: download %s: %v; %w", path, firstErr, errNoResume)
+		}
+		if max > 0 && written >= max {
+			// The requested range is complete even though the connection died on
+			// the last read: nothing is missing.
+			return res, nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("hubapi: download failed")
+	}
+	return res, lastErr
+}
+
+// errNoResume reports a server that answered a resume Range with the whole file.
+var errNoResume = errors.New("hubapi: server ignored the resume range")
+
+// downloadOnce performs one attempt, appending at written bytes past off.
+func (c *Client) downloadOnce(ctx context.Context, id, path string, off, max, written int64, w io.Writer) (int64, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.raw("/"+escapePath(id)+"/resolve/main/"+escapePath(path)), nil)
 	if err != nil {
-		return DownloadResult{}, err
+		return 0, 0, err
 	}
 	c.auth(req)
 	req.Header.Set("Accept-Encoding", "identity")
-	if max > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+max-1))
+	cur := off + written
+	switch {
+	case max > 0:
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", cur, off+max-1))
+	case cur > 0:
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", cur))
 	}
-	resp, err := c.do(req)
+
+	// The idle timer replaces http.Client.Timeout for this path: the client used
+	// here has no whole-exchange deadline.
+	dctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	idle := time.AfterFunc(c.timeout, cancel)
+	defer idle.Stop()
+
+	resp, err := doRequest(dctx, c.dl, req)
 	if err != nil {
-		return DownloadResult{}, err
+		if dctx.Err() != nil && ctx.Err() == nil {
+			return 0, 0, fmt.Errorf("hubapi: download %s: no data for %s", path, c.timeout)
+		}
+		return 0, 0, err
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
-		return DownloadResult{Status: resp.StatusCode}, ErrAuth
+		return 0, resp.StatusCode, ErrAuth
 	case http.StatusForbidden:
-		return DownloadResult{Status: resp.StatusCode}, ErrGated
+		return 0, resp.StatusCode, ErrGated
 	case http.StatusNotFound:
-		return DownloadResult{Status: resp.StatusCode}, ErrNotFound
-	case http.StatusOK, http.StatusPartialContent:
+		return 0, resp.StatusCode, ErrNotFound
+	case http.StatusOK:
+		if cur > off {
+			return 0, resp.StatusCode, errNoResume
+		}
+	case http.StatusPartialContent:
 	default:
-		return DownloadResult{Status: resp.StatusCode}, fmt.Errorf("hubapi: download %s: HTTP %d", path, resp.StatusCode)
+		return 0, resp.StatusCode, fmt.Errorf("hubapi: download %s: HTTP %d", path, resp.StatusCode)
 	}
+
 	var r io.Reader = resp.Body
 	if max > 0 {
-		r = io.LimitReader(resp.Body, max)
+		r = io.LimitReader(resp.Body, max-written)
 	}
-	n, err := io.Copy(w, r)
-	res := DownloadResult{Status: resp.StatusCode, Bytes: n}
-	if err != nil {
-		return res, err
+	buf := make([]byte, 256<<10)
+	var n int64
+	for {
+		rd, rerr := r.Read(buf)
+		if rd > 0 {
+			if _, werr := w.Write(buf[:rd]); werr != nil {
+				return n, resp.StatusCode, werr
+			}
+			n += int64(rd)
+			idle.Reset(c.timeout)
+		}
+		if rerr == io.EOF {
+			return n, resp.StatusCode, nil
+		}
+		if rerr != nil {
+			if dctx.Err() != nil && ctx.Err() == nil {
+				return n, resp.StatusCode, fmt.Errorf("hubapi: download %s: no data for %s", path, c.timeout)
+			}
+			return n, resp.StatusCode, rerr
+		}
 	}
-	return res, nil
+}
+
+// doRequest is where http.Client.Do is called, kept separate so the download path
+// can use its own client.
+func doRequest(ctx context.Context, hc *http.Client, req *http.Request) (*http.Response, error) {
+	return hc.Do(req.WithContext(ctx))
 }
 
 // getJSON performs one GET and decodes a size-capped JSON body.

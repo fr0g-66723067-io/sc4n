@@ -418,3 +418,149 @@ func TestEmptyBodyGivesUp(t *testing.T) {
 		t.Fatalf("attempts = %d, want %d", n, maxAttempts)
 	}
 }
+
+func body100() []byte {
+	b := make([]byte, 100)
+	for i := range b {
+		b[i] = byte('a' + i%26)
+	}
+	return b
+}
+
+// A body that ends early is a reset, not a lost file: the download resumes at the
+// byte it reached. The round's 699 MiB llamafile failed as "context deadline
+// exceeded while reading body" before this.
+func TestDownloadResumesAfterTruncatedBody(t *testing.T) {
+	body := body100()
+	var hits int32
+	var ranges []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ranges = append(ranges, r.Header.Get("Range"))
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Content-Length", "100")
+			w.Write(body[:10])
+			return // fewer bytes than announced: the client sees an unexpected EOF
+		}
+		if got := r.Header.Get("Range"); got != "bytes=10-" {
+			t.Errorf("resume Range = %q", got)
+		}
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(body[10:])
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL, "")
+	var buf bytes.Buffer
+	res, err := c.Download(context.Background(), "org/name", "big.bin", 0, 0, &buf)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), body) || res.Bytes != 100 || hits != 2 {
+		t.Fatalf("got %d bytes in %d attempts (ranges %v)", buf.Len(), hits, ranges)
+	}
+}
+
+// A server that answers a resume with the whole file must not be appended to the
+// partial copy: that would silently corrupt the artifact.
+func TestDownloadRefusesIgnoredResume(t *testing.T) {
+	body := body100()
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Content-Length", "100")
+			w.Write(body[:10])
+			return
+		}
+		w.Write(body) // 200 with the whole file, ignoring Range
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL, "")
+	var buf bytes.Buffer
+	_, err := c.Download(context.Background(), "org/name", "big.bin", 0, 0, &buf)
+	if !errors.Is(err, errNoResume) {
+		t.Fatalf("err = %v, want errNoResume", err)
+	}
+	if buf.Len() != 10 {
+		t.Fatalf("writer holds %d bytes; a second full copy must not be appended", buf.Len())
+	}
+	if hits != 2 {
+		t.Fatalf("attempts = %d, want 2 (no retry after a resume refusal)", hits)
+	}
+}
+
+// Timeout is a stall bound: a slow but flowing transfer longer than Timeout
+// succeeds, and one that stops sending bytes fails with the stall named.
+func TestDownloadTimeoutIsAStallBound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < 6; i++ {
+			w.Write([]byte("x"))
+			w.(http.Flusher).Flush()
+			time.Sleep(80 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Timeout: 200 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	res, err := c.Download(context.Background(), "org/name", "slow.bin", 0, 0, &buf)
+	if err != nil {
+		t.Fatalf("a flowing transfer longer than Timeout failed: %v", err)
+	}
+	if res.Bytes != 6 || buf.Len() != 6 {
+		t.Fatalf("got %d bytes", buf.Len())
+	}
+}
+
+func TestDownloadStalledTransferFails(t *testing.T) {
+	// This server ignores Range, so the stall cannot be recovered: the error must
+	// still name the stall, not only the refused resume.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("x"))
+		w.(http.Flusher).Flush()
+		time.Sleep(400 * time.Millisecond)
+		w.Write([]byte("y"))
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Timeout: 150 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	_, err = c.Download(context.Background(), "org/name", "stall.bin", 0, 0, &buf)
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("no data for")) {
+		t.Fatalf("err = %v, want a no-data error", err)
+	}
+}
+
+func TestDownloadRecoversFromStall(t *testing.T) {
+	body := body100()
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Content-Length", "100")
+			w.Write(body[:40])
+			w.(http.Flusher).Flush()
+			time.Sleep(400 * time.Millisecond) // longer than Timeout: the transfer stalls
+			return
+		}
+		if got := r.Header.Get("Range"); got != "bytes=40-" {
+			t.Errorf("resume Range = %q", got)
+		}
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(body[40:])
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Timeout: 150 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	res, err := c.Download(context.Background(), "org/name", "stall.bin", 0, 0, &buf)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), body) || res.Bytes != 100 {
+		t.Fatalf("got %d bytes in %d attempts", buf.Len(), hits)
+	}
+}
