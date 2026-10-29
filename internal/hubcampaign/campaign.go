@@ -110,6 +110,10 @@ type Options struct {
 	// query universe: candidates.json records the list as its one query and no
 	// search request is made.
 	Repos []string
+	// ListLabel names where Repos came from, so candidates.json answers "how was
+	// this set given": "-repo" for ids on the command line, "-repos-file" for a
+	// file. It is only a label; the ids are the universe either way.
+	ListLabel string
 	// Rank, when set, replaces the query universe with the Hub's own ranked
 	// listing (hubapi.SortDownloads, SortTrending, ...). It is the campaign a
 	// popularity list asks for: no search terms, one request, and the rows'

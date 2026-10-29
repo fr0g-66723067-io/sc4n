@@ -70,7 +70,15 @@ func Verdicts(ctx context.Context, o Options) ([]RepoVerdict, error) {
 	if err := writeJSON(o.path(fileVerdicts), out); err != nil {
 		return nil, err
 	}
-	progress(o, "verdicts: %d at level %s of %d probed", countLevel(repos, o.Level), o.Level, len(repos))
+	selected := countLevel(repos, o.Level)
+	progress(o, "verdicts: %d at level %s of %d probed", selected, o.Level, len(repos))
+	if selected == 0 && len(repos) > 0 && len(o.Repos) > 0 {
+		// A named universe that selected nothing is the one case where silence is
+		// worst: the operator asked for these repos and got an empty campaign.
+		// (Seen live: -repo X with the default -level unsafe, on a repo the Hub has
+		// not flagged, reports 0 repos and looks like a tool failure.)
+		progress(o, "verdicts: none of the %d listed repos carries the level %q; pass -level any to scan them all", len(repos), o.Level)
+	}
 	return repos, nil
 }
 

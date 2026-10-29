@@ -197,6 +197,7 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		Repos:        listed,
 		Rank:         *rank,
 		Top:          *top,
+		ListLabel:    listLabel(repoNames, *reposFile),
 		Baseline:     baselineSet,
 		Limit:        *limit,
 		Level:        *level,
@@ -281,6 +282,17 @@ func printCampaign(w io.Writer, rep *hubcampaign.CampaignReport, asJSON bool) {
 		enc.SetIndent("", "  ")
 		enc.Encode(rep)
 	}
+}
+
+// listLabel names where an explicit universe came from, for candidates.json.
+func listLabel(repo []string, file string) string {
+	switch {
+	case len(repo) > 0 && file != "":
+		return "-repo/-repos-file"
+	case len(repo) > 0:
+		return "-repo"
+	}
+	return "-repos-file"
 }
 
 // readLines reads one term per non-empty, non-'#' line.

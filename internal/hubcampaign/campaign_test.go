@@ -1082,3 +1082,49 @@ func TestUniverseChangeBustsTheCache(t *testing.T) {
 		t.Fatalf("top 3 of a 3-row listing = %d repos, want 3", len(third.Repos))
 	}
 }
+
+// TestListLabelRecordsHowTheUniverseWasGiven: candidates.json answers "where did
+// this set come from", and "-repo" and "-repos-file" are different answers even
+// though both carry ids. The label must also not count as a universe change, or a
+// campaign re-run with the same ids through a file would recompute needlessly.
+func TestListLabelRecordsHowTheUniverseWasGiven(t *testing.T) {
+	hub := rankedHub(nil)
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.Queries = nil
+	o.UseDefaults = false
+	o.Level = LevelAny
+	o.Repos = []string{"a/top"}
+	o.ListLabel = "-repo"
+	if _, err := Candidates(context.Background(), o); err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	var cands CandidatesFile
+	if err := readJSON(filepath.Join(dir, fileCandidates), &cands); err != nil {
+		t.Fatal(err)
+	}
+	if len(cands.Queries) != 1 || cands.Queries[0].Kind != "list" || cands.Queries[0].Value != "-repo" {
+		t.Fatalf("queries = %+v, want list:-repo", cands.Queries)
+	}
+
+	// The same ids through a file is the same universe.
+	o2 := o
+	o2.ListLabel = "-repos-file"
+	repos, err := Candidates(context.Background(), o2)
+	if err != nil {
+		t.Fatalf("Candidates(relabelled): %v", err)
+	}
+	if len(repos) != 1 || repos[0].ID != "a/top" {
+		t.Fatalf("repos = %+v", repos)
+	}
+	var after CandidatesFile
+	if err := readJSON(filepath.Join(dir, fileCandidates), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Queries[0].Value != "-repo" {
+		t.Errorf("the label change forced a recompute (value is now %q)", after.Queries[0].Value)
+	}
+}

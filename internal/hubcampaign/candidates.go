@@ -66,11 +66,15 @@ func writeListCandidates(o Options) ([]Candidate, error) {
 		return nil, fmt.Errorf("hubcampaign: %w", err)
 	}
 	repos := listedCandidates(o.Repos)
-	file := CandidatesFile{Version: Version, Queries: []Sel{{Kind: "list", Value: listQuery}}, Repos: repos}
+	label := o.ListLabel
+	if label == "" {
+		label = listQuery
+	}
+	file := CandidatesFile{Version: Version, Queries: []Sel{{Kind: "list", Value: label}}, Repos: repos}
 	if err := writeJSON(o.path(fileCandidates), file); err != nil {
 		return nil, err
 	}
-	progress(o, "candidates: %d repos from %s", len(repos), listQuery)
+	progress(o, "candidates: %d repos from %s", len(repos), label)
 	return repos, nil
 }
 
@@ -86,7 +90,12 @@ func universeDiff(cached CandidatesFile, o Options) string {
 		return "selector count differs"
 	}
 	for i := range want {
-		if cached.Queries[i] != want[i] {
+		if cached.Queries[i].Kind != want[i].Kind {
+			return "selector " + want[i].Kind + ":" + want[i].Value
+		}
+		// A list's label ("-repo" versus "-repos-file") says how the ids were given,
+		// not which ids they are, so the ids are compared below instead.
+		if want[i].Kind != "list" && cached.Queries[i].Value != want[i].Value {
 			return "selector " + want[i].Kind + ":" + want[i].Value
 		}
 	}
