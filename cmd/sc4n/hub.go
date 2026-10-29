@@ -14,6 +14,7 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/hubapi"
 	"github.com/fr0g-66723067-io/sc4n/internal/hubcampaign"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/policy"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 )
 
@@ -40,6 +41,9 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		stage      = fs.String("stage", "all", "all|candidates|verdicts|fetch|scan|report")
 		searchFile = fs.String("search-file", "", "file of search terms, one per line ('#' comments)")
 		reposFile  = fs.String("repos-file", "", "file of repo ids, one per line; replaces the query universe")
+		rank       = fs.String("rank", "", "take the universe from the Hub's ranking: downloads|trendingScore|likes|lastModified|createdAt")
+		top        = fs.Int("top", 0, "keep the first N rows of -rank (0 = all requested)")
+		baseline   = fs.String("baseline", "", "suppress findings already present in a previous JSON report")
 		defaults   = fs.Bool("defaults", true, fmt.Sprintf("include the built-in universe (%d terms, %d tags, %d authors)",
 			len(hubcampaign.DefaultTerms), len(hubcampaign.DefaultTags), len(hubcampaign.DefaultAuthors)))
 		limit      = fs.Int("limit", 100, "results per query (1..1000)")
@@ -58,7 +62,8 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		failOn     = fs.String("fail-on", "none", "exit 1 when a campaign finding is at or above this level")
 		jsonOut    = fs.Bool("json", false, "also print campaign.json to stdout")
 	)
-	var search, tag, author stringList
+	var search, tag, author, repoNames stringList
+	fs.Var(&repoNames, "repo", "one repo id (repeatable); a single -repo is a campaign of that model")
 	fs.Var(&search, "search", "model-id search term (repeatable)")
 	fs.Var(&tag, "tag", "Hub tag filter (repeatable)")
 	fs.Var(&author, "author", "author/account name (repeatable)")
@@ -85,6 +90,18 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 	case "unsafe", "suspicious", "caution", "error", "any":
 	default:
 		fmt.Fprintf(stderr, "sc4n hub: -level %q is not unsafe, suspicious, caution, error or any\n", *level)
+		return exitUsage
+	}
+	if *top < 0 {
+		fmt.Fprintf(stderr, "sc4n hub: -top %d is negative\n", *top)
+		return exitUsage
+	}
+	if *rank != "" && !hubapi.RankValid(*rank) {
+		fmt.Fprintf(stderr, "sc4n hub: -rank %q is not downloads, trendingScore, likes, lastModified or createdAt\n", *rank)
+		return exitUsage
+	}
+	if *top > 0 && *rank == "" {
+		fmt.Fprintln(stderr, "sc4n hub: -top only applies to -rank; a repo list is already the universe")
 		return exitUsage
 	}
 	var gate *report.Severity
@@ -130,14 +147,24 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	var listed []string
+	var baselineSet map[string]bool
+	if *baseline != "" {
+		set, berr := policy.LoadBaseline(*baseline)
+		if berr != nil {
+			fmt.Fprintf(stderr, "sc4n hub: -baseline: %v\n", berr)
+			return exitUsage
+		}
+		baselineSet = set
+	}
+
+	listed := append([]string{}, repoNames...)
 	if *reposFile != "" {
 		ids, lerr := readLines(*reposFile)
 		if lerr != nil {
 			fmt.Fprintf(stderr, "sc4n hub: -repos-file: %v\n", lerr)
 			return exitUsage
 		}
-		listed = ids
+		listed = append(listed, ids...)
 		if len(listed) == 0 {
 			fmt.Fprintf(stderr, "sc4n hub: -repos-file %q names no repos\n", *reposFile)
 			return exitUsage
@@ -168,6 +195,9 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		Queries:      queries,
 		UseDefaults:  *defaults,
 		Repos:        listed,
+		Rank:         *rank,
+		Top:          *top,
+		Baseline:     baselineSet,
 		Limit:        *limit,
 		Level:        *level,
 		Jobs:         *jobs,

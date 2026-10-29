@@ -83,21 +83,52 @@ account accepts the terms once (in a browser) and the same token then works,
 `manual approval` means only the repository owner can grant access, so no client
 retry can change the outcome.
 
-A campaign does not have to start from a search. `-repos-file` replaces the query
-universe with a list (one repo id per line, `#` comments), and `-level any` scans
-every listed repo instead of only the ones the Hub flagged, which is what a
-popularity round or a review of known-good models needs:
+A campaign does not have to start from a search. Three other universes are
+first-class, and `-level any` scans every repo in the universe instead of only the
+ones the Hub already flagged:
 
 ```sh
-./sc4n hub -out top10 -repos-file top10.txt -level any -defaults=false \
-    -full-limit 128MiB -repo-budget 1GiB -total-budget 9GiB -stage all
+# the ten most-downloaded models (the Hub's 30-day count; it publishes no 7-day figure)
+./sc4n hub -out top10 -rank downloads -top 10 -level any -defaults=false -stage all
+
+# the ten most trending models (trendingScore — the Hub's recent-window ranking)
+./sc4n hub -out trending -rank trendingScore -top 10 -level any -defaults=false -stage all
+
+# one model, no list file anywhere
+./sc4n hub -out one -repo LiquidAI/LFM3-1.7B -level any -defaults=false -stage all
+
+# an arbitrary list (one repo id per line, '#' comments)
+./sc4n hub -out custom -repos-file repos.txt -level any -defaults=false -stage all
 ```
 
-`candidates.json` records the list as its one query, `verdicts.json` still records
-the Hub's own per-file level, and every fetched file appears in `campaign.json`
-with that level (or `none`) rather than being filtered out. Nothing about the
-selection rule is implicit: a verdict-level campaign reviews flagged files, an
-`any` campaign reviews every file it fetched.
+`-rank` is one request against the Hub's own ordering and records what it ordered
+by: `candidates.json` keeps the rows exactly as the Hub returned them (downloads,
+likes, trending score, pipeline tag, last modified), so "why is this repo in the
+set" is answerable from the campaign directory alone, and `campaign.md` states
+"top N by <sort> (the Hub's 30-day download count / recent-window ranking)". The
+value matters: `downloads` is a 30-day count, `?period=week` is accepted and
+ignored, and `trendingScore` is the only week-scale ordering the API exposes — a
+campaign that does not say which one it used is read as the wrong question. A
+ranked universe with an explicit list or an extra search selector is refused
+rather than silently unioned.
+
+`-repo` is repeatable and needs no file: one model is a campaign of that model.
+`-repos-file` remains for arbitrary sets. Whichever universe is used,
+`verdicts.json` still records the Hub's own per-file level and every fetched file
+appears in `campaign.json` with that level (or `none`) rather than being filtered
+out. Nothing about the selection rule is implicit: a verdict-level campaign reviews
+flagged files, an `any` campaign reviews every file it fetched, and a list or rank
+campaign always records its provenance.
+
+`campaign.md` carries a per-rule table (count and severest severity) — the triage
+view you would otherwise compute from `campaign.json` — and `-baseline` makes a
+re-scan differential: findings already present in a previous report are suppressed
+and the number suppressed is printed in the summary line and in `campaign.md`, so
+"what changed since the last round" is one flag instead of two files and a script:
+
+```sh
+./sc4n hub -out top10 -rank downloads -top 10 -level any -baseline top10/scan.json -refresh -stage all
+```
 
 `sc4n scan` never touches the network. Only `hub` does, and it writes only under
 `-out`. The token is read from `-token-file`, `$HF_TOKEN`,
@@ -125,6 +156,26 @@ anonymously and reports the gated files instead of hiding them.
 | `-timings` | include per-phase timings in the report |
 | `-quiet`, `-color` | output control |
 | `-stdin -name NAME` | scan a single artifact from standard input |
+
+`sc4n hub` (all flags are also in `sc4n hub -h`):
+
+| flag | meaning |
+|---|---|
+| `-out DIR` | campaign directory; every stage file and the fetched bytes live under it |
+| `-stage all\|candidates\|verdicts\|fetch\|scan\|report` | run every stage, or resume at one |
+| `-rank downloads\|trendingScore\|likes\|lastModified\|createdAt` | take the universe from the Hub's ranking |
+| `-top N` | keep the first N rows of `-rank` (0 = the whole listing request) |
+| `-repo ID` | one repo (repeatable); a single `-repo` is a campaign of that model |
+| `-repos-file FILE` | an explicit repo list, one id per line |
+| `-search`, `-tag`, `-author`, `-search-file` | the query universe; `-defaults=true` adds the built-in term/tag/author set |
+| `-level unsafe\|suspicious\|caution\|error\|any` | which candidates are scanned; `any` scans the whole universe |
+| `-baseline FILE` | suppress findings already in a previous report and report how many |
+| `-full-limit`, `-flagged-limit`, `-slice`, `-repo-budget`, `-total-budget` | fetch budgets; a file above the limit is kept as a header slice and says so |
+| `-jobs`, `-scan-jobs`, `-timeout` | concurrency and the request/deadline budget |
+| `-refresh` | recompute a stage that already wrote its file |
+| `-fail-on LEVEL` | exit 1 when a campaign finding is at or above it |
+| `-json` | also print `campaign.json` to stdout |
+| `-api`, `-token-file` | Hub base URL and token file (`$HF_TOKEN`, `$HUGGING_FACE_HUB_TOKEN`, `$HF_HOME/token` otherwise) |
 
 ## Baselines
 

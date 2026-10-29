@@ -31,6 +31,53 @@ type Query struct {
 	Limit int
 }
 
+// Rank is a model-listing order. The Hub publishes two volume signals and they
+// answer different questions: SortDownloads ("downloads") is a *30-day* count —
+// `?period=week` is accepted and ignored, measured 2026-10-25 — while
+// SortTrending ("trendingScore") is the recent-window ranking and the only
+// week-scale ordering the API exposes. A campaign must say which one it used, so
+// the constant reaches candidates.json rather than a raw string.
+type Rank struct {
+	// Sort is one of the Sort* constants.
+	Sort string
+	// Limit caps the rows requested; zero means 100, above 1000 is clamped.
+	Limit int
+}
+
+// The Hub's listing orders.
+const (
+	SortDownloads = "downloads"
+	SortTrending  = "trendingScore"
+	SortLikes     = "likes"
+	SortModified  = "lastModified"
+	SortCreated   = "createdAt"
+)
+
+// RankValid reports whether s is a listing order this client will request. The
+// allowlist exists because the value becomes a query parameter: an arbitrary sort
+// key is an arbitrary request.
+func RankValid(s string) bool {
+	switch s {
+	case SortDownloads, SortTrending, SortLikes, SortModified, SortCreated:
+		return true
+	}
+	return false
+}
+
+// RankedModel is one row of a ranked listing, with the metadata that makes the
+// ranking auditable after the fact: a campaign file that recorded only ids could
+// not answer "why was this repo in the set".
+type RankedModel struct {
+	ID            string  `json:"id"`
+	Downloads     int64   `json:"downloads"`
+	Likes         int64   `json:"likes"`
+	TrendingScore float64 `json:"trendingScore"`
+	LastModified  string  `json:"lastModified,omitempty"`
+	PipelineTag   string  `json:"pipeline_tag,omitempty"`
+	LibraryName   string  `json:"library_name,omitempty"`
+	Private       bool    `json:"private,omitempty"`
+}
+
 // FileIssue is one row of the Hub's per-file scan verdict.
 //
 // Level is one of "unsafe", "suspicious", "caution" or "error"; "unsafe" means

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -604,5 +606,46 @@ func TestGated403CarriesTheHubMessage(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("huggingface.co/org/name")) {
 		t.Fatalf("err = %v, want the Hub's explanation with the URL", err)
+	}
+}
+
+// TestTopRequestsTheRanking pins the ranked listing: the sort key reaches the
+// query string, the direction is most-first, and the metadata the ranking is made
+// of is decoded rather than dropped. The sort allowlist is a request-shaping
+// boundary, so an unknown key is refused before a request is made.
+func TestTopRequestsTheRanking(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/models" {
+			t.Errorf("path = %s, want /api/models", r.URL.Path)
+		}
+		gotQuery = r.URL.RawQuery
+		io.WriteString(w, `[{"id":"a/one","downloads":5,"likes":2,"trendingScore":91.5,"lastModified":"2026-10-01T00:00:00.000Z","pipeline_tag":"text-generation"},{"id":"b/two","downloads":1}]`)
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.Top(context.Background(), Rank{Sort: SortTrending, Limit: 10})
+	if err != nil {
+		t.Fatalf("Top: %v", err)
+	}
+	if len(rows) != 2 || rows[0].ID != "a/one" || rows[1].ID != "b/two" {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].Downloads != 5 || rows[0].Likes != 2 || rows[0].TrendingScore != 91.5 || rows[0].PipelineTag != "text-generation" {
+		t.Errorf("metadata not decoded: %+v", rows[0])
+	}
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Get("sort") != "trendingScore" || q.Get("direction") != "-1" || q.Get("limit") != "10" {
+		t.Errorf("query = %q, want sort=trendingScore&direction=-1&limit=10", gotQuery)
+	}
+	if _, err := c.Top(context.Background(), Rank{Sort: "score; drop table"}); err == nil {
+		t.Error("an unknown sort key was requested")
 	}
 }

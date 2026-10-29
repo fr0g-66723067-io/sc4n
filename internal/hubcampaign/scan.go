@@ -12,6 +12,7 @@ import (
 	// artifact package's built-in sniffers: every pickle, GGUF and safetensors
 	// file is classified as text and the campaign reports a clean corpus.
 	_ "github.com/fr0g-66723067-io/sc4n/internal/formats"
+	"github.com/fr0g-66723067-io/sc4n/internal/policy"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/scan"
 )
@@ -86,13 +87,32 @@ func ScanTree(ctx context.Context, o Options) (*ScanResult, error) {
 	rep.Unreadable = res.Unreadable
 	rep.Cancelled = res.Cancelled
 	relativise(repos, rep)
+	// The baseline is applied here rather than inside the scan engine because a
+	// baseline fingerprint covers the artifact path, and the campaign's paths are
+	// only repo-relative after relativise: a fingerprint taken inside the walk
+	// would carry the absolute path and match nothing in the previous campaign's
+	// scan.json.
+	suppressed := 0
+	if len(o.Baseline) > 0 {
+		rep.Findings, suppressed = policy.Unsuppressed(rep.Findings, o.Baseline)
+		rep.Suppressed = suppressed
+	}
 	if werr := writeReportJSON(o.path(fileScan), rep); werr != nil {
 		return nil, werr
+	}
+	bySev := res.Collector.CountBySeverity()
+	if suppressed > 0 {
+		// The collector counted what the walk produced; the campaign reports what
+		// survived its baseline, so the severity totals must follow the report.
+		bySev = [5]int{}
+		for _, f := range rep.Findings {
+			bySev[int(f.Severity)]++
+		}
 	}
 	out := &ScanResult{
 		Findings:   rep.Findings,
 		Artifacts:  rep.Artifacts,
-		BySeverity: res.Collector.CountBySeverity(),
+		BySeverity: bySev,
 		Unreadable: res.Unreadable,
 		Cancelled:  res.Cancelled,
 	}
@@ -170,6 +190,9 @@ type scanDoc struct {
 		Path   string `json:"path"`
 		Format string `json:"format"`
 	} `json:"artifacts"`
+	// Suppressed is what -baseline removed from this scan, carried so the campaign
+	// can say how many findings it chose not to report.
+	Suppressed int `json:"suppressed,omitempty"`
 }
 
 func sum(v []int) int {

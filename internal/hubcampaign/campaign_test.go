@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/hubapi"
+	"github.com/fr0g-66723067-io/sc4n/internal/policy"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 )
 
@@ -32,11 +33,20 @@ type fakeHub struct {
 	// gate maps a repo id to its `gated` value ("auto"/"manual"), served by the
 	// metadata endpoint and by every resolve request.
 	gate map[string]string
+	// ranked, when set, is what the listing endpoint answers for a ranked request
+	// (a request that carries sort=), and lastSort records the sort key asked for.
+	ranked   []map[string]any
+	lastSort string
 }
 
 func (h *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/api/models":
+		if sort := r.URL.Query().Get("sort"); sort != "" && h.ranked != nil {
+			h.lastSort = sort
+			json.NewEncoder(w).Encode(h.ranked)
+			return
+		}
 		var out []map[string]string
 		for _, id := range h.repos {
 			out = append(out, map[string]string{"id": id})
@@ -804,5 +814,271 @@ func TestCoverageTotalsMatchTheTable(t *testing.T) {
 	md := campaignMarkdown(rep)
 	if !strings.Contains(md, "- flagged files: 2 — 2 fully covered, 0 partially, 0 not covered") {
 		t.Fatalf("header does not match its table:\n%s", md[:400])
+	}
+}
+
+// rankedHub is the fake Hub for a ranked campaign: three models with the numbers
+// the ordering is made of, each shipping one clean config file, so the campaign
+// exercises probe, fetch, scan, join and report with no search terms at all.
+func rankedHub(pkl []byte) *fakeHub {
+	return &fakeHub{
+		ranked: []map[string]any{
+			{"id": "a/top", "downloads": 900, "likes": 9, "trendingScore": 900.0, "lastModified": "2026-10-01T00:00:00.000Z", "pipeline_tag": "text-generation"},
+			{"id": "b/second", "downloads": 500, "likes": 5, "trendingScore": 500.0},
+			{"id": "c/third", "downloads": 100, "likes": 1, "trendingScore": 100.0},
+		},
+		scans: map[string]string{
+			"a/top":    `{"scansDone":true,"filesWithIssues":[]}`,
+			"b/second": `{"scansDone":true,"filesWithIssues":[]}`,
+			"c/third":  `{"scansDone":true,"filesWithIssues":[]}`,
+		},
+		siblings: map[string][]map[string]any{
+			"a/top":    {sibling("config.json", 2)},
+			"b/second": {sibling("config.json", 2)},
+			"c/third":  {sibling("config.json", 2)},
+		},
+		files: map[string][]byte{
+			"a/top/config.json":    []byte("{}"),
+			"b/second/config.json": []byte("{}"),
+			"c/third/config.json":  []byte("{}"),
+		},
+	}
+}
+
+// TestRankUniverse pins -rank/-top: the universe is the Hub's own ordering, the
+// rows are cut to Top, the sort key reaches the listing request, candidates.json
+// keeps the metadata the ordering was made of, and campaign.md says which ranking
+// it used — the difference between a 30-day download count and the recent-window
+// trending score is exactly what a reader must not have to guess.
+func TestRankUniverse(t *testing.T) {
+	hub := rankedHub(nil)
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.Queries = nil
+	o.UseDefaults = false
+	o.Rank = hubapi.SortTrending
+	o.Top = 2
+	o.Level = LevelAny
+	rep := runAll(t, o)
+
+	if hub.lastSort != hubapi.SortTrending {
+		t.Fatalf("listing sort = %q, want %q", hub.lastSort, hubapi.SortTrending)
+	}
+	if rep.Totals.Repos != 2 {
+		t.Fatalf("repos = %d, want the top 2", rep.Totals.Repos)
+	}
+	var cands CandidatesFile
+	if err := readJSON(filepath.Join(dir, fileCandidates), &cands); err != nil {
+		t.Fatal(err)
+	}
+	if len(cands.Repos) != 2 || cands.Repos[0].ID != "a/top" || cands.Repos[1].ID != "b/second" {
+		t.Fatalf("candidates = %+v", cands.Repos)
+	}
+	if len(cands.Repos[0].Why) != 1 || cands.Repos[0].Why[0] != "rank:"+hubapi.SortTrending {
+		t.Errorf("why = %v", cands.Repos[0].Why)
+	}
+	if cands.Rank == nil || cands.Rank.Sort != hubapi.SortTrending {
+		t.Fatalf("rank provenance = %+v", cands.Rank)
+	}
+	// The captured rows are what the Hub said, not what the campaign kept: a
+	// ranking that moved is explained by the neighbours.
+	if len(cands.Rank.Captured) != 2 {
+		t.Fatalf("captured = %d rows", len(cands.Rank.Captured))
+	}
+	if cands.Rank.Captured[0].Downloads != 900 {
+		t.Errorf("metadata not kept: %+v", cands.Rank.Captured[0])
+	}
+	if rep.Campaign.Rank == nil || rep.Campaign.Rank.Sort != hubapi.SortTrending ||
+		rep.Campaign.Rank.Top != 2 || rep.Campaign.Rank.First != "a/top" || rep.Campaign.Rank.Last != "b/second" {
+		t.Fatalf("campaign rank = %+v", rep.Campaign.Rank)
+	}
+	md, err := os.ReadFile(filepath.Join(dir, fileCampaignMD))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(md), "top 2 by trendingScore (the Hub's recent-window ranking)") {
+		t.Errorf("campaign.md does not name the ranking:\n%s", md)
+	}
+}
+
+// TestRankRejectsTwoUniverses: a ranked listing and an explicit list answer
+// different questions, and a campaign that silently preferred one would be
+// reporting on a set the operator did not ask for.
+func TestRankRejectsTwoUniverses(t *testing.T) {
+	o := Options{Dir: t.TempDir(), Client: &hubapi.Client{}, Level: "unsafe"}
+	o.Rank = hubapi.SortDownloads
+	o.Repos = []string{"a/b"}
+	if err := o.Validate(); err == nil {
+		t.Error("rank + repos was accepted")
+	}
+	o.Repos = nil
+	o.Queries = []Sel{{Kind: "search", Value: "evil"}}
+	if err := o.Validate(); err == nil {
+		t.Error("rank + search was accepted")
+	}
+	o.Queries = nil
+	o.Top = 5
+	if err := o.Validate(); err != nil {
+		t.Fatalf("rank + top rejected: %v", err)
+	}
+	o1 := Options{Dir: t.TempDir(), Client: &hubapi.Client{}, Level: "unsafe", Top: 5}
+	if err := o1.Validate(); err == nil {
+		t.Error("-top without a universe was accepted")
+	}
+}
+
+// TestBaselineMakesTheCampaignDifferential runs the same campaign twice: the
+// second scan passes the first report as its baseline, so the campaign reports
+// what changed and says how much it suppressed. This is the differential that used
+// to be computed by hand from two JSON files.
+func TestBaselineMakesTheCampaignDifferential(t *testing.T) {
+	pkl := []byte(pickleOSSystem)
+	hub := &fakeHub{
+		repos: []string{"o/evil"},
+		scans: map[string]string{
+			"o/evil": `{"scansDone":true,"filesWithIssues":[{"path":"evil.pkl","level":"unsafe"}]}`,
+		},
+		siblings: map[string][]map[string]any{"o/evil": {sibling("evil.pkl", int64(len(pkl)))}},
+		files:    map[string][]byte{"o/evil/evil.pkl": pkl},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	first := runAll(t, o)
+	if c := first.Totals.Findings.Critical; c < 1 {
+		t.Fatalf("first run has no critical: %+v", first.Totals.Findings)
+	}
+	base, err := policy.LoadBaseline(filepath.Join(dir, fileScan))
+	if err != nil {
+		t.Fatalf("LoadBaseline: %v", err)
+	}
+
+	o2 := newOptions(t, srv, dir)
+	o2.Baseline = base
+	o2.Refresh = true
+	second := runAll(t, o2)
+	if got := second.Totals.Findings.Critical; got != 0 {
+		t.Errorf("second run still reports %d criticals", got)
+	}
+	if want := severityCount(first.Totals.Findings); second.Totals.Suppressed != want {
+		t.Errorf("suppressed = %d, want %d (every finding of the first run)", second.Totals.Suppressed, want)
+	}
+	md, err := os.ReadFile(filepath.Join(dir, fileCampaignMD))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(md), "already present in the baseline report were suppressed") {
+		t.Error("campaign.md does not state the suppression")
+	}
+}
+
+// TestByRuleSummary is the per-rule table a reviewer triages: counts by rule,
+// most first, with the severest severity the rule was seen at.
+func TestByRuleSummary(t *testing.T) {
+	pkl := []byte(pickleOSSystem)
+	hub := &fakeHub{
+		repos:    []string{"o/evil"},
+		scans:    map[string]string{"o/evil": `{"scansDone":true,"filesWithIssues":[{"path":"evil.pkl","level":"unsafe"}]}`},
+		siblings: map[string][]map[string]any{"o/evil": {sibling("evil.pkl", int64(len(pkl)))}},
+		files:    map[string][]byte{"o/evil/evil.pkl": pkl},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	rep := runAll(t, newOptions(t, srv, dir))
+	if len(rep.Totals.ByRule) == 0 {
+		t.Fatal("no per-rule rows")
+	}
+	total := 0
+	for _, rc := range rep.Totals.ByRule {
+		total += rc.Count
+		if rc.Rule == "" || rc.Severity == "" {
+			t.Errorf("incomplete row %+v", rc)
+		}
+	}
+	want := severityCount(rep.Totals.Findings)
+	if total != want {
+		t.Errorf("per-rule rows sum to %d, want %d", total, want)
+	}
+	for i := 1; i < len(rep.Totals.ByRule); i++ {
+		if rep.Totals.ByRule[i-1].Count < rep.Totals.ByRule[i].Count {
+			t.Fatalf("rows are not sorted by count: %+v", rep.Totals.ByRule)
+		}
+	}
+	if rep.Totals.ByRule[0].Severity != "critical" {
+		t.Errorf("first row severity = %q, want the severest", rep.Totals.ByRule[0].Severity)
+	}
+	md, err := os.ReadFile(filepath.Join(dir, fileCampaignMD))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(md), "## Findings by rule") {
+		t.Error("campaign.md has no per-rule table")
+	}
+}
+
+// TestUniverseChangeBustsTheCache: a campaign directory reused for a different
+// question must not answer with the previous listing. -rank trendingScore after
+// -rank downloads is the case that matters, because both write candidates.json and
+// the second run has no other way to notice.
+func TestUniverseChangeBustsTheCache(t *testing.T) {
+	hub := rankedHub(nil)
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.Queries = nil
+	o.UseDefaults = false
+	o.Level = LevelAny
+	o.Rank = hubapi.SortTrending
+	o.Top = 2
+	if _, err := Candidates(context.Background(), o); err != nil {
+		t.Fatalf("Candidates(trending): %v", err)
+	}
+	var first CandidatesFile
+	if err := readJSON(filepath.Join(dir, fileCandidates), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Rank == nil || first.Rank.Sort != hubapi.SortTrending {
+		t.Fatalf("first rank = %+v", first.Rank)
+	}
+
+	// Same directory, different question: the same two rows in this fixture, but
+	// the provenance must be the new sort, and the request must be made again.
+	o2 := o
+	o2.Rank = hubapi.SortDownloads
+	if _, err := Candidates(context.Background(), o2); err != nil {
+		t.Fatalf("Candidates(downloads): %v", err)
+	}
+	var second CandidatesFile
+	if err := readJSON(filepath.Join(dir, fileCandidates), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Rank == nil || second.Rank.Sort != hubapi.SortDownloads {
+		t.Fatalf("cached universe survived a rank change: %+v", second.Rank)
+	}
+	if hub.lastSort != hubapi.SortDownloads {
+		t.Errorf("last listing sort = %q, want the new sort", hub.lastSort)
+	}
+
+	// The same question again is served from the file.
+	o2.Top = 3
+	if _, err := Candidates(context.Background(), o2); err != nil {
+		t.Fatalf("Candidates(top 3): %v", err)
+	}
+	var third CandidatesFile
+	if err := readJSON(filepath.Join(dir, fileCandidates), &third); err != nil {
+		t.Fatal(err)
+	}
+	// -top is part of the question: raising it from 2 to 3 must widen the set.
+	if len(third.Repos) != 3 {
+		t.Fatalf("top 3 of a 3-row listing = %d repos, want 3", len(third.Repos))
 	}
 }

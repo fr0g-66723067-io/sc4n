@@ -58,6 +58,19 @@ type CampaignInfo struct {
 	Queries  map[string][]string `json:"queries"`
 	Probed   int                 `json:"probed"`
 	Selected int                 `json:"selected"`
+	// Rank is the ranked listing the universe came from, when it came from one.
+	// Sort is the Hub's own ordering name, so a reader can tell a 30-day download
+	// count from the recent-window trending score without opening the tool.
+	Rank *RankInfo `json:"rank,omitempty"`
+}
+
+// RankInfo is the ranked listing a campaign's universe was taken from.
+type RankInfo struct {
+	Sort  string `json:"sort"`
+	Top   int    `json:"top"`
+	Rows  int    `json:"rows"`
+	First string `json:"first,omitempty"`
+	Last  string `json:"last,omitempty"`
 }
 
 // FindingsTotals is the scan-wide finding count, plus the worst severity.
@@ -82,6 +95,20 @@ type Totals struct {
 	NotCovered     int            `json:"not_covered"`
 	BySc4n         map[string]int `json:"by_sc4n"`
 	Findings       FindingsTotals `json:"findings"`
+	// ByRule is the campaign's per-rule count, the table a reviewer triages
+	// instead of reading 300 rows: the same numbers a hand-written summary of the
+	// campaign used to compute.
+	ByRule []RuleCount `json:"by_rule"`
+	// Suppressed is the number of findings -baseline removed, so a differential
+	// campaign says what it did not report.
+	Suppressed int `json:"suppressed,omitempty"`
+}
+
+// RuleCount is one row of the per-rule summary.
+type RuleCount struct {
+	Rule     string `json:"rule"`
+	Severity string `json:"severity"`
+	Count    int    `json:"count"`
 }
 
 // CampaignReport is campaign.json.
@@ -206,12 +233,22 @@ func Join(o Options) (*CampaignReport, error) {
 	var totals FindingsTotals
 	var sevCount [5]int
 	worst := report.Severity(-1)
+	ruleCount := map[string]*RuleCount{}
 	for _, f := range doc.Findings {
 		sev, err := report.ParseSeverity(f.Severity)
 		if err != nil {
 			return nil, fmt.Errorf("hubcampaign: %s: %w", fileScan, err)
 		}
 		sevCount[sev]++
+		rc := ruleCount[f.RuleID]
+		if rc == nil {
+			rc = &RuleCount{Rule: f.RuleID, Severity: f.Severity}
+			ruleCount[f.RuleID] = rc
+		}
+		rc.Count++
+		if s, err := report.ParseSeverity(rc.Severity); err == nil && sev > s {
+			rc.Severity = f.Severity
+		}
 		if sev > worst {
 			worst = sev
 		}
@@ -285,8 +322,38 @@ func Join(o Options) (*CampaignReport, error) {
 		for _, q := range cands.Queries {
 			rep.Campaign.Queries[q.Kind] = append(rep.Campaign.Queries[q.Kind], q.Value)
 		}
+		if cands.Rank != nil {
+			info := &RankInfo{Sort: cands.Rank.Sort, Rows: len(cands.Rank.Captured)}
+			if o.Top > 0 {
+				info.Top = o.Top
+			} else {
+				info.Top = len(cands.Rank.Captured)
+			}
+			if info.Rows > 0 {
+				info.First = cands.Rank.Captured[0].ID
+				info.Last = cands.Rank.Captured[info.Rows-1].ID
+			}
+			rep.Campaign.Rank = info
+		}
 	}
 	rep.Totals.Findings = totals
+	rep.Totals.ByRule = make([]RuleCount, 0, len(ruleCount))
+	for _, rc := range ruleCount {
+		rep.Totals.ByRule = append(rep.Totals.ByRule, *rc)
+	}
+	sort.Slice(rep.Totals.ByRule, func(i, j int) bool {
+		a, b := rep.Totals.ByRule[i], rep.Totals.ByRule[j]
+		if a.Count != b.Count {
+			return a.Count > b.Count
+		}
+		if a.Severity != b.Severity {
+			return sevRank(a.Severity) > sevRank(b.Severity)
+		}
+		return a.Rule < b.Rule
+	})
+	if doc.Suppressed > 0 {
+		rep.Totals.Suppressed = doc.Suppressed
+	}
 
 	repos := make([]RepoReport, 0, len(fd.Repos))
 	for _, rf := range fd.Repos {

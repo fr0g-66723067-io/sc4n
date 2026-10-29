@@ -45,9 +45,28 @@ func campaignMarkdown(rep *CampaignReport) string {
 	fmt.Fprintf(&b, "- tool: %s %s\n", rep.Tool.Name, rep.Tool.Version)
 	fmt.Fprintf(&b, "- universe: %d repos probed, %d selected at level %s\n",
 		rep.Campaign.Probed, rep.Campaign.Selected, rep.Campaign.Level)
-	fmt.Fprintf(&b, "- queries: %d search, %d tag, %d author, %d list\n",
+	fmt.Fprintf(&b, "- queries: %d search, %d tag, %d author, %d list, %d rank\n",
 		len(rep.Campaign.Queries["search"]), len(rep.Campaign.Queries["tag"]),
-		len(rep.Campaign.Queries["author"]), len(rep.Campaign.Queries["list"]))
+		len(rep.Campaign.Queries["author"]), len(rep.Campaign.Queries["list"]),
+		len(rep.Campaign.Queries["rank"]))
+	if r := rep.Campaign.Rank; r != nil {
+		// The sort name is the Hub's: "downloads" there is a 30-day count and
+		// "trendingScore" is the recent window, and a campaign that does not say
+		// which one it used is read as the wrong question.
+		note := ""
+		switch r.Sort {
+		case "downloads":
+			note = " (the Hub's 30-day download count; it publishes no 7-day figure)"
+		case "trendingScore":
+			note = " (the Hub's recent-window ranking)"
+		}
+		fmt.Fprintf(&b, "- universe ranking: top %d by %s%s — %d rows captured, %s … %s\n",
+			r.Top, r.Sort, note, r.Rows, r.First, r.Last)
+	}
+	if rep.Totals.Suppressed > 0 {
+		fmt.Fprintf(&b, "- baseline: %d findings already present in the baseline report were suppressed\n",
+			rep.Totals.Suppressed)
+	}
 	fmt.Fprintf(&b, "- flagged files: %d — %d fully covered, %d partially, %d not covered\n",
 		t.Files, t.CoveredFull, t.CoveredPartial, t.NotCovered)
 	fmt.Fprintf(&b, "- sc4n verdict per flagged file: critical %d, high %d, medium %d, low %d, info %d, none %d\n",
@@ -67,6 +86,14 @@ func campaignMarkdown(rep *CampaignReport) string {
 			r.ID, r.Status, len(r.Files), cov["full"], cov["partial"], cov["none"],
 			worstOf(r.Files),
 			r.Sc4n.BySeverity["critical"], r.Sc4n.BySeverity["high"], r.Sc4n.BySeverity["medium"])
+	}
+
+	if len(rep.Totals.ByRule) > 0 {
+		b.WriteString("\n## Findings by rule\n\n")
+		b.WriteString("| rule | severity | count |\n|---|---|---|\n")
+		for _, rc := range rep.Totals.ByRule {
+			fmt.Fprintf(&b, "| %s | %s | %d |\n", rc.Rule, rc.Severity, rc.Count)
+		}
 	}
 
 	// The misses are the visible artifact, not a footnote: a fully covered file

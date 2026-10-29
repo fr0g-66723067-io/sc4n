@@ -163,6 +163,34 @@ func (c *Client) Models(ctx context.Context, q Query) ([]string, error) {
 	return ids, nil
 }
 
+// Top returns the ranked model listing: the rows the Hub orders by r.Sort, most
+// first, with the metadata each one was ranked by.
+//
+// It is a separate call from Models because a ranked campaign needs the numbers,
+// not just the ids: "top 10 by downloads" is only auditable if the file says what
+// each row's download count was when the list was taken.
+func (c *Client) Top(ctx context.Context, r Rank) ([]RankedModel, error) {
+	if !RankValid(r.Sort) {
+		return nil, fmt.Errorf("hubapi: sort %q is not a ranking this client requests (downloads, trendingScore, likes, lastModified, createdAt)", r.Sort)
+	}
+	limit := r.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	v := url.Values{}
+	v.Set("limit", strconv.Itoa(limit))
+	v.Set("sort", r.Sort)
+	v.Set("direction", "-1")
+	var out []RankedModel
+	if err := c.getJSON(ctx, c.raw("/api/models")+"?"+v.Encode(), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Scan returns one repo's per-file security verdict.
 func (c *Client) Scan(ctx context.Context, id string) (ScanVerdict, error) {
 	var v ScanVerdict

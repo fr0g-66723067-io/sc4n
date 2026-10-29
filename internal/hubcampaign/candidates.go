@@ -22,6 +22,17 @@ type CandidatesFile struct {
 	Version int         `json:"version"`
 	Queries []Sel       `json:"queries"`
 	Repos   []Candidate `json:"repos"`
+	// Rank records the ranked listing when the universe came from one: the rows
+	// exactly as the Hub returned them, so "why is this repo here" is answerable
+	// from the file alone. It is absent for every other universe.
+	Rank *RankFile `json:"rank,omitempty"`
+}
+
+// RankFile is the ranked listing a campaign's universe was taken from.
+type RankFile struct {
+	Sort     string               `json:"sort"`
+	Limit    int                  `json:"limit"`
+	Captured []hubapi.RankedModel `json:"captured"`
 }
 
 // listQuery is the value candidates.json records when the universe came from
@@ -63,6 +74,80 @@ func writeListCandidates(o Options) ([]Candidate, error) {
 	return repos, nil
 }
 
+// universeDiff reports how a cached universe differs from the requested one, or
+// "" when it is the same question. It compares the selectors, the ranked listing
+// and the list contents, because each of them changes which repos are in scope.
+func universeDiff(cached CandidatesFile, o Options) string {
+	want, err := o.queries()
+	if err != nil {
+		return "queries are invalid"
+	}
+	if len(cached.Queries) != len(want) {
+		return "selector count differs"
+	}
+	for i := range want {
+		if cached.Queries[i] != want[i] {
+			return "selector " + want[i].Kind + ":" + want[i].Value
+		}
+	}
+	if o.Rank != "" {
+		if cached.Rank == nil || cached.Rank.Sort != o.Rank {
+			return "rank " + o.Rank
+		}
+		if o.Top > 0 && len(cached.Repos) != o.Top {
+			return fmt.Sprintf("top %d", o.Top)
+		}
+	}
+	if len(o.Repos) > 0 {
+		listed := listedCandidates(o.Repos)
+		if len(listed) != len(cached.Repos) {
+			return "repo list length"
+		}
+		for i := range listed {
+			if listed[i].ID != cached.Repos[i].ID {
+				return "repo " + listed[i].ID
+			}
+		}
+	}
+	return ""
+}
+
+// writeRankCandidates builds the universe from the Hub's own ranking. The rows are
+// requested with the listing limit and then cut to Top, and the file keeps the
+// rows as returned — including the ones beyond Top — because a ranking that moved
+// between campaigns is easier to explain with the neighbours visible.
+func writeRankCandidates(ctx context.Context, o Options) ([]Candidate, error) {
+	limit := o.Limit
+	if o.Top > limit {
+		limit = o.Top
+	}
+	rows, err := o.Client.Top(ctx, hubapi.Rank{Sort: o.Rank, Limit: limit})
+	if err != nil {
+		return nil, fmt.Errorf("hubcampaign: rank %s: %w", o.Rank, err)
+	}
+	if o.Top > 0 && len(rows) > o.Top {
+		rows = rows[:o.Top]
+	}
+	repos := make([]Candidate, 0, len(rows))
+	for _, r := range rows {
+		if r.ID == "" {
+			continue
+		}
+		repos = append(repos, Candidate{ID: r.ID, Why: []string{"rank:" + o.Rank}})
+	}
+	file := CandidatesFile{
+		Version: Version,
+		Queries: []Sel{{Kind: "rank", Value: o.Rank}},
+		Repos:   repos,
+		Rank:    &RankFile{Sort: o.Rank, Limit: limit, Captured: rows},
+	}
+	if err := writeJSON(o.path(fileCandidates), file); err != nil {
+		return nil, err
+	}
+	progress(o, "candidates: %d repos from rank %s (of %d rows requested)", len(repos), o.Rank, limit)
+	return repos, nil
+}
+
 // Candidates enumerates the universe and writes candidates.json.
 //
 // A query that fails aborts the stage with the query named: a universe that
@@ -82,9 +167,19 @@ func Candidates(ctx context.Context, o Options) ([]Candidate, error) {
 	if !o.Refresh {
 		var cached CandidatesFile
 		if err := readJSON(o.path(fileCandidates), &cached); err == nil && cached.Version == Version {
-			progress(o, "candidates: %d repos (cached, -refresh to recompute)", len(cached.Repos))
-			return cached.Repos, nil
+			// A cached universe is only this run's universe if it asked the same
+			// question: -rank trendingScore after -rank downloads in the same
+			// directory must not answer with the previous listing.
+			if why := universeDiff(cached, o); why == "" {
+				progress(o, "candidates: %d repos (cached, -refresh to recompute)", len(cached.Repos))
+				return cached.Repos, nil
+			} else {
+				progress(o, "candidates: universe changed (%s), recomputing", why)
+			}
 		}
+	}
+	if o.Rank != "" {
+		return writeRankCandidates(ctx, o)
 	}
 	if len(o.Repos) > 0 {
 		return writeListCandidates(o)
@@ -147,9 +242,14 @@ func query(s Sel, limit int) hubapi.Query {
 }
 
 // queries builds the ordered, deduplicated query list: the built-in universe
-// first, then the explicit selectors. An explicit repo list is its own universe,
-// so it is the one query and the search selectors are not required.
+// first, then the explicit selectors. An explicit repo list and a ranked listing
+// are each their own universe, so each is the one query and the built-in search
+// universe is not required (a -rank campaign must not silently add 43 search
+// terms to a request that exists to answer "what are the top 10").
 func (o Options) queries() ([]Sel, error) {
+	if o.Rank != "" {
+		return []Sel{{Kind: "rank", Value: o.Rank}}, nil
+	}
 	if len(o.Repos) > 0 {
 		return []Sel{{Kind: "list", Value: listQuery}}, nil
 	}
@@ -172,7 +272,7 @@ func (o Options) queries() ([]Sel, error) {
 		s.Kind = strings.TrimSpace(s.Kind)
 		s.Value = strings.TrimSpace(s.Value)
 		switch s.Kind {
-		case "search", "tag", "author", "list":
+		case "search", "tag", "author", "list", "rank":
 		default:
 			return nil, fmt.Errorf("hubcampaign: query kind %q is not search, tag, author or list", s.Kind)
 		}

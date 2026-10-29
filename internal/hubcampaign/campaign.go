@@ -110,6 +110,18 @@ type Options struct {
 	// query universe: candidates.json records the list as its one query and no
 	// search request is made.
 	Repos []string
+	// Rank, when set, replaces the query universe with the Hub's own ranked
+	// listing (hubapi.SortDownloads, SortTrending, ...). It is the campaign a
+	// popularity list asks for: no search terms, one request, and the rows'
+	// metadata recorded so the ordering is auditable afterwards.
+	Rank string
+	// Top is how many rows of the ranked listing to keep. Zero means all of them
+	// (up to the listing limit).
+	Top int
+	// Baseline suppresses findings already present in a previous report, so a
+	// re-scan reports what changed rather than everything. The key is the same one
+	// scan -baseline uses, and the count is reported, never silently applied.
+	Baseline map[string]bool
 	// Jobs is the concurrency for Hub requests.
 	Jobs int
 	// Refresh recomputes a stage whose output file already exists.
@@ -207,6 +219,25 @@ func (o Options) Validate() error {
 	if o.Limit < 0 || o.Limit > 1000 {
 		return fmt.Errorf("hubcampaign: limit %d is outside 1..1000", o.Limit)
 	}
+	if o.Rank != "" {
+		if !hubapi.RankValid(o.Rank) {
+			return fmt.Errorf("hubcampaign: -rank %q is not downloads, trendingScore, likes, lastModified or createdAt", o.Rank)
+		}
+		if len(o.Repos) > 0 {
+			return errors.New("hubcampaign: -rank and an explicit repo list are two universes; pass one")
+		}
+		if all := o.selectors(); len(all) > 0 {
+			return fmt.Errorf("hubcampaign: -rank already is the universe; drop the %d explicit selector(s)", len(all))
+		}
+	}
+	if o.Top < 0 {
+		return fmt.Errorf("hubcampaign: -top %d is negative", o.Top)
+	}
+	if o.Top > 0 && o.Rank == "" {
+		// A repo list already is the whole set; truncating it silently would make
+		// the campaign report on a universe the operator did not name.
+		return errors.New("hubcampaign: -top only applies to -rank; a repo list is already the universe")
+	}
 	for _, q := range o.Queries {
 		switch q.Kind {
 		case "search", "tag", "author", "list":
@@ -218,6 +249,19 @@ func (o Options) Validate() error {
 		}
 	}
 	return nil
+}
+
+// selectors is Options.Queries without the synthetic list/rank entries, which are
+// universes rather than filters.
+func (o Options) selectors() []Sel {
+	out := make([]Sel, 0, len(o.Queries))
+	for _, q := range o.Queries {
+		if q.Kind == "list" || q.Kind == "rank" {
+			continue
+		}
+		out = append(out, q)
+	}
+	return out
 }
 
 // Run executes every stage in order: candidates, verdicts, fetch, scan, join,
