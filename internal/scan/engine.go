@@ -82,6 +82,11 @@ type Config struct {
 	MemBudget int64
 	// Root is the containment root for path-shaped values.
 	Root string
+	// Partial names artifacts whose bytes are a truncated copy (a header slice of
+	// a larger file), so a rule that compares a declared extent against the file on
+	// disk can report "unverifiable" instead of a violation. Paths are as the
+	// report names them, or relative to Root.
+	Partial []string
 	// DeepStats enables the informational weight-statistics rules.
 	DeepStats bool
 	// Timeout, when non-zero, bounds the whole scan.
@@ -159,6 +164,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		collector = report.NewCollector(limit)
 	}
 	sess := artifact.NewSession(collector, cfg.Root, l)
+	sess.SetPartial(cfg.Partial)
 	sess.DeepStats = cfg.DeepStats
 
 	if cfg.Timeout > 0 {

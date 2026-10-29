@@ -71,11 +71,22 @@ type parser struct{}
 // on ctx.Sink. It never returns an error for a malformed artifact: a structure
 // violation is a finding, and the walk continues where continuing is meaningful.
 func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
+	base, contain := resolutionPaths(ctx, s)
 	w := &walker{
-		s:    s,
-		l:    ctx.Limits,
-		sink: ctx.Sink,
-		root: resolutionRoot(ctx, s),
+		s:       s,
+		l:       ctx.Limits,
+		sink:    ctx.Sink,
+		root:    base,
+		contain: contain,
+		partial: func(rel string) bool {
+			if ctx.Session == nil {
+				return false
+			}
+			if contain != "" {
+				return ctx.Session.IsPartial(filepath.Join(contain, rel))
+			}
+			return ctx.Session.IsPartial(filepath.Join(base, rel))
+		},
 	}
 	// The sniffer cannot emit, so the honest note about which parser ran on an
 	// ambiguous protobuf is made here.
@@ -255,7 +266,15 @@ type walker struct {
 	s    source.Source
 	l    limits.Limits
 	sink *report.Sink
-	root string
+	// root is the directory the artifact lives in (external_data locations are
+	// relative to it) and contain is the session's containment root, which the
+	// resolved path must stay inside when one is set.
+	root    string
+	contain string
+	// partial asks whether the file at a root-relative path is a truncated copy,
+	// and partialNoted keeps the informational finding to one per artifact.
+	partial      func(rel string) bool
+	partialNoted bool
 
 	elems    int64
 	elemsHit bool
@@ -1323,12 +1342,18 @@ func clip(s string) string {
 	return s[:max] + "…"
 }
 
-// resolutionRoot returns the containment root for external-data resolution:
-// the configured -root, or the artifact's own directory.
-func resolutionRoot(ctx *artifact.Ctx, s source.Source) string {
-	if ctx.Session != nil && ctx.Session.Root != "" {
-		return ctx.Session.Root
-	}
+// resolutionPaths returns the directory an external_data location is relative to
+// (the artifact's own) and the containment root the resolved path must stay
+// inside.
+//
+// The two are not interchangeable: the location is relative to the model file, so
+// resolving it against a campaign's scan root finds nothing and the check goes
+// quiet. Measured on BAAI/bge-m3, whose onnx/model.onnx references a sibling data
+// file: 389 offset/length checks disappeared when the campaign passed its scan
+// root as -root. The artifact's directory is therefore the base; when a session
+// root is set the base is expressed inside it and os.Root enforces the boundary.
+func resolutionPaths(ctx *artifact.Ctx, s source.Source) (base, contain string) {
+	contain = containmentRoot(ctx)
 	name := s.Name()
 	if i := strings.LastIndexByte(name, ':'); i > 0 && !strings.ContainsRune(name[i+1:], '/') {
 		// A nested member is named "<container>:<member>"; the member's bytes live
@@ -1337,9 +1362,20 @@ func resolutionRoot(ctx *artifact.Ctx, s source.Source) string {
 		name = name[:i]
 	}
 	if name == "" || strings.HasPrefix(name, "<") {
-		return ""
+		return contain, contain
 	}
-	return filepath.Dir(name)
+	dir := filepath.Dir(name)
+	switch {
+	case dir == "." || dir == "" || dir == string(filepath.Separator):
+		// A bare name (a member, a stdin name) has no directory of its own, so the
+		// containment root is the only base there is.
+		base = contain
+	case filepath.IsAbs(dir):
+		base = filepath.Clean(dir)
+	case contain != "":
+		base = filepath.Join(contain, dir)
+	}
+	return base, contain
 }
 
 // pathEscapeReason reports why a declared external-data path cannot be a
@@ -1522,6 +1558,15 @@ func (w *walker) checkExternalPath(off int64, key, val string) bool {
 	return false
 }
 
+// containmentRoot returns the session's containment root, or "" when there is
+// none. It is used only to refuse a resolved path that leaves the scanned tree.
+func containmentRoot(ctx *artifact.Ctx) string {
+	if ctx.Session != nil {
+		return ctx.Session.Root
+	}
+	return ""
+}
+
 // resolveExternal resolves a passing location under the containment root and
 // applies the checks that need the filesystem: symlink references and
 // offset/length past the end of the referenced file. When there is no root (stdin
@@ -1531,19 +1576,44 @@ func (w *walker) resolveExternal(off int64, loc string, offset uint64, hasOffset
 	if w.root == "" {
 		return
 	}
-	root, err := os.OpenRoot(w.root)
+	openAt := w.root
+	clean := path.Clean(loc)
+	if w.contain != "" {
+		// Containment is enforced by opening the session root and naming the file
+		// relative to it: the artifact's own directory decides what "w.bin" means,
+		// the session root decides whether the result may be read at all.
+		openAt = w.contain
+		rel, err := filepath.Rel(w.contain, w.root)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return
+		}
+		if rel != "." {
+			clean = path.Join(filepath.ToSlash(rel), clean)
+		}
+	}
+	root, err := os.OpenRoot(openAt)
 	if err != nil {
 		return
 	}
 	defer root.Close()
 
-	clean := path.Clean(loc)
 	info, err := root.Lstat(clean)
 	if err != nil {
 		if isEscapeErr(err) {
 			w.sink.EmitExtra(rulePathEscape, off,
 				"external_data location cannot be resolved inside the scan root",
-				map[string]string{"location": clip(loc), "root": clip(w.root), "resolved": "false"})
+				map[string]string{"location": clip(loc), "root": clip(openAt), "resolved": "false"})
+		}
+		return
+	}
+	if w.partial(clean) {
+		// A truncated copy of the referenced file cannot prove an extent: the bytes
+		// past the copy's end are exactly the ones a fetch did not carry.
+		if !w.partialNoted {
+			w.partialNoted = true
+			w.sink.EmitExtra(ruleExternalUnverified, off,
+				"external_data references a file this scan holds only as a truncated copy, so its offset and length cannot be verified",
+				map[string]string{"location": clip(loc), "resolved": "false"})
 		}
 		return
 	}

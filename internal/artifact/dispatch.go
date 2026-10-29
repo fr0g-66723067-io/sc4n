@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sync"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
@@ -65,12 +66,36 @@ type Session struct {
 	Root string
 	// DeepStats enables the informational weight-statistics rules.
 	DeepStats bool
+	// Partial names artifacts (paths as the report names them, or paths relative
+	// to Root) whose bytes are a truncated copy — a header slice of a larger file.
+	// A rule that would compare a declared extent against the file on disk must ask
+	// before it claims a violation: measured on BAAI/bge-m3, a 724 KB ONNX model
+	// whose sibling data file is 2.2 GB and was fetched as a 2 MiB slice produced
+	// 389 high findings that said its external_data lengths ran past the end.
+	Partial []string
 	// TopLimits is the budget as configured, used for nested containers as the
 	// starting point.
 	TopLimits limits.Limits
 
-	mu   sync.Mutex
-	seen map[string]string
+	mu      sync.Mutex
+	seen    map[string]string
+	partial map[string]bool
+}
+
+// IsPartial reports whether the named artifact is a truncated copy.
+func (s *Session) IsPartial(name string) bool {
+	if s == nil || len(s.partial) == 0 {
+		return false
+	}
+	if s.partial[name] {
+		return true
+	}
+	if s.Root != "" {
+		if rel, err := filepath.Rel(s.Root, name); err == nil && s.partial[rel] {
+			return true
+		}
+	}
+	return s.partial[filepath.Base(name)]
 }
 
 // NewSession returns a Session with an initialised memo.
@@ -80,6 +105,18 @@ func NewSession(c *report.Collector, root string, l limits.Limits) *Session {
 		Root:      root,
 		TopLimits: l,
 		seen:      map[string]string{},
+	}
+}
+
+// SetPartial marks artifacts as truncated copies. It is called before the walk
+// starts, so a rule can ask about a file it is not itself scanning.
+func (s *Session) SetPartial(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	s.partial = make(map[string]bool, len(names))
+	for _, n := range names {
+		s.partial[n] = true
 	}
 }
 

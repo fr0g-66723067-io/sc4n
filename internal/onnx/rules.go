@@ -100,6 +100,29 @@ var ruleExternalBounds = report.DefineRule(report.Rule{
 	Tags: []string{"onnx", "dos"},
 })
 
+// ruleExternalUnverified reports an external_data reference whose file this scan
+// holds only as a truncated copy, so an offset/length comparison would describe
+// the copy rather than the model.
+//
+// It exists because the alternative was measured: on BAAI/bge-m3, whose
+// onnx/model.onnx declares external_data lengths of up to 1 GB and whose
+// model.onnx_data is 2,266,820,608 bytes, a 2 MiB fetch of that data file turned
+// every extent check into a high finding that said the lengths ran past the end of
+// the file. 389 of them, on a model the Hub has flagged nothing in.
+var ruleExternalUnverified = report.DefineRule(report.Rule{
+	ID:         "SC4N-ONNX-EXTERNAL-UNVERIFIED",
+	Title:      "ONNX external_data reference could not be verified on a partial copy",
+	Severity:   report.SeverityInfo,
+	Confidence: report.ConfidenceLow,
+	CWE:        []string{"CWE-190"},
+	Class:      "resource",
+	Description: "external_data names a sibling data file that this scan holds only as a truncated copy (a " +
+		"header slice of a larger file), so the declared offset and length cannot be compared with the " +
+		"file's real size. Fetch the whole data file to have the extent checked; nothing about the " +
+		"artifact is implied by this finding.",
+	Tags: []string{"onnx", "coverage"},
+})
+
 // ruleExternalSymlink reports an external_data path whose final component is a
 // symlink.
 //

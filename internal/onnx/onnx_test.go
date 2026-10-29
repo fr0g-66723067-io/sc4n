@@ -980,3 +980,41 @@ func FuzzONNX(f *testing.F) {
 		}
 	})
 }
+
+// TestExternalDataResolvesRelativeToTheModel is the campaign's measurement pinned
+// as a test: BAAI/bge-m3/onnx/model.onnx references a sibling data file, and a
+// campaign that passes its scan root as the session root dropped all 389
+// offset/length checks because "model.onnx_data" was looked up at the top of the
+// corpus instead of beside the model.
+func TestExternalDataResolvesRelativeToTheModel(t *testing.T) {
+	model := func(location string, extra ...[]byte) []byte {
+		tensor := tcat(tv(2, 1), tstr(8, "w"), tbytes(1, pbLocalVarint(1)),
+			tbytes(13, tentry("location", location)))
+		for _, e := range extra {
+			tensor = append(tensor, tbytes(13, e)...)
+		}
+		tensor = append(tensor, tv(14, 1)...)
+		return tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tstr(2, "g")), tbytes(7, tbytes(5, tensor)))
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "org", "model", "onnx")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.onnx_data"), make([]byte, 8), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The artifact name is repo-relative (that is how the campaign names files) and
+	// the reference is relative to the model's own directory.
+	got := ids(parseFindings(t, "org/model/onnx/model.onnx",
+		model("model.onnx_data", tentry("offset", "0"), tentry("length", "16")), root))
+	if !got["SC4N-ONNX-EXTERNAL-BOUNDS"] {
+		t.Fatalf("the bounds check did not resolve the sibling file; findings %v", sortedKeys(got))
+	}
+	// And containment still holds: the same model referencing a file outside the
+	// root is a path escape, not a silent skip.
+	got = ids(parseFindings(t, "org/model/onnx/model.onnx", model("../../../../etc/passwd"), root))
+	if !got["SC4N-PATH-ESCAPE"] && !got["SC4N-ONNX-EXTERNAL-TRAVERSAL"] {
+		t.Fatalf("an escaping reference was not reported; findings %v", sortedKeys(got))
+	}
+}

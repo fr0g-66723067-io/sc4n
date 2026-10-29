@@ -16,6 +16,27 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/scan"
 )
 
+// partialFiles names the files this campaign fetched as a header slice. A rule
+// that compares a declared extent against the file on disk needs that fact: on
+// BAAI/bge-m3 the ONNX external-data check reported 389 high findings because a
+// 2.2 GB data file was present as a 2 MiB slice, and every one of them said the
+// model's lengths ran past the end of the file.
+func partialFiles(o Options) []string {
+	var fd FetchDoc
+	if err := readJSON(o.path(fileFetch), &fd); err != nil {
+		return nil
+	}
+	var out []string
+	for _, r := range fd.Repos {
+		for _, f := range r.Files {
+			if f.Status == "slice" {
+				out = append(out, r.ID+"/"+f.Path)
+			}
+		}
+	}
+	return out
+}
+
 // ScanResult is what ScanTree returns; scan.json holds the same report the
 // standalone `sc4n scan` writes.
 type ScanResult struct {
@@ -51,6 +72,7 @@ func ScanTree(ctx context.Context, o Options) (*ScanResult, error) {
 		Limits:      o.Limits,
 		Jobs:        o.ScanJobs,
 		Root:        repos,
+		Partial:     partialFiles(o),
 		MaxFindings: 0,
 	}
 	res, err := scan.Run(ctx, cfg)
