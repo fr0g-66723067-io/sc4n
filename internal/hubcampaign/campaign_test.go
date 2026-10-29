@@ -757,3 +757,52 @@ func TestListCampaignNeedsNoSearchQuery(t *testing.T) {
 		t.Fatal("a campaign with no selector and no list was accepted")
 	}
 }
+
+// TestCoverageTotalsMatchTheTable pins the header line of campaign.md against the
+// table under it. The header used to count only files that produced a finding, so
+// a campaign of 379 files could say "59 fully covered, 164 partially, 48 not
+// covered" — 271 — beside rows that summed to 379. Coverage is a fact about the
+// bytes: a file read whole and found clean is fully covered.
+func TestCoverageTotalsMatchTheTable(t *testing.T) {
+	pkl := []byte(pickleOSSystem)
+	readme := []byte("# clean\n\nA model with nothing in it.\n")
+	hub := &fakeHub{
+		repos: []string{"o/mixed"},
+		scans: map[string]string{
+			"o/mixed": `{"scansDone":true,"filesWithIssues":[{"path":"evil.pkl","level":"unsafe"}]}`,
+		},
+		siblings: map[string][]map[string]any{
+			"o/mixed": {
+				sibling("evil.pkl", int64(len(pkl))),
+				sibling("README.md", int64(len(readme))),
+			},
+		},
+		files: map[string][]byte{
+			"o/mixed/evil.pkl":  pkl,
+			"o/mixed/README.md": readme,
+		},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.Level = LevelAny
+	rep := runAll(t, o)
+
+	tot := rep.Totals
+	if tot.Files != 2 {
+		t.Fatalf("files = %d, want both rows at level any", tot.Files)
+	}
+	if tot.CoveredFull != 2 || tot.CoveredPartial != 0 || tot.NotCovered != 0 {
+		t.Fatalf("coverage totals = %d full, %d partial, %d none; want 2/0/0",
+			tot.CoveredFull, tot.CoveredPartial, tot.NotCovered)
+	}
+	if sum := tot.CoveredFull + tot.CoveredPartial + tot.NotCovered; sum != tot.Files {
+		t.Fatalf("coverage totals sum to %d, want Files=%d", sum, tot.Files)
+	}
+	md := campaignMarkdown(rep)
+	if !strings.Contains(md, "- flagged files: 2 — 2 fully covered, 0 partially, 0 not covered") {
+		t.Fatalf("header does not match its table:\n%s", md[:400])
+	}
+}

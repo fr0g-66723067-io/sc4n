@@ -339,17 +339,18 @@ func Join(o Options) (*CampaignReport, error) {
 
 			rep.Totals.Files++
 			rep.Totals.BySc4n[fr.Sc4n]++
+			// Coverage is how much of the file the scan read, which is a fact about
+			// the bytes and not about the verdict: a clean file that was read whole is
+			// fully covered. Counting only files with findings made the header
+			// disagree with its own table — 59 "fully covered" beside a table whose
+			// rows summed to 167 — and left the three numbers short of Files.
 			switch fr.Coverage {
 			case "none":
 				rep.Totals.NotCovered++
+			case "full":
+				rep.Totals.CoveredFull++
 			default:
-				if fr.Sc4n != "none" {
-					if fr.Coverage == "full" {
-						rep.Totals.CoveredFull++
-					} else {
-						rep.Totals.CoveredPartial++
-					}
-				}
+				rep.Totals.CoveredPartial++
 			}
 		}
 		sort.Slice(rr.Files, func(i, j int) bool { return rr.Files[i].Path < rr.Files[j].Path })
