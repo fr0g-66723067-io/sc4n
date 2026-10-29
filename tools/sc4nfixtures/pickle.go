@@ -285,3 +285,34 @@ func benignStateDict() []byte {
 		stop(),
 	)
 }
+
+// --- the header coincidence that is not a pickle ------------------------------
+// Torch writes each tensor's bytes as its own archive member, and a member whose
+// first float happens to begin with 0x80 0x02 looks like a protocol-2 stream. A
+// two-byte header test dispatched 1.5 KiB of such values to the pickle engine,
+// which reported twelve structural findings about numbers — on
+// sentence-transformers/all-MiniLM-L6-v2, the most-downloaded model on the Hub.
+// The bytes below are that shape, and the correct output is nothing at all.
+func init() {
+	register(contributor{
+		name:     "pickle-proto-coincidence",
+		fixtures: protoCoincidenceFixtures,
+		expectations: func() (map[string]expectation, map[string]expectation) {
+			return map[string]expectation{}, map[string]expectation{
+				"benign/proto_prefix_binary.bin": {
+					Notes: "A tensor member whose first two bytes are PROTO 2 and whose body " +
+						"is float32 values: not a pickle, and the correct output is no finding at " +
+						"all.",
+				},
+			}
+		},
+	})
+}
+
+func protoCoincidenceFixtures(f *fixtureSet) {
+	blob := []byte{0x80, 0x02}
+	for i := 0; i < 512; i++ {
+		blob = append(blob, 0x21, 0x3d, 0x60, 0xd9)
+	}
+	f.add("benign/proto_prefix_binary.bin", blob)
+}

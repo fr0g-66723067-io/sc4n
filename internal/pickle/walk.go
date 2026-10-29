@@ -69,6 +69,20 @@ type Stream struct {
 	Globals []*Global
 	// StructErrors counts structural violations found.
 	StructErrors int
+	// Truncations counts the subset of those that are only the artifact ending
+	// mid-argument, which is what a header slice of a real pickle looks like.
+	Truncations int
+	// NonOpcode counts bytes that are not opcodes at all: an unknown opcode, or a
+	// region of them. It is the one signal that decides "these bytes are not an
+	// opcode stream": a real pickle, however malformed, contains only valid
+	// opcodes, while the semantic violations (a missing MARK, a stack underflow)
+	// are what SC4N-PICKLE-STRUCT reports about a stream that is one.
+	NonOpcode int
+	// SawGlobal reports whether the walk resolved a name. It is the second piece of
+	// evidence a stream with semantic violations needs: a pickle that names a module
+	// is a pickle whose structure can be partly wrong, while a float buffer that
+	// happens to decode opcodes names nothing.
+	SawGlobal bool
 	// RequiresUnsafeLoader reports whether any opcode outside the weights-only
 	// accepted set appeared.
 	RequiresUnsafeLoader bool
@@ -243,6 +257,15 @@ const (
 	// maxProbeBytes bounds the sniffer's dry walk so that sniffing a multi-gigabyte
 	// pickle does not cost a whole extra pass.
 	maxProbeBytes = 256 << 10
+	// minSniffOps is how many opcodes a stream with a protocol byte must decode
+	// before the sniffer calls it a pickle when it has neither reached a STOP nor
+	// ended mid-argument. It stays at the value the prefix scan needs: a zip or a
+	// tar that carries a PROTO byte somewhere in its first mebibytes can produce a
+	// candidate that decodes a few opcodes by chance, and eight clean ones is the bar
+	// that keeps the pickle sniffer from stealing a container from the archive
+	// sniffer. Small truncated streams are claimed by the truncation rule instead,
+	// not by lowering this.
+	minSniffOps = 8
 	// maxResyncRun bounds how many consecutive undecodable bytes are scanned before
 	// the walk gives up on the region. It is large enough to cross the malformed
 	// opcode the field-observed PoCs place *after* the payload, and small enough
@@ -373,12 +396,47 @@ func (w *walker) probePickle(off int) bool {
 		structs: map[string]*structStat{},
 		once:    map[string]bool{},
 	}
-	probe.segment(off)
+	consumed, _ := probe.segment(off)
 	hasProto := w.data[off] == opPROTO
-	if probe.stream.StructErrors > 0 {
+	// A stream that does not declare its protocol must walk cleanly: its first byte
+	// is an ordinary letter (GLOBAL's 'c', MARK's '('), and so is the first byte of
+	// every Python source file. This is the gate that kept source, tar and zip
+	// artifacts out of this parser before the protocol path was loosened, and it
+	// stays exactly as strict for them.
+	if !hasProto && probe.stream.StructErrors > 0 {
+		return false
+	}
+	// A byte that is not an opcode is decisive: a pickle contains only opcodes, so a
+	// stream that holds one is binary data that happens to begin with a protocol
+	// byte. The measured case is a 1.5 KiB torch storage member of float32 values
+	// whose first two bytes are PROTO 2 — a two-byte header test dispatched it to
+	// this engine and the walk reported 11 structural findings about numbers. The
+	// same test kept a Python source, a tar and a zip — each of which carries a
+	// PROTO byte early — out of this parser.
+	if probe.stream.NonOpcode > 0 {
 		return false
 	}
 	if probe.stream.SawStop {
+		// A STOP is only evidence when the walk reached it coherently, or when the
+		// stream at least resolved a name: the fixtures that pin SC4N-PICKLE-STRUCT
+		// and the memo-alias rule are real pickles carrying a deliberate violation,
+		// and a storage member that decodes opcodes by coincidence names nothing.
+		if probe.stream.StructErrors > probe.stream.Truncations && !probe.stream.SawGlobal {
+			return false
+		}
+		return true
+	}
+	// A slice: the artifact ends mid-argument, so the only structural error is the
+	// truncation itself. This is the shape the fixtures pin — a 29-byte stream that
+	// decodes six opcodes and is then cut, and a 6-byte PROTO+FRAME stub — and it
+	// must stay claimable, because a payload in the part that is present is exactly
+	// what a header slice of a real checkpoint contains.
+	// Only at offset 0: a stream that begins the artifact and ends mid-argument is
+	// a slice of that stream. A candidate found later by the prefix scan is inside
+	// some other container, where "ends mid-argument" is just where the container's
+	// next record happens to fall — measured: a tar and a zip whose prefix carries a
+	// PROTO byte were claimed this way and lost their own parsers.
+	if off == 0 && hasProto && probe.stream.Truncations > 0 {
 		return true
 	}
 	// A huge valid pickle may not reach its STOP inside the probe budget. Accept
@@ -391,8 +449,14 @@ func (w *walker) probePickle(off int) bool {
 	// "unknown", which has no parser and no indicator pass, so an os.system gadget
 	// behind it produced an empty finding list. Measured on a 4-byte prefix plus a
 	// 300 KiB constant: 0 findings before, the critical gadget finding after.
-	truncatedByBudget := probe.limit < len(w.data) && probe.stream.Ops > 0
-	return hasProto && (probe.stream.Ops >= 8 || truncatedByBudget)
+	// The budget case is "the walk consumed the whole probe": a stream whose constant
+	// is larger than the probe stops at the edge with no structural error, which is
+	// what round 9's padded-constant miss looked like. A candidate that instead dies
+	// on an argument a third of the way in has proved nothing — the measured fluke is
+	// a candidate at offset 143483 of a 1.3 MB tensor blob that decodes PROTO 3 and a
+	// BINUNICODE8 declaring 11598068109612881803 bytes, and it must not be a pickle.
+	truncatedByBudget := probe.limit < len(w.data) && probe.stream.Ops > 0 && consumed >= probe.limit
+	return hasProto && (probe.stream.Ops >= minSniffOps || truncatedByBudget)
 }
 
 // segment walks one pickle, from start to its STOP. It returns the offset just
@@ -925,6 +989,7 @@ func (w *walker) globalValue(module, name string, off int64, stackBuilt bool) Va
 	}
 	w.globals[g.QualName()] = g
 	w.stream.Globals = append(w.stream.Globals, g)
+	w.stream.SawGlobal = true
 
 	if objectDtypeConditional[g.QualName()] {
 		// The dtype argument is decoded after this point, so the critical is
@@ -1247,6 +1312,11 @@ func (w *walker) structFinding(kind, detail string, off int64) {
 	// The count is maintained here rather than derived in flush, because a silent
 	// sniffing walk never reaches flush and its whole verdict is this number.
 	w.stream.StructErrors++
+	if kind == "truncated-argument" {
+		w.stream.Truncations++
+	} else if kind == "unknown-opcode" || kind == "undecodable-region" {
+		w.stream.NonOpcode++
+	}
 }
 
 // emitOnce emits a finding at most once per key for this stream.

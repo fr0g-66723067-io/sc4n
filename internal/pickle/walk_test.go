@@ -1179,3 +1179,37 @@ func TestNumpyReconstructCriticalRequiresObjectDtype(t *testing.T) {
 		})
 	}
 }
+
+// TestProbeRequiresOpcodeProgress pins the sniffer's evidence bar. A binary buffer
+// that opens with a protocol byte is not a pickle: a 1.5 KiB torch storage member
+// of float32 values begins with the two bytes PROTO 2 and was dispatched to this
+// engine by a two-byte header test, which produced twelve structural findings about
+// numbers on the most-downloaded model on the Hub.
+func TestProbeRequiresOpcodeProgress(t *testing.T) {
+	floatBlob := []byte{0x80, 0x02}
+	for i := 0; i < 512; i++ {
+		floatBlob = append(floatBlob, 0x21, 0x3d, 0x60, 0xd9)
+	}
+	// A truncated stream that begins at offset 0 is still a pickle: the artifact
+	// ends mid-argument, which is what a header slice of a real checkpoint is.
+	truncated := []byte{opPROTO, 4, opSHORT_BINUNICODE} // the length byte is cut off
+	// Python source: its first byte is an ordinary letter, so the protocol-0 path
+	// has to walk cleanly to claim it.
+	source := []byte("import os\nprint(os.getcwd())\n")
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{"float blob opening with PROTO 2", floatBlob, false},
+		{"truncated stream at offset 0", truncated, true},
+		{"python source", source, false},
+	} {
+		w := &walker{silent: true, lim: limits.Default(), data: tc.data, limit: len(tc.data),
+			mm: newMemo(len(tc.data)), globals: map[string]*Global{}, structs: map[string]*structStat{}, once: map[string]bool{}}
+		if got := w.probePickle(0); got != tc.want {
+			t.Errorf("%s: probePickle = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

@@ -1631,6 +1631,10 @@
       "expect": null,
       "notes": "A protocol-2 dict of strings with no global at all."
     },
+    "benign/proto_prefix_binary.bin": {
+      "expect": null,
+      "notes": "A tensor member whose first two bytes are PROTO 2 and whose body is float32 values: not a pickle, and the correct output is no finding at all."
+    },
     "benign/random.bin": {
       "expect": null,
       "notes": "fixed-seed pseudo-random bytes with no magic at any anchor: the universal layer must stay silent on it, so no magic scan may be driven by a byte pattern that ordinary data satisfies."

@@ -351,7 +351,6 @@ func init() {
 	// is really a model: see weakMagicSniffer.
 	RegisterSniffer("magic-weak", 55, sniffWeakMagic)
 	RegisterSniffer("tarkind", 90, sniffTar)
-	RegisterSniffer("pickle-proto", 80, sniffPickleHeader)
 	RegisterSniffer(textFallbackSniffer, -100, sniffText)
 
 	RegisterFormat(Info{
@@ -510,29 +509,6 @@ func sniffTar(s source.Source, l limits.Limits) (Format, bool) {
 	if bytes.Equal(b, []byte("ustar")) {
 		return FormatTar, true
 	}
-	return FormatUnknown, false
-}
-
-// sniffPickleHeader recognises the protocol markers that a pickle *must* start
-// with (PROTO for protocol >= 2). It is deliberately a low-priority, shape-only
-// check: internal/pickle registers a higher-priority sniffer that walks the whole
-// opcode stream, and a stream that fails that walk is not a pickle at all. The
-// gap this closes is the reverse case — a file whose first bytes look like a
-// pickle but that no walker accepts — so the result here is only ever a hint.
-func sniffPickleHeader(s source.Source, l limits.Limits) (Format, bool) {
-	b, err := s.Bytes(0, 2)
-	if err != nil || len(b) < 2 {
-		return FormatUnknown, false
-	}
-	if b[0] == 0x80 && b[1] >= 1 && b[1] <= 5 {
-		return FormatPickle, true
-	}
-	// Protocol 0/1 pickles have no PROTO prefix, and their first byte is an
-	// ordinary ASCII letter -- 'c' for GLOBAL, '(' for MARK, ']' for EMPTY_LIST.
-	// A file whose first byte is 'c' is far more likely to be source code than a
-	// pickle, so this sniffer deliberately does not claim those: internal/pickle
-	// registers a walk-based sniffer above it that accepts a protocol-0/1 stream
-	// only after decoding it to a clean STOP.
 	return FormatUnknown, false
 }
 
