@@ -45,8 +45,9 @@ func campaignMarkdown(rep *CampaignReport) string {
 	fmt.Fprintf(&b, "- tool: %s %s\n", rep.Tool.Name, rep.Tool.Version)
 	fmt.Fprintf(&b, "- universe: %d repos probed, %d selected at level %s\n",
 		rep.Campaign.Probed, rep.Campaign.Selected, rep.Campaign.Level)
-	fmt.Fprintf(&b, "- queries: %d search, %d tag, %d author\n",
-		len(rep.Campaign.Queries["search"]), len(rep.Campaign.Queries["tag"]), len(rep.Campaign.Queries["author"]))
+	fmt.Fprintf(&b, "- queries: %d search, %d tag, %d author, %d list\n",
+		len(rep.Campaign.Queries["search"]), len(rep.Campaign.Queries["tag"]),
+		len(rep.Campaign.Queries["author"]), len(rep.Campaign.Queries["list"]))
 	fmt.Fprintf(&b, "- flagged files: %d — %d fully covered, %d partially, %d not covered\n",
 		t.Files, t.CoveredFull, t.CoveredPartial, t.NotCovered)
 	fmt.Fprintf(&b, "- sc4n verdict per flagged file: critical %d, high %d, medium %d, low %d, info %d, none %d\n",
@@ -107,7 +108,13 @@ func campaignMarkdown(rep *CampaignReport) string {
 		}
 	}
 	if len(extras) > 0 {
-		b.WriteString("\n## Not flagged by the Hub, found by sc4n\n\n")
+		if rep.Campaign.Level == LevelAny {
+			// Every file in a list campaign is "not flagged": the heading has to
+			// say what the table actually is.
+			b.WriteString("\n## Files with high or critical findings\n\n")
+		} else {
+			b.WriteString("\n## Not flagged by the Hub, found by sc4n\n\n")
+		}
 		b.WriteString("| repo | file | sc4n | rules |\n|---|---|---|---|\n")
 		sort.Slice(extras, func(i, j int) bool {
 			if extras[i].repo != extras[j].repo {

@@ -24,6 +24,45 @@ type CandidatesFile struct {
 	Repos   []Candidate `json:"repos"`
 }
 
+// listQuery is the value candidates.json records when the universe came from
+// Options.Repos rather than a Hub query.
+const listQuery = "-repos-file"
+
+// listedCandidates turns an explicit repo list into candidates: order is kept
+// (the list is the ranking), duplicates and blanks are dropped, and every entry
+// carries the same reason so the file reads the same way a query-sourced one does.
+func listedCandidates(ids []string) []Candidate {
+	seen := make(map[string]bool, len(ids))
+	out := make([]Candidate, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, Candidate{ID: id, Why: []string{listQuery}})
+	}
+	return out
+}
+
+// writeListCandidates writes candidates.json from an explicit list. An explicit
+// list is the universe: the file records the list as its one query so it still
+// answers "where did this set come from", and the client is not consulted,
+// because the list is the input rather than a search result.
+func writeListCandidates(o Options) ([]Candidate, error) {
+	o = o.withDefaults()
+	if err := os.MkdirAll(o.Dir, 0o755); err != nil {
+		return nil, fmt.Errorf("hubcampaign: %w", err)
+	}
+	repos := listedCandidates(o.Repos)
+	file := CandidatesFile{Version: Version, Queries: []Sel{{Kind: "list", Value: listQuery}}, Repos: repos}
+	if err := writeJSON(o.path(fileCandidates), file); err != nil {
+		return nil, err
+	}
+	progress(o, "candidates: %d repos from %s", len(repos), listQuery)
+	return repos, nil
+}
+
 // Candidates enumerates the universe and writes candidates.json.
 //
 // A query that fails aborts the stage with the query named: a universe that
@@ -46,6 +85,9 @@ func Candidates(ctx context.Context, o Options) ([]Candidate, error) {
 			progress(o, "candidates: %d repos (cached, -refresh to recompute)", len(cached.Repos))
 			return cached.Repos, nil
 		}
+	}
+	if len(o.Repos) > 0 {
+		return writeListCandidates(o)
 	}
 
 	results := make([][]string, len(queries))
@@ -105,8 +147,12 @@ func query(s Sel, limit int) hubapi.Query {
 }
 
 // queries builds the ordered, deduplicated query list: the built-in universe
-// first, then the explicit selectors.
+// first, then the explicit selectors. An explicit repo list is its own universe,
+// so it is the one query and the search selectors are not required.
 func (o Options) queries() ([]Sel, error) {
+	if len(o.Repos) > 0 {
+		return []Sel{{Kind: "list", Value: listQuery}}, nil
+	}
 	var out []Sel
 	if o.UseDefaults {
 		for _, t := range DefaultTerms {
@@ -126,9 +172,9 @@ func (o Options) queries() ([]Sel, error) {
 		s.Kind = strings.TrimSpace(s.Kind)
 		s.Value = strings.TrimSpace(s.Value)
 		switch s.Kind {
-		case "search", "tag", "author":
+		case "search", "tag", "author", "list":
 		default:
-			return nil, fmt.Errorf("hubcampaign: query kind %q is not search, tag or author", s.Kind)
+			return nil, fmt.Errorf("hubcampaign: query kind %q is not search, tag, author or list", s.Kind)
 		}
 		if s.Value == "" {
 			return nil, errors.New("hubcampaign: query value is empty")
@@ -140,7 +186,7 @@ func (o Options) queries() ([]Sel, error) {
 		uniq = append(uniq, s)
 	}
 	if len(uniq) == 0 {
-		return nil, errors.New("hubcampaign: no queries; pass -search/-tag/-author or leave -defaults on")
+		return nil, errors.New("hubcampaign: no queries; pass -search/-tag/-author, -repos-file, or leave -defaults on")
 	}
 	return uniq, nil
 }

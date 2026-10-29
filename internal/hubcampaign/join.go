@@ -292,20 +292,34 @@ func Join(o Options) (*CampaignReport, error) {
 	for _, rf := range fd.Repos {
 		rr := RepoReport{ID: rf.ID, Status: rf.Status, Files: []FileReport{}, Extras: []ExtraReport{}}
 		flagged := map[string]bool{}
+		hubLevel := map[string]string{}
 		if v, ok := verdictByID[rf.ID]; ok {
 			for _, fi := range v.Files {
 				if fi.Level == o.Level {
 					flagged[fi.Path] = true
 				}
+				if prev, seen := hubLevel[fi.Path]; !seen || fi.Level < prev {
+					hubLevel[fi.Path] = fi.Level
+				}
 			}
 		}
+		// A verdict-level campaign reviews the files the Hub flagged at that
+		// level. A list campaign (LevelAny) reviews every file it fetched: the
+		// question is about the repos, and the Hub's own level for a file is
+		// carried into the row rather than deciding whether the row exists.
 		for _, ff := range rf.Files {
-			if !flagged[ff.Path] {
+			hub := o.Level
+			if o.Level == LevelAny {
+				hub = "none"
+				if l, ok := hubLevel[ff.Path]; ok {
+					hub = l
+				}
+			} else if !flagged[ff.Path] {
 				continue
 			}
 			fr := FileReport{
 				Path:     ff.Path,
-				HF:       o.Level,
+				HF:       hub,
 				Fetch:    ff.Status,
 				Coverage: coverage(ff.Status),
 				Format:   formats[rf.ID+"/"+ff.Path],

@@ -39,10 +39,11 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		out        = fs.String("out", "", "campaign directory (required)")
 		stage      = fs.String("stage", "all", "all|candidates|verdicts|fetch|scan|report")
 		searchFile = fs.String("search-file", "", "file of search terms, one per line ('#' comments)")
+		reposFile  = fs.String("repos-file", "", "file of repo ids, one per line; replaces the query universe")
 		defaults   = fs.Bool("defaults", true, fmt.Sprintf("include the built-in universe (%d terms, %d tags, %d authors)",
 			len(hubcampaign.DefaultTerms), len(hubcampaign.DefaultTags), len(hubcampaign.DefaultAuthors)))
 		limit      = fs.Int("limit", 100, "results per query (1..1000)")
-		level      = fs.String("level", "unsafe", "Hub verdict level that selects a repo: unsafe|suspicious|caution|error")
+		level      = fs.String("level", "unsafe", "which repos the campaign scans: a Hub verdict level (unsafe|suspicious|caution|error), or any for every candidate")
 		jobs       = fs.Int("jobs", 8, "concurrent Hub requests")
 		timeout    = fs.Duration("timeout", 30*time.Second, "request timeout; for a download, the longest stall tolerated")
 		api        = fs.String("api", "https://huggingface.co", "Hub base URL (https; http only for loopback)")
@@ -81,9 +82,9 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	switch *level {
-	case "unsafe", "suspicious", "caution", "error":
+	case "unsafe", "suspicious", "caution", "error", "any":
 	default:
-		fmt.Fprintf(stderr, "sc4n hub: -level %q is not unsafe, suspicious, caution or error\n", *level)
+		fmt.Fprintf(stderr, "sc4n hub: -level %q is not unsafe, suspicious, caution, error or any\n", *level)
 		return exitUsage
 	}
 	var gate *report.Severity
@@ -129,6 +130,20 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	var listed []string
+	if *reposFile != "" {
+		ids, lerr := readLines(*reposFile)
+		if lerr != nil {
+			fmt.Fprintf(stderr, "sc4n hub: -repos-file: %v\n", lerr)
+			return exitUsage
+		}
+		listed = ids
+		if len(listed) == 0 {
+			fmt.Fprintf(stderr, "sc4n hub: -repos-file %q names no repos\n", *reposFile)
+			return exitUsage
+		}
+	}
+
 	token, err := hubapi.Token(*tokenFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "sc4n hub: %v\n", err)
@@ -152,6 +167,7 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		Client:       client,
 		Queries:      queries,
 		UseDefaults:  *defaults,
+		Repos:        listed,
 		Limit:        *limit,
 		Level:        *level,
 		Jobs:         *jobs,

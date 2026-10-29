@@ -686,3 +686,74 @@ func appendScan(t *testing.T, o Options) Options {
 	}
 	return o
 }
+
+func TestCandidatesFromRepoList(t *testing.T) {
+	dir := t.TempDir()
+	o := Options{
+		Dir:   dir,
+		Tool:  report.Tool{Name: "sc4n", Version: "test"},
+		Repos: []string{"a/one", " b/two ", "a/one", "", "c/three"},
+	}
+	// The list branch must not consult the Hub, so it is exercised with no client:
+	// the list is the input, not a search result.
+	repos, err := writeListCandidates(o)
+	if err != nil {
+		t.Fatalf("writeListCandidates: %v", err)
+	}
+	var ids []string
+	for _, r := range repos {
+		ids = append(ids, r.ID)
+	}
+	want := []string{"a/one", "b/two", "c/three"}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("ids = %v, want %v (order kept, blanks and duplicates dropped)", ids, want)
+	}
+	var con CandidatesFile
+	if err := readJSON(filepath.Join(dir, fileCandidates), &con); err != nil {
+		t.Fatalf("read candidates.json: %v", err)
+	}
+	if len(con.Queries) != 1 || con.Queries[0].Kind != "list" || con.Queries[0].Value != listQuery {
+		t.Fatalf("queries = %+v, want the one list query", con.Queries)
+	}
+	if len(con.Repos) != 3 || con.Repos[0].Why[0] != listQuery {
+		t.Fatalf("repos = %+v", con.Repos)
+	}
+}
+
+func TestLevelAnySelectsEveryCandidate(t *testing.T) {
+	repos := []RepoVerdict{
+		{ID: "a/ok", Status: "ok", ScansDone: true, Files: []hubapi.FileIssue{{Path: "x.bin", Level: "unsafe"}}},
+		{ID: "b/unscanned", Status: "unscanned"},
+		{ID: "c/gated", Status: "gated", Detail: "manual approval"},
+		{ID: "d/error", Status: "error", Detail: "boom"},
+	}
+	for _, r := range repos {
+		if !hasLevel(r, LevelAny) {
+			t.Fatalf("%s not selected at level any", r.ID)
+		}
+	}
+	if got := selectedRepos(repos, "unsafe"); len(got) != 1 || got[0].ID != "a/ok" {
+		t.Fatalf("unsafe selected %+v, want only a/ok", got)
+	}
+	if got := selectedRepos(repos, LevelAny); len(got) != len(repos) {
+		t.Fatalf("any selected %d of %d", len(got), len(repos))
+	}
+	if !levelValid("any") {
+		t.Fatal("any is not a valid level")
+	}
+}
+
+func TestListCampaignNeedsNoSearchQuery(t *testing.T) {
+	o := Options{Repos: []string{"a/one"}, UseDefaults: false}
+	qs, err := o.queries()
+	if err != nil {
+		t.Fatalf("queries with a repo list: %v", err)
+	}
+	if len(qs) != 1 || qs[0] != (Sel{Kind: "list", Value: listQuery}) {
+		t.Fatalf("queries = %+v, want the one list query", qs)
+	}
+	// Without a list the default universe is still required.
+	if _, err := (Options{UseDefaults: false}).queries(); err == nil {
+		t.Fatal("a campaign with no selector and no list was accepted")
+	}
+}

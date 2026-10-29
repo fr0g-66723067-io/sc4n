@@ -118,8 +118,13 @@ func countLevel(repos []RepoVerdict, level string) int {
 	return n
 }
 
-// hasLevel reports whether any file of r carries the level.
+// hasLevel reports whether any file of r carries the level. LevelAny selects
+// every probed repo: the campaign's question is about the whole list, not about
+// what the Hub already flagged.
 func hasLevel(r RepoVerdict, level string) bool {
+	if level == LevelAny {
+		return true
+	}
 	for _, f := range r.Files {
 		if f.Level == level {
 			return true

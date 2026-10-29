@@ -83,6 +83,22 @@ account accepts the terms once (in a browser) and the same token then works,
 `manual approval` means only the repository owner can grant access, so no client
 retry can change the outcome.
 
+A campaign does not have to start from a search. `-repos-file` replaces the query
+universe with a list (one repo id per line, `#` comments), and `-level any` scans
+every listed repo instead of only the ones the Hub flagged, which is what a
+popularity round or a review of known-good models needs:
+
+```sh
+./sc4n hub -out top10 -repos-file top10.txt -level any -defaults=false \
+    -full-limit 128MiB -repo-budget 1GiB -total-budget 9GiB -stage all
+```
+
+`candidates.json` records the list as its one query, `verdicts.json` still records
+the Hub's own per-file level, and every fetched file appears in `campaign.json`
+with that level (or `none`) rather than being filtered out. Nothing about the
+selection rule is implicit: a verdict-level campaign reviews flagged files, an
+`any` campaign reviews every file it fetched.
+
 `sc4n scan` never touches the network. Only `hub` does, and it writes only under
 `-out`. The token is read from `-token-file`, `$HF_TOKEN`,
 `$HUGGING_FACE_HUB_TOKEN` or `$HF_HOME/token`; without one the campaign runs

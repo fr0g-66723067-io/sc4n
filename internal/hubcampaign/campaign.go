@@ -100,8 +100,16 @@ type Options struct {
 	UseDefaults bool
 	// Limit caps each query's result count (1..1000).
 	Limit int
-	// Level is the Hub verdict level that selects a repo.
+	// Level is the Hub verdict level that selects a repo. LevelAny selects every
+	// candidate: it exists for a campaign whose point is to scan a set of repos
+	// (a popularity list, a security review) rather than the repos the Hub has
+	// already flagged, and the Hub's own verdicts stay in verdicts.json either
+	// way.
 	Level string
+	// Repos is an explicit candidate list. When it is non-empty it replaces the
+	// query universe: candidates.json records the list as its one query and no
+	// search request is made.
+	Repos []string
 	// Jobs is the concurrency for Hub requests.
 	Jobs int
 	// Refresh recomputes a stage whose output file already exists.
@@ -170,10 +178,15 @@ func progress(o Options, format string, args ...any) {
 	fmt.Fprintf(o.Stderr, format+"\n", args...)
 }
 
-// levelValid reports whether s is one of the four Hub verdict levels.
+// LevelAny is the level that selects every candidate. It is not a Hub verdict:
+// no file carries it, so a file-level selection (FlaggedLimit) never matches and
+// every file is planned by size alone.
+const LevelAny = "any"
+
+// levelValid reports whether s is one of the four Hub verdict levels, or LevelAny.
 func levelValid(s string) bool {
 	switch s {
-	case "unsafe", "suspicious", "caution", "error":
+	case "unsafe", "suspicious", "caution", "error", LevelAny:
 		return true
 	}
 	return false
@@ -196,9 +209,9 @@ func (o Options) Validate() error {
 	}
 	for _, q := range o.Queries {
 		switch q.Kind {
-		case "search", "tag", "author":
+		case "search", "tag", "author", "list":
 		default:
-			return fmt.Errorf("hubcampaign: query kind %q is not search, tag or author", q.Kind)
+			return fmt.Errorf("hubcampaign: query kind %q is not search, tag, author or list", q.Kind)
 		}
 		if strings.TrimSpace(q.Value) == "" {
 			return errors.New("hubcampaign: query value is empty")
