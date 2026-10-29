@@ -661,6 +661,10 @@ var credentialPlaceholders = map[string]bool{
 	"xxxx": true, "xxxxx": true, "xxxxxxxx": true, "abc": true, "abcdef": true,
 	"1234": true, "12345": true, "123456": true, "1234567": true, "12345678": true,
 	"localhost": true, "local": true,
+	// Measured on the trending campaign (2026-10-28): a README's OpenAI example
+	// says api_key="unused", which was the one high finding on RecursiveSI/flint.
+	"unused": true, "unusedtoken": true, "nokey": true, "noauth": true,
+	"whatever": true, "anything": true, "foo": true, "bar": true, "baz": true,
 }
 
 // secretTokenHit builds the redacted hit for a token shape. Match carries the

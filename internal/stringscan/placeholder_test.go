@@ -24,6 +24,12 @@ func TestPlaceholderAssignmentsAreNotSecrets(t *testing.T) {
 		{`secret=xxx`, false},
 		{`secret="redacted"`, false},
 		{`token=12345678`, false},
+		// Measured on RecursiveSI/flint's README: "unused" is the value a
+		// local-server example uses, and it was the campaign's only secret.
+		{`api_key="unused"`, false},
+		{`api_key="unused-token"`, false},
+		{`api_key="foo"`, false},
+		{`api_key="unusedX9k2mQ7p"`, true},
 		{`password=hunter2`, true},
 		{`client_secret=a1b2c3d4e5f60718293a4b5c6d7e8f90`, true},
 		{`AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, true},
