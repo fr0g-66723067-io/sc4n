@@ -36,15 +36,20 @@ func craftedRegexBraces() []byte {
 // a webhook so the offset lookup (and not just the index build) is exercised.
 const craftedWebhook = "discord.com/api/webhooks/1/x"
 
-func craftedAddedTokens() []byte {
+func craftedAddedTokens() []byte { return craftedTokens(50000, true) }
+
+// craftedTokens builds an added_tokens document of n entries. With webhook the
+// last content is the URL, so the offset lookup is exercised and not just the
+// index build.
+func craftedTokens(n int, webhook bool) []byte {
 	var b strings.Builder
 	b.WriteString(`{"added_tokens":[`)
-	for i := range 50000 {
+	for i := range n {
 		if i > 0 {
 			b.WriteByte(',')
 		}
 		content := fmt.Sprintf("tok%d", i)
-		if i == 49999 {
+		if webhook && i == n-1 {
 			content = craftedWebhook
 		}
 		fmt.Fprintf(&b, `{"id":%d,"content":%q,"special":false}`, i, content)
@@ -77,9 +82,17 @@ func timeAnalyze(doc []byte) (int, time.Duration) {
 }
 
 // TestCraftedDocumentsAreLinear is the regression guard: the before numbers were
-// 23.5 s and 65.7 s, the after numbers are tens of milliseconds, so a generous
-// bound still fails on a return to the quadratic behaviour and does not flap on
-// a loaded host.
+// 23.5 s and 65.7 s, the after numbers are tens of milliseconds.
+//
+// An absolute wall-clock bound is the wrong instrument for that, and it was
+// measured flapping: 10 s passed on an idle host (1.95 s for the whole test) and
+// failed under `make test`'s 33-way parallelism (12.5 s for added-tokens) with no
+// change to this package. The shape of the regression is what matters, so the
+// guard measures the same document at two sizes and compares the times — a
+// doubling costs ~2x when the analysis is linear and ~4x when it is quadratic
+// (the before numbers were 16 s at 25k added tokens and 65.7 s at 50k, 4.1x). The
+// absolute bound stays as a backstop for a regression that is catastrophic at one
+// size, set well above the loaded-host measurement rather than at it.
 func TestCraftedDocumentsAreLinear(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -96,11 +109,31 @@ func TestCraftedDocumentsAreLinear(t *testing.T) {
 			if got != c.want {
 				t.Errorf("findings = %d, want %d", got, c.want)
 			}
-			if d > 10*time.Second {
+			if d > 45*time.Second {
 				t.Errorf("took %s for %d bytes; the analysis is meant to be linear", d, len(c.doc))
 			}
 		})
 	}
+
+	// The ratio half: one doubling, measured back to back under whatever load the
+	// host is under, so a busy machine inflates both numbers and cancels.
+	t.Run("doubling-is-not-quadratic", func(t *testing.T) {
+		const small = 25000
+		_, t1 := timeAnalyze(craftedTokens(small, false))
+		_, t2 := timeAnalyze(craftedAddedTokens())
+		if len(craftedTokens(small, false)) == 0 || len(craftedAddedTokens()) == 0 {
+			t.Fatal("empty document")
+		}
+		if t1 < 40*time.Millisecond {
+			// Too fast to time reliably; the absolute bound above already covers it.
+			t.Skipf("small document took %s, below the measurable floor", t1)
+		}
+		ratio := float64(t2) / float64(t1)
+		t.Logf("%d tokens %s, %d tokens %s, ratio %.2f", small, t1, 50000, t2, ratio)
+		if ratio > 3.0 {
+			t.Errorf("doubling the document multiplied the time by %.2f (%s -> %s); the analysis is meant to be linear", ratio, t1, t2)
+		}
+	})
 
 	// The webhook in the added-tokens document must still be located at its own
 	// token, not at the start of the document: the offset lookup has to survive
