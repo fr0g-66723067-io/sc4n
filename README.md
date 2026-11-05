@@ -38,10 +38,12 @@ headers, Python source, chat templates, cards — and never by running anything.
 
 `sc4n formats` prints the same table with the **analysis depth** of every format,
 including the ones that are deliberately recognised but not parsed. Every rule
-states its severity, confidence and class, and a CWE where one applies — 175 of the
-192 rules name a weakness; the 17 that do not are the ones where there is nothing
-to name, such as "the weights are all zero" or "the extent could not be verified":
-`sc4n rules`.
+states its severity, confidence and class, and a CWE where one applies. `sc4n
+rules` prints the live catalogue — 201 rules, 184 of them naming a weakness; the
+rest are the ones where there is nothing to name, such as "the weights are all
+zero" or "the extent could not be verified". The counts are not repeated here on
+purpose: they are generated from the rule definitions, and prose copies of them
+drifted twice.
 
 ## Quickstart
 
@@ -150,6 +152,7 @@ anonymously and reports the gated files instead of hiding them.
 | `-max-artifact`, `-max-depth`, `-max-decompress`, `-max-ratio` | override the resource caps in `docs/architecture.md` |
 | `-timeout DURATION` | bound the whole scan; a cancelled scan says so rather than presenting a partial result as complete |
 | `-root DIR` | containment root for path-shaped values (ONNX external data, SavedModel assets, symlinks) |
+| `-symlinks root\|follow` | what a symbolic link met during the walk may resolve to: `root` (default) refuses a target outside the scanned tree and records it as unreadable, naming the escape; `follow` reads it wherever it resolves |
 | `-hf-cache` | scan a Hugging Face download cache instead of paths: `snapshots/` symlinks are resolved into `blobs/`, each blob is scanned once no matter how many revisions point at it, and each artifact row carries the `refs/` names it is reachable from in its `revision` field |
 | `-hf-cache-dir DIR` | the cache root for `-hf-cache` (default `$HF_HOME/hub`, else `~/.cache/huggingface/hub`) |
 | `-deep-stats` | enable the informational weight-statistics rules (NaN/Inf, duplicates, outliers, entropy) |
@@ -257,6 +260,26 @@ GitHub code scanning caps an upload at 25 000 results and a 10 MB gzipped SARIF
 file. sc4n does not sample: if a run exceeds the cap, tighten with
 `-max-findings` and triage, or split the scan by directory.
 
+### Scanning an untrusted repository in the container
+
+The image is the recommended way to scan bytes you do not trust. `--network=none`
+is safe for `scan` (only `hub` dials the Hub and it is not used here),
+`--read-only` stops a write to the filesystem, and the process runs as an
+unprivileged user, so a bug in a parser reaches nothing the mounted scan root and
+the bounded `/tmp` do not already contain. The `--user` is what lets a bind mount
+whose files are not world-readable be read:
+
+```sh
+VERSION=v0.1.0 make docker
+docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/scan:ro" -v "$PWD/out:/out" \
+  sc4n:$(VERSION) scan -format sarif -out /out/sc4n.sarif -fail-on high /scan
+```
+
+`sc4n hub` needs the network and a writable `-out` directory, so it is run on the
+host, not with these flags.
+
 ## What sc4n does not do
 
 - **No dynamic analysis.** Anything that only manifests at load time is inferred
@@ -274,6 +297,16 @@ file. sc4n does not sample: if a run exceeds the cap, tighten with
   `google.golang.org/protobuf`.
 - **No signature verification.** Provenance (`model_signing`, `cosign verify`) is
   an external step; `docs/threat-model.md` explains how to combine it.
+- **No execution, and nothing it reads is executed.** sc4n opens artifacts,
+  parses them and reports; it spawns no process, and the scan path imports no
+  network package (only `sc4n hub` dials). Device nodes and FIFOs met during a walk
+  are recorded as unreadable instead of opened, decompression is bounded by the
+  caps in `docs/architecture.md`, and with the default `-symlinks root` a link
+  whose target resolves outside the scanned tree is not read at all.
+- **The container is the boundary for what those checks cannot see.** A hardlink
+  is a file, not a path, so a scan can read one that lives outside the tree; run
+  untrusted repositories in the image (below), where `--network=none
+  --read-only` and a non-root user bound what the process can reach at all.
 
 ## Documentation
 

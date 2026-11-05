@@ -678,6 +678,17 @@ unsigned.
     sniffer needs every byte under 0x80 — a container header otherwise passes the
     NUL-ratio test — so a UTF-16 document in a non-Latin script is read only when
     it carries a BOM. The format's capability note says the same.
+14. **Containment is a path check plus the container's filesystem view.**
+    `-symlinks root` (the default) refuses a link whose resolved target is outside
+    the scanned tree, `-root` bounds path-shaped values (ONNX external data,
+    SavedModel assets), and `os.Root` bounds the hf-cache and ONNX walks. None of
+    those can see a *hardlink*: it is a second name for a file, not a path that
+    resolves elsewhere, so a scan of a directory containing a hardlink to an
+    outside file reads that file. Nor can a path check bound a spill write or a
+    device node opened by name. The image is the boundary that covers the residue —
+    `docker run --network=none --read-only --tmpfs /tmp --user …` gives the process
+    nothing but the mounted scan root — which is why it is the documented way to
+    scan bytes you do not trust.
 
 ## 12. Mapping from rule to fixture
 
@@ -689,10 +700,13 @@ disjoint from `forbid` for every file on disk. The benign set
 (`testdata/fixtures/benign/`) is the false-positive gate: it must produce no
 `high` or `critical` finding at all.
 
-The gate covers the fixtures that exist, not the rule catalogue: 144 of the 192
-rules are named in `expectations.json`, and the rest — the limit rules, the
-parse-failure rules and the hf-cache collector rules, which need a crafted input or
-a crafted cache to reach — are covered by Go tests only. `sc4n rules` prints the
+The gate covers the fixtures that exist, not the rule catalogue: 140 rule IDs are
+named in `expectations.json` (count them with `jq -r
+'.fixtures|to_entries[]|(.value.expect//[])[],(.value.forbid//[])[]'
+testdata/fixtures/expectations.json | sort -u | wc -l`), and the rest — the limit
+rules, the parse-failure rules and the hf-cache collector rules, which need a
+crafted input or a crafted cache to reach — are covered by Go tests only. The
+catalogue's own size is whatever `sc4n rules` reports; it is not duplicated here. `sc4n rules` prints the
 live catalogue with each rule's CWE, and `sc4n formats` prints the per-format depth
 of analysis and the deliberate gaps.
 

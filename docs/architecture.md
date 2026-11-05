@@ -22,7 +22,7 @@ flowchart TD
     N --> O["policy: exit 0 / 1 / 2 / 3"]
 ```
 
-Two invariants hold across the whole graph:
+Three invariants hold across the whole graph:
 
 1. **Nothing executes.** No parser calls an interpreter, a decompressor binary or
    an extracted file; `source` is the only place bytes enter, and an archive member
@@ -36,6 +36,15 @@ Two invariants hold across the whole graph:
    exception-oriented programming (arXiv 2508.19774) and to the modelscan
    fail-open ZIP iterator (issue #354), both of which turn "I could not read
    this" into "this is clean".
+3. **Nothing is read from outside the scope it was given.** Every value that names
+   another file is resolved through a root before it is opened: `os.Root` for the
+   hf-cache expander and for ONNX external data and SavedModel assets, and
+   `-symlinks root` (the default) for a symbolic link met by the directory walk,
+   which records an out-of-root target as an unreadable path naming the escape
+   instead of reading it. A link that resolves inside the tree is followed, so the
+   `snapshots/<rev>/model.bin -> ../../blobs/<sha>` layout and a `current -> v3`
+   pointer both work. A path check cannot see a hardlink; the container image is
+   the boundary for that residue (see `docs/threat-model.md`, coverage limit 14).
 
 ## Package layout
 
