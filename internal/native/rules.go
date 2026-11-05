@@ -30,6 +30,28 @@ var (
 		Tags: []string{"native"},
 	})
 
+	// ruleNativeExecImports fires when a validated ELF's dynamic symbol table
+	// imports a process-control primitive. It is the one statement a symbol walk
+	// can make that a header check cannot: not "this is a program" but "this
+	// program will bind the calls that run another one".
+	ruleNativeExecImports = report.DefineRule(report.Rule{
+		ID:         "SC4N-NATIVE-EXEC-IMPORTS",
+		Title:      "Native executable imports process-control symbols",
+		Severity:   report.SeverityHigh,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-506"},
+		Class:      "executable",
+		Description: "A validated ELF imports system, popen, an exec* variant, fork, dlopen or ptrace in its " +
+			"dynamic symbol table. sc4n does not disassemble the binary: these are the names the dynamic " +
+			"loader will bind when it is loaded, which is the loader's own statement that the program can " +
+			"spawn a shell, execute a file or open another process's memory. A C extension that merely does " +
+			"arithmetic imports none of them, so the set separates a numerical library from a dropper. It is " +
+			"high rather than critical for the same reason SC4N-POLYGLOT-NATIVE is: loading the model does " +
+			"not run the member.",
+		Refs: []string{"https://cwe.mitre.org/data/definitions/506.html"},
+		Tags: []string{"native", "exec"},
+	})
+
 	// ruleNativeEmbeddedPayload fires on a second validated native header inside
 	// a native artifact. This is the self-extracting shape: one executable whose
 	// body carries another, which the outer program can drop and run.

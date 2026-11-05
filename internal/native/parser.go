@@ -17,6 +17,7 @@ package native
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
@@ -55,6 +56,16 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		ctx.Sink.EmitExtra(ruleNativeValid, 0,
 			"the artifact is a valid "+k.String()+" executable; sc4n does not disassemble it, and does not run it",
 			map[string]string{"kind": k.String()})
+		// The symbol walk is ELF-only: debug/elf is the only stdlib header parser
+		// that exposes imports, and a PE branch here would be code with no seed in
+		// the validity-oracle lab to check it against.
+		if kind == bytescan.NativeELF {
+			if names := polyglot.ExecImportNames(s, size, 0); len(names) > 0 {
+				ctx.Sink.EmitExtra(ruleNativeExecImports, 0,
+					"ELF imports process-control symbols: "+strings.Join(names, ", "),
+					map[string]string{"symbols": strings.Join(names, ","), "kind": k.String()})
+			}
+		}
 	}
 
 	emitEmbedded(ctx, s, size)

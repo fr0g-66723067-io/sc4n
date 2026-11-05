@@ -6,6 +6,8 @@ import (
 	"debug/macho"
 	"debug/pe"
 	"io"
+	"sort"
+	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
@@ -193,6 +195,70 @@ func ValidateNativeHeader(s source.Source, size, off int64) (bytescan.NativeKind
 		return kind, true
 	}
 	return kind, false
+}
+
+// ExecImportNames returns the dynamic symbols from the ELF header at off that
+// name process-control primitives, sorted and deduplicated, capped at maxExecNames.
+//
+// It is a symbol-table walk, not a disassembly: the names are what the dynamic
+// loader will bind when the binary is loaded, so the finding is a statement about
+// the loader, not about the code. debug/elf needs only SHT_DYNSYM and its linked
+// string table, both of which are in the section headers of any stripped binary.
+//
+// An error (or a non-ELF artifact) returns nil: an artifact that does not
+// validate as an executable is SC4N-POLYGLOT-MAGIC-ONLY's job, and a rule that
+// fired on a broken header would be reporting the parse, not the imports.
+func ExecImportNames(s source.Source, size, off int64) []string {
+	if off < 0 || off >= size {
+		return nil
+	}
+	f, err := elf.NewFile(io.NewSectionReader(s, off, size-off))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	syms, err := f.ImportedSymbols()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(syms))
+	var out []string
+	for _, sym := range syms {
+		name := sym.Name
+		// Versioned names read "system@GLIBC_2.2.5"; the version is a dynamic
+		// linker detail, the symbol is what matters.
+		if i := strings.IndexByte(name, '@'); i >= 0 {
+			name = name[:i]
+		}
+		if !execImports[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+		if len(out) >= maxExecNames {
+			break
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// maxExecNames bounds how many symbol names reach a finding. A statically linked
+// binary can import dozens; the first eight sorted are enough to identify the
+// shape and keep the evidence readable.
+const maxExecNames = 8
+
+// execImports is the set of imported symbols that make a native binary dangerous
+// to load in a process that trusts it. It is deliberately about *process
+// control*: allocation, math and I/O symbols say nothing, while spawning a
+// shell, executing a file or reading another process's memory are the primitives
+// a loader-time payload needs.
+var execImports = map[string]bool{
+	"system": true, "popen": true,
+	"execl": true, "execle": true, "execlp": true,
+	"execv": true, "execve": true, "execvp": true,
+	"fork": true, "vfork": true,
+	"dlopen": true, "ptrace": true,
 }
 
 // EachValidatedNative calls fn for every *validated* native header in b, with the

@@ -554,6 +554,12 @@
       ],
       "notes": "A bare universal (fat) Mach-O magic. The dispatcher recognised the magic but the magic walk did not, so the file produced no finding at all — not even the informational one a thin Mach-O gets from the same bytes. FAT_MAGIC is also the Java class-file magic, so the finding is informational, never 'validated executable'."
     },
+    "native_imports_system.so": {
+      "expect": [
+        "SC4N-NATIVE-EXEC-IMPORTS"
+      ],
+      "notes": "An ELF64 shared object whose .dynsym has two undefined imports, system and popen. debug/elf reads them without disassembling anything, and they are exactly what the dynamic loader binds at load time: a member that can spawn a shell."
+    },
     "notebook_b64.ipynb": {
       "expect": [
         "SC4N-CODE-NOTEBOOK-MAGIC",
@@ -1739,6 +1745,14 @@
         "SC4N-MODULES-REMOTE-MODULE"
       ],
       "notes": "The ordinary published sentence-transformers layout: entry 0 is the top-level Transformer with an empty path (the repository root) and the rest are bare subdirectories. Six of the 25 most-downloaded Hub models ship exactly this file and every one of them produced a false SC4N-MODULES-REMOTE-MODULE."
+    },
+    "benign/native_imports_benign.so": {
+      "expect": null,
+      "forbid": [
+        "SC4N-NATIVE-EXEC-IMPORTS",
+        "SC4N-POLYGLOT-MAGIC-ONLY"
+      ],
+      "notes": "The same ELF shape importing zlibVersion: a numerical extension's ordinary dependency. It must validate (no POLYGLOT-MAGIC-ONLY) and must not be called a process-control importer."
     },
     "benign/plain.zip": {
       "expect": null,
