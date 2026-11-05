@@ -458,6 +458,13 @@
       ],
       "notes": "The wrapper declares 48 bytes of f8 but the payload carries 47, the gap SC4N-JOBLIB-WRAPPER-MISMATCH exists to expose."
     },
+    "joblib_xz_pickle.joblib": {
+      "expect": [
+        "SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION",
+        "SC4N-JOBLIB-UNSCANNED-PAYLOAD"
+      ],
+      "notes": "A valid xz stream (`xz -t` accepts it) named .joblib, holding the builtins.eval(42) pickle from zlib_level2_eval.pkl.zlib. joblib.load's _detect_compressor reads the xz magic and decompresses before unpickling, so this file executes its payload on load while the scanner can only report that it did not look inside. The medium names the algorithm and the offset; the critical states the consequence for the loader."
+    },
     "joblib_zstd.joblib": {
       "expect": [
         "SC4N-FORMAT-EXTENSION-MISMATCH",

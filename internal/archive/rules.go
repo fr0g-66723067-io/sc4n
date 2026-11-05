@@ -148,6 +148,27 @@ var (
 		Refs: []string{"https://huggingface.co/blog/notable-models-scanned"},
 	})
 
+	// ruleJoblibUnscannedPayload fires for a .joblib whose stream is compressed
+	// with a coder sc4n cannot decode. Unlike the archive-wide medium above, this
+	// one is a loader escalation: joblib.load has a coder for exactly these
+	// algorithms, so the file the medium describes as "not unwrapped" is a file
+	// joblib will decompress and unpickle.
+	ruleJoblibUnscannedPayload = report.DefineRule(report.Rule{
+		ID:         "SC4N-JOBLIB-UNSCANNED-PAYLOAD",
+		Title:      "joblib container is compressed with a coder sc4n cannot read",
+		Severity:   report.SeverityCritical,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-502"},
+		Class:      "loader",
+		Description: "A file named .joblib is an xz, lzma or lz4 stream. joblib.dump pickles the object graph " +
+			"and joblib.load's own compressor detection reads all three, so this file is a pickle that a " +
+			"standard joblib.load call will decompress and deserialise — while the scanner could only report " +
+			"that it did not look inside. The medium SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION beside it carries " +
+			"the algorithm and the offset; this finding states the consequence for the loader.",
+		Refs: []string{"https://cwe.mitre.org/data/definitions/502.html"},
+		Tags: []string{"deserialization", "joblib"},
+	})
+
 	// ruleArchiveNestedCompression fires when a decompressed payload is itself
 	// compressed.
 	ruleArchiveNestedCompression = report.DefineRule(report.Rule{

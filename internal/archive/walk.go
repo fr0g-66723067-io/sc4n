@@ -9,6 +9,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -733,6 +734,41 @@ func emitUnsupportedFormat(ctx *artifact.Ctx, s source.Source, f artifact.Format
 	}
 	ctx.Sink.EmitExtra(ruleArchiveUnsupportedCompression, 0, ev,
 		map[string]string{"algorithm": alg, "format": f.String(), "offset": "0"})
+	emitJoblibUnscanned(ctx, c, alg, f)
+}
+
+// emitJoblibUnscanned escalates an undecodable .joblib from "the payload was
+// not scanned" to "joblib.load will load and unpickle this".
+//
+// The condition is deliberately narrow: the name must end in .joblib and the
+// coder must be one joblib itself detects. zstd is excluded because joblib 1.4.2
+// ships no zstd coder (a zstd-named-.joblib is already
+// SC4N-JOBLIB-WRAPPER-MISMATCH), and the legacy ZF framing is excluded because
+// joblib cannot read that without the old numpy_pickle format either.
+func emitJoblibUnscanned(ctx *artifact.Ctx, c Compressor, alg string, f artifact.Format) {
+	if c != CompressorXz && c != CompressorLzma && c != CompressorLz4 {
+		return
+	}
+	name := ctx.Sink.Artifact()
+	if !strings.EqualFold(filepath.Ext(name), ".joblib") {
+		return
+	}
+	ctx.Sink.EmitExtra(ruleJoblibUnscannedPayload, 0,
+		shortName(name)+" is an "+alg+" stream: joblib.load decompresses it and unpickles the result; "+
+			"the payload was not scanned",
+		map[string]string{"algorithm": alg, "loader": "joblib", "format": f.String()})
+}
+
+// shortName is the artifact's own last path segment, so a finding about
+// "model.joblib" does not read "/home/…/mutants/wrap-xz-joblib/model.joblib".
+func shortName(artifact string) string {
+	if i := strings.LastIndexByte(artifact, ':'); i >= 0 {
+		artifact = artifact[i+1:]
+	}
+	if i := strings.LastIndexByte(artifact, '/'); i >= 0 {
+		artifact = artifact[i+1:]
+	}
+	return artifact
 }
 
 // decompressedName strips a compression suffix from the artifact name so a nested
