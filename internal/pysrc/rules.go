@@ -273,10 +273,12 @@ var (
 		Confidence: report.ConfidenceMedium,
 		CWE:        []string{"CWE-494"},
 		Class:      "loader",
-		Description: "from_pretrained/hf_hub_download is called without a revision= argument (or with a " +
-			"revision that is not a 40-hex commit id). Without a pin the download follows the repository's " +
-			"default branch, so a later force-push changes which bytes are loaded. No revision could be " +
-			"resolved statically when the value is a variable, in which case this is not reported.",
+		Description: "from_pretrained/hf_hub_download is called with a literal model id and without a " +
+			"revision= argument (or with a revision that is not a 40-hex commit id). Without a pin the " +
+			"download follows the repository's default branch, so a later force-push changes which bytes " +
+			"are loaded. A call whose model argument is a variable is not reported: nothing in the source " +
+			"says which repository it will reach, so the finding would be about a loader function rather " +
+			"than about a download.",
 		Refs: []string{"https://cwe.mitre.org/data/definitions/494.html"},
 		Tags: []string{"loader", "supply-chain"},
 	})
@@ -1168,7 +1170,12 @@ func (a *analyzer) loaderRules(st []Token, calls []Call, stmtText string) {
 				a.emitAt(ruleLoaderPickleRemote, c.Off, "pickle load of a network-fetched value: "+callEvidence(a.src, c))
 			}
 		case dottedLast(c.Dotted) == "from_pretrained" || c.Dotted == "hf_hub_download":
-			if !a.hasRevision(c) {
+			// Only a literal model argument names a download. A bare variable —
+			// `AutoModel.from_pretrained(model_name)` in a training script — is
+			// loader code, not a claim about where this repository's weights come
+			// from; four sentence-transformers training scripts were reported for it
+			// on the benign corpus.
+			if a.modelArgIsLiteral(c) && !a.hasRevision(c) {
 				a.emitAt(ruleLoaderNoRevision, c.Off, "no pinned revision: "+callEvidence(a.src, c))
 			}
 			if a.isAutoFromPretrained(c) && a.localPathArg(c) {
@@ -1218,6 +1225,26 @@ func (a *analyzer) hasRevision(c Call) bool {
 	// A variable revision cannot be resolved statically; assume the author pinned
 	// it rather than reporting a false positive.
 	return true
+}
+
+// modelArgIsLiteral reports whether the call names its model with a string
+// literal, positionally or by keyword. Without one the call sites a loader
+// generically and no revision can be resolved from the text.
+func (a *analyzer) modelArgIsLiteral(c Call) bool {
+	if _, ok := a.stringArg(c, 0); ok {
+		return true
+	}
+	for _, k := range []string{"pretrained_model_name_or_path", "repo_id", "model_id", "model"} {
+		sp, ok := c.Kwargs[k]
+		if !ok {
+			continue
+		}
+		t := strings.TrimSpace(sp.Text(a.src))
+		if len(t) >= 2 && (t[0] == '\'' || t[0] == '"') && t[len(t)-1] == t[0] {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *analyzer) isAutoFromPretrained(c Call) bool {

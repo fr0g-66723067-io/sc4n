@@ -1841,6 +1841,13 @@
       "expect": null,
       "notes": "The pickle torch 2.x writes for one F32 tensor: torch._utils._rebuild_tensor_v2 (allowlisted), a (\"storage\", …) persistent id (the only shape the loader accepts), and opcodes that are all inside the weights-only accepted set. The correct output is no finding at all."
     },
+    "benign/train_script.py": {
+      "expect": null,
+      "forbid": [
+        "SC4N-LOADER-NO-REVISION"
+      ],
+      "notes": "A training script that calls AutoModel.from_pretrained(model_name) with a variable: loader code, not a claim about where this repository's weights come from. Four sentence-transformers train_script.py files on the benign corpus were reported twice each for this."
+    },
     "benign/truncated_plain.zip": {
       "expect": null,
       "notes": "A truncated zip (no central directory) whose only member is plain text: the partial-container rule is informational and nothing above it may fire."

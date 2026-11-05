@@ -240,6 +240,23 @@ func TestLoaderAllowPickle(t *testing.T) {
 
 func TestLoaderNoRevision(t *testing.T) {
 	wantRule(t, analyzeOK(t, "hf_hub_download(\"o/m\", \"f.bin\")\n"), "SC4N-LOADER-NO-REVISION")
+	wantRule(t, analyzeOK(t, "AutoModel.from_pretrained(\"o/m\")\n"), "SC4N-LOADER-NO-REVISION")
+}
+
+// TestLoaderVariableModelIsNotADownload: a call whose model argument is a
+// variable says nothing about which repository is reached, so it is not an
+// unpinned download. Four sentence-transformers training scripts were reported
+// for `AutoModel.from_pretrained(model_name)` on the benign corpus.
+func TestLoaderVariableModelIsNotADownload(t *testing.T) {
+	for _, src := range []string{
+		"AutoModel.from_pretrained(model_name)\n",
+		"AutoModel.from_pretrained(pretrained_model_name_or_path=cfg.model)\n",
+		"hf_hub_download(repo_id=args.repo, filename=\"w.bin\")\n",
+	} {
+		if got := analyzeOK(t, src); got["SC4N-LOADER-NO-REVISION"] {
+			t.Errorf("variable model argument reported as an unpinned download: %q", src)
+		}
+	}
 }
 
 func TestLoaderRevisionPinned(t *testing.T) {

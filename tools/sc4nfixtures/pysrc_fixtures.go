@@ -184,7 +184,15 @@ value = Inert()
 `)
 
 			// Benign: guarded loader with a pinned revision, no taint.
-			f.addText("benign/model.py", `import torch
+			f.addText("benign/train_script.py",
+		"from transformers import AutoModel, AutoTokenizer\n\n"+
+			"def build(cfg):\n"+
+			"    model_name = cfg.model_name\n"+
+			"    model = AutoModel.from_pretrained(model_name)\n"+
+			"    tok = AutoTokenizer.from_pretrained(model_name)\n"+
+			"    return model, tok\n")
+
+	f.addText("benign/model.py", `import torch
 from transformers import AutoModel
 
 REVISION = "0123456789abcdef0123456789abcdef01234567"
@@ -245,6 +253,12 @@ def load(path):
 						"published payload-generator shape, and the human-readable half of the pickle " +
 						"the engine reports when the dumped file is scanned"},
 			}, map[string]expectation{
+				"benign/train_script.py": {Forbid: []string{"SC4N-LOADER-NO-REVISION"},
+					Notes: "A training script that calls AutoModel.from_pretrained(model_name) with a " +
+						"variable: loader code, not a claim about where this repository's weights come " +
+						"from. Four sentence-transformers train_script.py files on the benign corpus were " +
+						"reported twice each for this.",
+				},
 				"benign/model.py": {Forbid: []string{"SC4N-LOADER-TORCH-UNSAFE", "SC4N-LOADER-NO-REVISION", "SC4N-LOADER-NO-LOCAL-ONLY", "SC4N-CODE-TAINT-EXEC", "SC4N-CODE-TAINT-SHELL", "SC4N-CODE-OBFUSCATION"},
 					Notes: "torch.load(weights_only=True) and a 40-hex revision pin must not be reported"},
 				"benign/clean.ipynb": {Forbid: []string{"SC4N-CODE-NOTEBOOK-MAGIC", "SC4N-CODE-TAINT-EXEC"},
