@@ -40,6 +40,14 @@ func init() {
 						"under .joblib would be loadable and exempt. The finding is the extension check's " +
 						"purpose, not a false positive.",
 				},
+				"zlib_level2_eval.pkl.zlib": {
+					Expect: []string{"SC4N-PICKLE-GLOBAL-CRITICAL"},
+					Forbid: []string{"SC4N-PARSE-FAILED"},
+					Notes: "A zlib stream at compression level 2 (header 78 5e) whose payload is " +
+						"builtins.eval(42). The built-in magic table lists only the 78 01|9c|da headers, " +
+						"so this file was not claimed at all and reported clean as \"unknown\" — a live " +
+						"recall miss on huntr-picklescan-compressed-joblib-poc.",
+				},
 			}, map[string]expectation{
 				"benign/joblib_compressed.joblib": {
 					Forbid: []string{
@@ -69,6 +77,24 @@ func joblibCompressionFixtures(f *fixtureSet) {
 	stream := nfJoblibP2("<f8", cat([]byte{bBININT1, 2}, []byte{bBININT1, 3}), nfPayload(make([]byte, 48)))
 	f.add("benign/joblib_compressed.joblib", jcZlib(stream))
 
+	// A zlib stream from a non-default compression level: the header is 78 5e
+	// instead of 78 9c, and the payload is a builtins.eval gadget. The magic table
+	// listed 78 01|9c|da only, so this reported clean as "unknown".
+	// The payload bytes are the ones huntr-picklescan-compressed-joblib-poc ships:
+	// proto 4 + FRAME, SHORT_BINUNICODE builtins/eval, STACK_GLOBAL, BINUNICODE
+	// "42", TUPLE1, REDUCE, STOP.
+	f.add("zlib_level2_eval.pkl.zlib", jcZlibLevel2([]byte{
+		0x80, 0x04, 0x95, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x8c, 0x08, 'b', 'u', 'i', 'l', 't', 'i', 'n', 's',
+		0x94,
+		0x8c, 0x04, 'e', 'v', 'a', 'l',
+		0x94,
+		0x93, 0x94,
+		0x8c, 0x02, '4', '2',
+		0x94,
+		0x85, 0x94, 0x52, 0x94, 0x2e,
+	}))
+
 	// The other side of the boundary: joblib 1.4.2 ships no zstd compressor
 	// (its magic table is \x78, \x1f\x8b, BZ, \xfd7zXZ, \x5d\x00, \x04\x22\x4d\x18
 	// and ZF), so a .joblib that is a zstd stream is not loadable by joblib.load and
@@ -95,6 +121,25 @@ func jcGzip(b []byte) []byte {
 	}
 	if err := w.Close(); err != nil {
 		panic("joblib fixture: gzip close: " + err.Error())
+	}
+	return buf.Bytes()
+}
+
+// jcZlibLevel2 wraps b in a zlib stream at level 2, whose FCHECK byte is 0x5e.
+// The built-in magic table lists the level-6 headers (78 01|9c|da) and missed
+// 78 5e entirely, so a zlib-compressed pickle from a non-default level reported
+// clean as "unknown" (huntr-picklescan-compressed-joblib-poc/compressed_joblib_marker.joblib).
+func jcZlibLevel2(b []byte) []byte {
+	var buf bytes.Buffer
+	w, err := zlib.NewWriterLevel(&buf, 2)
+	if err != nil {
+		panic("joblib fixture: zlib level 2: " + err.Error())
+	}
+	if _, err := w.Write(b); err != nil {
+		panic("joblib fixture: zlib write: " + err.Error())
+	}
+	if err := w.Close(); err != nil {
+		panic("joblib fixture: zlib close: " + err.Error())
 	}
 	return buf.Bytes()
 }

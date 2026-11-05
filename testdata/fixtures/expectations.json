@@ -1510,6 +1510,15 @@
         "SC4N-ARCHIVE-LINK"
       ],
       "notes": "A '../evil.txt' member (CWE-22) and a symlink member pointing at /etc/passwd (CWE-59): the zip_slip pair. sc4n never extracts, so these are reported from the directory metadata."
+    },
+    "zlib_level2_eval.pkl.zlib": {
+      "expect": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL"
+      ],
+      "forbid": [
+        "SC4N-PARSE-FAILED"
+      ],
+      "notes": "A zlib stream at compression level 2 (header 78 5e) whose payload is builtins.eval(42). The built-in magic table lists only the 78 01|9c|da headers, so this file was not claimed at all and reported clean as \"unknown\" — a live recall miss on huntr-picklescan-compressed-joblib-poc."
     }
   },
   "benign": {

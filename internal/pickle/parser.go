@@ -38,6 +38,17 @@ func init() {
 // source file opens with those letters too, so a pattern sniffer would classify
 // source as a pickle and produce a page of structural findings for every .py file
 // in a repository.
+// compressedHead reports whether b opens with a single-stream compressor frame:
+// RFC 1950 zlib (deflate in CMF's low nibble, FCHECK remainder zero) or the lzma
+// header. gzip, bzip2, xz, zstd and the 7z/rar signatures are claimed by the magic
+// table at a higher priority than this sniffer, so they need no check here.
+func compressedHead(b []byte) bool {
+	if len(b) >= 2 && b[0]&0x0f == 8 && (int(b[0])<<8|int(b[1]))%31 == 0 {
+		return true
+	}
+	return len(b) >= 3 && b[0] == 0x5d && b[1] == 0x00 && b[2] == 0x00
+}
+
 func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	size := s.Size()
 	if size < 2 || (l.MaxArtifactBytes > 0 && size > l.MaxArtifactBytes) {
@@ -46,6 +57,16 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	n := min(size, int64(prefixProbe))
 	head, err := s.Bytes(0, n)
 	if err != nil && len(head) < 2 {
+		return artifact.FormatUnknown, false
+	}
+	if compressedHead(head) {
+		// A zlib/lzma frame is opaque: the bytes a resync would find inside it are
+		// deflate output, not opcodes. The weak zlib/lzma magic sniffers sit below
+		// this one (a safetensors header can start 78 9c), so without this gate a
+		// real zlib-compressed pickle was claimed as a prefixed pickle — found at
+		// offset 7 through the compressed payload, reported as SC4N-PICKLE-PREFIX
+		// with its globals decoded from an accidental match, and never unwrapped.
+		// The compressor owns the dispatch decision for its own bytes.
 		return artifact.FormatUnknown, false
 	}
 	if !plausibleHead(head) {

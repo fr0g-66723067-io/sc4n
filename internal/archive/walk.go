@@ -769,6 +769,25 @@ type parser struct{}
 func (parser) Parse(ctx *artifact.Ctx, s source.Source) error { return Scan(ctx, s) }
 
 // sniffZip recognises a zip archive, including one with a prefix.
+// sniffZlib claims a stream whose two header bytes are a valid zlib frame: CM =
+// deflate in the low nibble of CMF and the FCHECK remainder zero. It exists
+// because the built-in magic table can only list a fixed set of FLG bytes, and it
+// listed three of the four a standard zlib emits.
+func sniffZlib(s source.Source, _ limits.Limits) (artifact.Format, bool) {
+	if s.Size() < 2 {
+		return artifact.FormatUnknown, false
+	}
+	b, err := s.Bytes(0, 2)
+	if len(b) < 2 {
+		_ = err
+		return artifact.FormatUnknown, false
+	}
+	if !zlibShape(b) {
+		return artifact.FormatUnknown, false
+	}
+	return artifact.FormatZlib, true
+}
+
 func sniffZip(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if looksZip(s, l) {
 		return artifact.FormatZip, true
@@ -782,6 +801,12 @@ func init() {
 	// higher-priority sniffer from those packages, and this one catches only a
 	// still-generic zip (including a prefixed archive the magic table misses).
 	artifact.RegisterSniffer("archive-zip", 60, sniffZip)
+	// zlib's built-in magic entry lists 78 01|9c|da, which is the set a level-6
+	// compressor and its neighbours emit; 78 5e (level 2-5) is equally valid and
+	// was not claimed at all, so a zlib-compressed pickle reported clean as
+	// "unknown". huntr-picklescan-compressed-joblib-poc/compressed_joblib_marker.joblib
+	// is exactly that: 45 bytes of zlib whose payload is builtins.eval(42).
+	artifact.RegisterSniffer("zlib-header", 82, sniffZlib)
 
 	p := parser{}
 	for _, f := range []artifact.Format{
