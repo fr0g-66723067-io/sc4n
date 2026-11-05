@@ -1082,3 +1082,25 @@ func TestSliceSniff(t *testing.T) {
 		t.Fatalf("impossible wire type sniff = %v; want not ONNX", f)
 	}
 }
+
+// TestStorageBlobIsNotAModel pins the false positive that required the
+// second-signal rule: a raw tensor-storage member of a torch checkpoint whose
+// first tag decodes as a plausible ir_version. It was dispatched as ONNX and
+// reported "no graph field" and "imports no operator set" — two medium findings
+// about bytes that are not a model.
+func TestStorageBlobIsNotAModel(t *testing.T) {
+	// archive/data/106 of Crylimystics/pickle-ball … epoch10.pt, first 208 bytes.
+	blob := []byte{
+		0x08, 0x38, 0x9d, 0x36, 0x09, 0x38, 0x9a, 0x36, 0xc2, 0x38, 0x99, 0x38,
+		0xc1, 0x36, 0xf6, 0x38, 0x1d, 0x35, 0xc5, 0x38, 0x73, 0x37, 0x3b, 0x38,
+	}
+	if f, ok := sniff(source.Mem("archive/data/106", blob), limits.Default()); ok {
+		t.Fatalf("a tensor storage blob sniffed as %v; want not ONNX", f)
+	}
+	// The same shape with an opset import is a model: a second ONNX signal is
+	// what separates the two.
+	model := tcat(tv(1, 7), tcat(pbLocalTag(8, 2), pbLocalVarint(4), []byte{0x0a, 0x02, 0x08, 0x0e}))
+	if f, ok := sniff(source.Mem("m.onnx", model), limits.Default()); !ok || f != artifact.FormatONNX {
+		t.Fatalf("ir_version + opset sniff = %v, %v; want ONNX", f, ok)
+	}
+}

@@ -113,6 +113,17 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	if !st.hasIRVersion {
 		w.structAt(0, "ModelProto has no ir_version field")
 	}
+	if !st.hasGraph && !st.hasOpset {
+		// One decision, one finding: bytes that carry neither a graph nor an opset
+		// import are not a ModelProto, and saying so twice (no graph, no opset) was
+		// two medium findings for one fact.
+		if st.sawGraphTag || st.sawOpsetTag {
+			w.structAt(0, "the bytes stop inside a field that a whole model carries, so this is a slice of a larger file rather than a malformed model (pass -partial if it is one)")
+			return nil
+		}
+		w.structAt(0, "the bytes open like a ModelProto but carry neither a graph nor an operator-set import, so this is not an ONNX model")
+		return nil
+	}
 	if !st.hasGraph {
 		w.structAt(0, "ModelProto has no graph field")
 	}
@@ -143,6 +154,15 @@ type modelShape struct {
 // decisive reports whether the shape is enough to tell ONNX from the other
 // protobuf-shaped formats (TF SavedModel, CoreML). A graph is; a lone
 // ir_version is not.
+// extraSignals reports whether any ONNX-specific field other than ir_version was
+// recognised, at any confidence: a graph field that is present but not
+// GraphProto-shaped, an opset import, metadata, functions, training info or
+// configuration. It is the evidence that the bytes are a ModelProto and not a
+// plausible ir_version tag in unrelated data.
+func (m modelShape) extraSignals() bool {
+	return m.graphSeen || m.hasOpset || m.hasMetadata || m.hasFunctions || m.hasTraining || m.hasConfig
+}
+
 func (m modelShape) decisive() bool {
 	return m.graphShaped || m.hasOpset || m.hasMetadata || m.hasFunctions || m.hasTraining || m.hasConfig
 }
@@ -180,14 +200,27 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 	if !ok {
 		// The walk stopped early. Only truncation can still be ONNX: an illegal
 		// tag or an impossible wire type is a different format's bytes.
-		if sh.truncated && sh.firstIR {
+		if sh.truncated && sh.firstIR && (sh.graphSeen || sh.hasOpset) {
 			return artifact.FormatONNX, true
 		}
 		return artifact.FormatUnknown, false
 	}
-	if sh.firstIR || sh.graphShaped {
+	if sh.decisive() {
 		return artifact.FormatONNX, true
 	}
+	if sh.ok && sh.firstIR && sh.fields <= 2 {
+		// The smallest legal ModelProtos: a lone ir_version field (a 2-byte header
+		// slice is exactly that), or ir_version plus one producer_name/doc_string.
+		return artifact.FormatONNX, true
+	}
+	if sh.ok && sh.firstIR && sh.extraSignals() {
+		// A complete walk with a second ONNX field but none decisive.
+		return artifact.FormatONNX, true
+	}
+	// Everything else that opens with a plausible ir_version is not a model: a raw
+	// tensor-storage blob hits that tag by chance, and claiming one as ONNX produced
+	// "no graph field" / "imports no operator set" on archive/data/106 of a torch
+	// checkpoint — medium structural findings about bytes that are not a model.
 	return artifact.FormatUnknown, false
 }
 
@@ -232,6 +265,26 @@ func sniffShape(r *reader, s source.Source) (modelShape, bool) {
 		if sp, known := modelFields[num]; known && !sp.kind.accepts(typ) {
 			m.ok = false
 			break
+		}
+		// Record the ONNX-specific tags the moment they are decoded, before the value
+		// is checked against the buffer. A header slice stops in the middle of the
+		// graph field: its declared length runs past the end, so a walk that only
+		// recorded the field after reading its value saw nothing at all and the slice
+		// was not recognised as ONNX. Presence is the evidence; the value decides
+		// only the decisive/shaped distinction below.
+		switch num {
+		case 7:
+			m.graphSeen = true
+		case 8:
+			m.hasOpset = true
+		case 14:
+			m.hasMetadata = true
+		case 20:
+			m.hasTraining = true
+		case 25:
+			m.hasFunctions = true
+		case 26:
+			m.hasConfig = true
 		}
 		if typ != protowire.BytesType {
 			if !r.skipValue(typ) {
@@ -282,6 +335,12 @@ type modelState struct {
 	hasIRVersion bool
 	hasGraph     bool
 	hasOpset     bool
+	// sawGraphTag and sawOpsetTag record that the tag itself was decoded, even
+	// when its declared length ran past the end of the bytes. A header slice stops
+	// exactly there, and "the file ends before the graph" is a different statement
+	// from "the file has no graph".
+	sawGraphTag bool
+	sawOpsetTag bool
 }
 
 // walker carries the per-artifact state: the budget counters, the containment
@@ -508,6 +567,7 @@ func (w *walker) walkModel(r *reader) modelState {
 				return st
 			}
 		case 7: // graph
+			st.sawGraphTag = true
 			bo, n, ok := r.bytesValue()
 			if !ok {
 				w.badWire(off, "graph")
@@ -516,6 +576,7 @@ func (w *walker) walkModel(r *reader) modelState {
 			st.hasGraph = true
 			w.walkGraph(newReader(w.s, bo, bo+n))
 		case 8: // opset_import
+			st.sawOpsetTag = true
 			bo, n, ok := r.bytesValue()
 			if !ok {
 				w.badWire(off, "opset_import")
