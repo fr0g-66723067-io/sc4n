@@ -485,3 +485,34 @@ func TestHFCacheScansEachBlobOnce(t *testing.T) {
 		t.Fatalf("the malformed ref was not rendered: %q", out.String())
 	}
 }
+
+// TestPartialFlagSuppressesSliceFindings: a caller who fetched a byte prefix of a
+// larger file has to be able to say so, or every extent check reports a violation
+// the truncation caused. The flag exists because the hub campaign had this
+// information internally and the CLI had no way to accept it.
+func TestPartialFlagSuppressesSliceFindings(t *testing.T) {
+	dir := t.TempDir()
+	// A ModelProto header whose graph field declares 1 MiB past the end of the file.
+	src := []byte{0x08, 0x07, 0x3a, 0x80, 0x80, 0x40}
+	src = append(src, make([]byte, 16)...)
+	p := filepath.Join(dir, "model.onnx")
+	if err := os.WriteFile(p, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scan := func(args ...string) string {
+		var out, errOut bytes.Buffer
+		code := run(append([]string{"scan", "-format", "json"}, append(args, dir)...), &out, &errOut)
+		if code != exitClean && code != exitFindings {
+			t.Fatalf("scan exited %d: %s", code, errOut.String())
+		}
+		return out.String()
+	}
+	plain := scan()
+	if strings.Contains(plain, `"SC4N-PARTIAL-SLICE"`) {
+		t.Fatalf("a whole-file scan reported a slice: %s", plain)
+	}
+	marked := scan("-partial", p)
+	if !strings.Contains(marked, `"SC4N-PARTIAL-SLICE"`) {
+		t.Fatalf("-partial did not report the slice: %s", marked)
+	}
+}

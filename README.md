@@ -152,6 +152,7 @@ anonymously and reports the gated files instead of hiding them.
 | `-max-artifact`, `-max-depth`, `-max-decompress`, `-max-ratio` | override the resource caps in `docs/architecture.md` |
 | `-timeout DURATION` | bound the whole scan; a cancelled scan says so rather than presenting a partial result as complete |
 | `-root DIR` | containment root for path-shaped values (ONNX external data, SavedModel assets, symlinks) |
+| `-partial PATH` | repeatable: the named path is a truncated copy of a larger file, so an extent check reports `SC4N-PARTIAL-SLICE` (info) instead of a violation caused by the truncation |
 | `-symlinks root\|follow` | what a symbolic link met during the walk may resolve to: `root` (default) refuses a target outside the scanned tree and records it as unreadable, naming the escape; `follow` reads it wherever it resolves |
 | `-hf-cache` | scan a Hugging Face download cache instead of paths: `snapshots/` symlinks are resolved into `blobs/`, each blob is scanned once no matter how many revisions point at it, and each artifact row carries the `refs/` names it is reachable from in its `revision` field |
 | `-hf-cache-dir DIR` | the cache root for `-hf-cache` (default `$HF_HOME/hub`, else `~/.cache/huggingface/hub`) |

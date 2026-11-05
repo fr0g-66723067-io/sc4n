@@ -37,6 +37,7 @@ type scanFlags struct {
 	hfCacheDir  string
 	symlinks    string
 	deepStats   bool
+	partial     []string
 	timings     bool
 	quiet       bool
 	color       bool
@@ -65,6 +66,10 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&f.stdin, "stdin", false, "scan one artifact from stdin")
 	fs.StringVar(&f.name, "name", "", "artifact name to use with -stdin")
 	fs.BoolVar(&f.deepStats, "deep-stats", false, "enable informational weight-statistics findings")
+	fs.Func("partial", "PATH whose bytes are a truncated copy of a larger file (repeatable); a rule that compares a declared extent against the file reports it as unverifiable instead of a violation", func(v string) error {
+		f.partial = append(f.partial, v)
+		return nil
+	})
 	fs.BoolVar(&f.timings, "timings", false, "include per-phase timings in the JSON output")
 	fs.BoolVar(&f.quiet, "quiet", false, "print only rule counts and the summary line (text only)")
 	fs.BoolVar(&f.color, "color", false, "force ANSI colour (text only; default: only on a terminal)")
@@ -144,6 +149,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg := scan.Config{
 		Paths:       paths,
+		Partial:     f.partial,
 		Symlinks:    symlinkPolicy,
 		Limits:      l,
 		Jobs:        f.jobs,
