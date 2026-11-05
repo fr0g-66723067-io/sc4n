@@ -86,15 +86,16 @@ func autoMapRule(ctx *artifact.Ctx, name string, data []byte, doc any) {
 		extra := map[string]string{"module": ref, "file": baseName(name)}
 		ev := "auto_map references " + ref
 		if repo := autoMapRepo(ref); repo != "" && len(refs) > 1 {
-			classes := make([]string, 0, len(refs))
-			for _, r := range refs {
-				classes = append(classes, autoMapClass(r))
-			}
 			ev = "auto_map loads code from " + repo + " in " + itoa(len(refs)) + " entries (" +
-				clip(strings.Join(classes, ", "), 200) + ")"
+				clip(strings.Join(autoMapClasses(refs), ", "), 200) + ")"
 			extra["repo"] = repo
 			extra["entries"] = itoa(len(refs))
 		} else if mod := moduleOfRef(ref); mod != "" {
+			if len(refs) > 1 {
+				ev = "auto_map loads code from the local module " + mod + " in " + itoa(len(refs)) +
+					" entries (" + clip(strings.Join(autoMapClasses(refs), ", "), 200) + ")"
+				extra["entries"] = itoa(len(refs))
+			}
 			if p, present := moduleExists(name, mod); present {
 				ev += "; the module file " + p + " exists in the scanned tree"
 			} else {
@@ -105,14 +106,36 @@ func autoMapRule(ctx *artifact.Ctx, name string, data []byte, doc any) {
 	}
 }
 
+// autoMapClasses names the classes a group of references resolves to, in the
+// order they appear and without repeating a class: two Auto* keys routinely point
+// at the same class, and "ArkttsModel, ArkttsModel" is not two entry points.
+func autoMapClasses(refs []string) []string {
+	seen := make(map[string]bool, len(refs))
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		c := autoMapClass(r)
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	return out
+}
+
 // autoMapKey groups references that resolve to the same code. A remote reference
-// is `owner/repo--module.Class`, so the repository is what is loaded; anything
-// else is a module path beside the artifact and is its own group.
+// is `owner/repo--module.Class`, so the repository is what is loaded. A local
+// reference names a module file beside the artifact, so the *module* is the unit:
+// LFM3 maps three Auto* classes to configuration_lfm3 and modeling_lfm3, which is
+// two files the loader will import, not three decisions.
 func autoMapKey(ref string) string {
 	if repo := autoMapRepo(ref); repo != "" {
 		return "repo:" + repo
 	}
-	return "module:" + ref
+	if mod := moduleOfRef(ref); mod != "" {
+		return "module:" + mod
+	}
+	return "entry:" + ref
 }
 
 // autoMapRepo returns the repository an `owner/repo--module.Class` reference

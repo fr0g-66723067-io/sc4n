@@ -518,3 +518,27 @@ func TestAutoMapRemoteIsReportedOnce(t *testing.T) {
 		t.Fatalf("Extra[entries] = %q, want 7", got[0].Extra["entries"])
 	}
 }
+
+// TestAutoMapLocalIsReportedPerModule pins the local half of the same contract: a
+// config that maps several Auto* classes to one module is one import decision for
+// that module, and the classes it names are listed once each.
+func TestAutoMapLocalIsReportedPerModule(t *testing.T) {
+	cfg := `{"auto_map":{"AutoModel":"modeling_lfm3.Lfm3Model",` +
+		`"AutoModelForCausalLM":"modeling_lfm3.Lfm3ForCausalLM",` +
+		`"AutoModelForCausalLM2":"modeling_lfm3.Lfm3Model",` +
+		`"AutoConfig":"configuration_lfm3.Lfm3Config"}}`
+	var local []report.Finding
+	for _, f := range scanBytes(t, "config.json", []byte(cfg), limits.Default()) {
+		if f.RuleID == "SC4N-CONFIG-AUTO-MAP" {
+			local = append(local, f)
+		}
+	}
+	if len(local) != 2 {
+		t.Fatalf("auto_map for two local modules produced %d findings, want 2: %+v", len(local), local)
+	}
+	for _, f := range local {
+		if strings.Count(f.Evidence, "Lfm3Model") > 1 {
+			t.Errorf("a repeated class is listed twice: %q", f.Evidence)
+		}
+	}
+}
