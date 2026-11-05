@@ -185,14 +185,14 @@ value = Inert()
 
 			// Benign: guarded loader with a pinned revision, no taint.
 			f.addText("benign/train_script.py",
-		"from transformers import AutoModel, AutoTokenizer\n\n"+
-			"def build(cfg):\n"+
-			"    model_name = cfg.model_name\n"+
-			"    model = AutoModel.from_pretrained(model_name)\n"+
-			"    tok = AutoTokenizer.from_pretrained(model_name)\n"+
-			"    return model, tok\n")
+				"from transformers import AutoModel, AutoTokenizer\n\n"+
+					"def build(cfg):\n"+
+					"    model_name = cfg.model_name\n"+
+					"    model = AutoModel.from_pretrained(model_name)\n"+
+					"    tok = AutoTokenizer.from_pretrained(model_name)\n"+
+					"    return model, tok\n")
 
-	f.addText("benign/model.py", `import torch
+			f.addText("benign/model.py", `import torch
 from transformers import AutoModel
 
 REVISION = "0123456789abcdef0123456789abcdef01234567"
