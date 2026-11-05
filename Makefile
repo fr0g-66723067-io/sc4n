@@ -20,13 +20,23 @@
 
 GO ?= go
 BIN ?= sc4n
+# The version a build stamps. `git describe` is the release form; a tree without
+# tags or git stamps its commit; no git at all stamps "dev", which is what the
+# binary reported for every build before this.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan
+.PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker
 
 all: vet test
 
 build:
-	$(GO) build -o $(BIN) ./cmd/sc4n
+	$(GO) build -trimpath -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/sc4n
+
+# The image is the documented way to scan an untrusted repository: --network=none
+# (the scan path has no dialer), --read-only and a non-root user bound what the
+# binary may read and write, which a path check alone cannot.
+docker:
+	docker build --build-arg VERSION=$(VERSION) -t $(BIN):$(VERSION) .
 
 vet:
 	$(GO) vet ./...

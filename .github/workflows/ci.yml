@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # vet + test + test -race, the same gate the Makefile runs locally.
+      - name: test
+        run: make test
+
+      # The committed fixture corpus is generated. A diff here means the
+      # generator and the corpus disagree, which the corpus test cannot see
+      # because it scans what is on disk.
+      - name: fixtures are generated, not hand-edited
+        run: |
+          make fixtures
+          git diff --exit-code testdata/fixtures
+
+      # The scan path is stdlib-only by design; these are the other release
+      # targets a user may build for.
+      - name: cross-build
+        run: |
+          for target in linux/arm64 darwin/arm64 windows/amd64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -trimpath -o /dev/null ./cmd/sc4n
+          done
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build the release image
+        run: docker build --build-arg VERSION=ci -t sc4n:ci .
+
+      - name: image reports its version
+        run: docker run --rm sc4n:ci version | grep -F 'sc4n ci'
+
+      # The gate the image exists for: the benign tree has no finding above info, so
+      # -fail-on low exits 0, and the critical fixture exits 1.
+      - name: a benign tree scans clean
+        run: |
+          docker run --rm --network=none --read-only --tmpfs /tmp \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD/testdata/fixtures/benign:/scan:ro" \
+            sc4n:ci scan -fail-on low /scan
+
+      - name: a critical finding fails the run
+        run: |
+          set +e
+          docker run --rm --network=none --read-only --tmpfs /tmp \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD/testdata/fixtures:/scan:ro" \
+            sc4n:ci scan -fail-on critical /scan/joblib_object_array.joblib 2>/dev/null
+          status=$?
+          set -e
+          test "$status" -eq 1
