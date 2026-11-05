@@ -449,7 +449,7 @@ func init() {
 
 	RegisterFormat(Info{
 		Format: FormatJSON, Magic: "leading { or [", Depth: DepthStructural,
-		Notes: "routing is name-dependent. The Hugging Face metadata names (config.json, adapter_config.json, modules.json, model_index.json, dataset_info.json) and the tokenizer files (tokenizer.json, tokenizer_config.json, special_tokens_map.json) are decoded with encoding/json and the metadata, tokenizer, chat-template and card-injection rule families run over the decoded document — every JSON value in the stream, not just the first. Any other JSON is scanned as raw text by the shared indicator engine.",
+		Notes: "routing is name-dependent. The Hugging Face metadata names (config.json, adapter_config.json, modules.json, model_index.json, dataset_info.json) and the tokenizer files (tokenizer.json, tokenizer_config.json, special_tokens_map.json) are decoded with encoding/json and the metadata, tokenizer, chat-template and card-injection rule families run over the decoded document — every JSON value in the stream, not just the first. Any other JSON is scanned as raw text by the shared indicator engine, with any vocabulary it holds (a top-level or model.vocab table, merges, added-token contents) left out of the prose pass: a tokenizer vocabulary is data, and judging it as prose reported code execution on every Qwen tokenizer and a Unicode anomaly on every multilingual one. The markdown note covers the document tier that .txt and .log files share.",
 	})
 	RegisterFormat(Info{
 		Format: FormatJSONLines, Magic: "one JSON value per line", Depth: DepthShallow,
@@ -469,7 +469,7 @@ func init() {
 	})
 	RegisterFormat(Info{
 		Format: FormatMarkdown, Magic: "text; extension .md", Depth: DepthStructural,
-		Notes: "YAML frontmatter (subset reader) plus the prompt-injection and Unicode-anomaly detectors, applied to model and dataset cards.",
+		Notes: "YAML frontmatter (subset reader) plus the prompt-injection and Unicode-anomaly detectors, applied to model and dataset cards and to the other prose documents a repository carries (.txt, .text, .log). Those share the card tier: the injection table, the invisible-character detectors and secret values run, while the rules about what a loader or a callable would do with a string do not, because nothing loads a .txt.",
 	})
 	RegisterFormat(Info{
 		Format: FormatYAML, Magic: "text; extension .yml/.yaml", Depth: DepthShallow,
