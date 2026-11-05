@@ -182,6 +182,23 @@ func TestTaintTemplate(t *testing.T) {
 	wantRule(t, got, "SC4N-LOADER-JINJA-FROMSTRING")
 }
 
+// TestSubprocessNonExecFunctionsAreNotSinks: subprocess carries an exception
+// class and a quoting helper, and neither runs a command. sglang's wheel was
+// reported critical twice for subprocess.CalledProcessError(returncode, command)
+// and subprocess.list2cmdline(cls.process.args).
+func TestSubprocessNonExecFunctionsAreNotSinks(t *testing.T) {
+	for _, src := range []string{
+		"import os, subprocess\nv = os.getenv(\"V\")\nraise subprocess.CalledProcessError(1, v)\n",
+		"import sys, subprocess\nargs = sys.argv\nprint(subprocess.list2cmdline(args))\n",
+	} {
+		if got := analyzeOK(t, src); got["SC4N-CODE-TAINT-SHELL"] {
+			t.Errorf("non-executing subprocess helper reported as a shell sink: %q", src)
+		}
+	}
+	got := analyzeOK(t, "import os, subprocess\nc = os.getenv(\"C\")\nsubprocess.run(c, shell=True)\n")
+	wantRule(t, got, "SC4N-CODE-TAINT-SHELL")
+}
+
 func TestNoTaintOnLiteralSink(t *testing.T) {
 	got := analyzeOK(t, "import os\nos.system(\"id\")\n")
 	if got["SC4N-CODE-TAINT-SHELL"] {

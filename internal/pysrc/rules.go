@@ -1173,7 +1173,16 @@ func isShellSink(d, last string) bool {
 		return true
 	}
 	if strings.HasPrefix(d, "subprocess.") {
-		return true
+		// The execution functions only. `subprocess.CalledProcessError(...)` and
+		// `subprocess.list2cmdline(...)` are an exception constructor and a quoting
+		// helper: neither runs anything, and both were reported as critical
+		// SC4N-CODE-TAINT-SHELL findings on sglang's wheel.
+		switch last {
+		case "run", "call", "check_call", "check_output", "Popen",
+			"getoutput", "getstatusoutput", "getstatus_output":
+			return true
+		}
+		return false
 	}
 	switch d {
 	case "pty.spawn", "pty.openpty", "commands.getoutput", "commands.getstatusoutput", "os.fork":
