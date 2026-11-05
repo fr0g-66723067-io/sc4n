@@ -166,6 +166,39 @@ func EmitString(sink *report.Sink, base int64, s string) {
 	EmitStringKind(sink, base, s, KindText)
 }
 
+// Span is a half-open byte range [Start, End) in a buffer.
+type Span struct{ Start, End int64 }
+
+// EmitExcept is Emit with byte ranges left out of the report.
+//
+// It exists for a document that is configuration in one region and data in
+// another: a tokenizer.json carries its vocabulary, a table of token strings a
+// tokenizer legitimately fills with joiners, soft hyphens and ordinary words such
+// as `subprocess`, beside the pre_tokenizer patterns and normalizer rules that are
+// worth judging. Reporting the vocabulary as prose manufactured a code-execution
+// finding on every Qwen tokenizer and a Unicode-anomaly finding on every
+// multilingual one. The spans are the data regions, so the caller keeps exact
+// offsets and one engine pass rather than decoding strings and re-deriving where
+// each one sat.
+func EmitExcept(sink *report.Sink, base int64, b []byte, except []Span) {
+	for _, h := range Scan(b) {
+		if inSpan(except, h.Off, h.Off+int64(len(h.Match))) {
+			continue
+		}
+		emit(sink, base, h)
+	}
+}
+
+// inSpan reports whether the half-open range [from, to) overlaps any span.
+func inSpan(spans []Span, from, to int64) bool {
+	for _, s := range spans {
+		if from < s.End && s.Start < to {
+			return true
+		}
+	}
+	return false
+}
+
 // EmitKind is Emit with an explicit context tier.
 func EmitKind(sink *report.Sink, base int64, b []byte, k Kind) {
 	for _, h := range Scan(b) {

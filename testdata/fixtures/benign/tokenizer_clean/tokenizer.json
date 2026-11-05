@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "added_tokens": [{"id": 0, "content": "<pad>", "special": true}],
+  "normalizer": {"type": "Lowercase"},
+  "pre_tokenizer": {"type": "Whitespace"},
+  "decoder": {"type": "WordPiece", "prefix": "##", "cleanup": true},
+  "model": {
+    "type": "WordPiece",
+    "unk_token": "[UNK]",
+    "continuing_subword_prefix": "##",
+    "max_input_chars_per_word": 100,
+    "vocab": {"[UNK]": 0, "[CLS]": 1, "hello": 2, "world": 3}
+  }
+}

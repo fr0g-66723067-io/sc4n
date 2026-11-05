@@ -47,6 +47,10 @@
       ],
       "notes": "A 2 MiB header slice of a torch checkpoint: one local file header for archive/data.pkl with the data-descriptor flags torch writes, the pickle, and no central directory. Recovering the member from the local header is what makes the pickle visible; the artifact is reported as a partial container so a clean slice is not read as a clean file."
     },
+    "benign/tokenizer_clean/tokenizer.json": {
+      "expect": null,
+      "notes": "An ordinary BPE tokenizer with no vocabulary anomaly and no RE2-hostile pattern: a clean tokenizer must not gain a finding from the vocabulary pass."
+    },
     "bin_gzip.bin": {
       "expect": [
         "SC4N-FORMAT-EXTENSION-MISMATCH"
@@ -1251,6 +1255,41 @@
         "SC4N-TOKENIZER-REDOS"
       ],
       "notes": "A tokenizer.json whose pre_tokenizer uses a lookahead and whose normalizer uses a nested quantifier. Both are unsupported by RE2 and catastrophic under Python's backtracking re/regex (CVE-2024-12720 / CVE-2025-2099 / CVE-2025-3263 / CVE-2025-5197, CWE-1333)."
+    },
+    "tokenizer_vocab/tokenizer.json": {
+      "expect": [
+        "SC4N-TOKENIZER-REDOS"
+      ],
+      "forbid": [
+        "SC4N-METADATA-CODE",
+        "SC4N-UNICODE-ANOMALY"
+      ],
+      "notes": "A BPE tokenizer whose vocabulary holds the token `subprocess` and a token carrying a bidi override, plus a pre_tokenizer pattern that backtracks catastrophically. The vocabulary is data and is not judged as prose; the pattern is configuration and is still reported."
+    },
+    "tokenizer_vocab/unigram.json": {
+      "expect": null,
+      "forbid": [
+        "SC4N-METADATA-CODE",
+        "SC4N-UNICODE-ANOMALY"
+      ],
+      "notes": "A sentencepiece unigram vocabulary: the tokens sit in a top-level `vocab` list of [token, score] pairs, which is a different shape from tokenizer.json's `model.vocab` object."
+    },
+    "tokenizer_vocab/vocab.json": {
+      "expect": null,
+      "forbid": [
+        "SC4N-METADATA-CODE",
+        "SC4N-UNICODE-ANOMALY"
+      ],
+      "notes": "A flat {token: id} table with no marker for where the table starts, so the whole document is vocabulary data: only the reachable-secret tier applies."
+    },
+    "tokenizer_vocab_control/tokenizer.json": {
+      "expect": [
+        "SC4N-METADATA-CODE"
+      ],
+      "forbid": [
+        "SC4N-UNICODE-ANOMALY"
+      ],
+      "notes": "The positive control: the same vocabulary token `subprocess` is suppressed, while an indicator outside the vocabulary (the normalizer chain) is still reported at its own offset. Proves the suppression is scoped to the table."
     },
     "torch_7z.pt": {
       "expect": [

@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "added_tokens": [{"id": 0, "content": "<pad>", "special": true}],
+  "normalizer": {"type": "Sequence", "normalizers": [{"type": "Prepend", "prepend": "eval("}]},
+  "pre_tokenizer": {"type": "Whitespace"},
+  "model": {
+    "type": "BPE",
+    "unk_token": "<unk>",
+    "vocab": {"<unk>": 0, "subprocess": 1},
+    "merges": []
+  }
+}

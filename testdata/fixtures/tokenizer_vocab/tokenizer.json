@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {"id": 0, "content": "<pad>", "special": true}
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Sequence",
+    "pretokenizers": [
+      {"type": "Split", "pattern": {"Regex": "(\\w+)+"}, "behavior": "Isolated"}
+    ]
+  },
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": "<unk>",
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": null,
+    "fuse_unk": false,
+    "vocab": {"<unk>": 0, "subprocess": 1, "a‬b": 2, "Ġt": 3},
+    "merges": ["a b", "Ġ t"]
+  }
+}

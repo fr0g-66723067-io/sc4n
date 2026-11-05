@@ -221,13 +221,13 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 			tokenizer.AnalyzeJSON(ctx.Sink, 0, name, data)
 		}
 		chatTemplateRule(ctx, name, data)
-		stringscan.Emit(ctx.Sink, 0, data)
+		emitTokenizerDocument(ctx, data)
 	case base == "tokenizer_config.json" || base == "special_tokens_map.json":
 		if !truncated {
 			tokenizer.AnalyzeJSON(ctx.Sink, 0, name, data)
 		}
 		chatTemplateRule(ctx, name, data)
-		stringscan.Emit(ctx.Sink, 0, data)
+		emitTokenizerDocument(ctx, data)
 	case base == "chat_template.json" || base == "added_tokens.json":
 		// chat_template.json is the processor-side document that carries the same
 		// templates tokenizer_config.json does (MiniMax-H3's FL2VA/processor/
@@ -238,6 +238,16 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 			chatTemplateRule(ctx, name, data)
 		}
 		stringscan.Emit(ctx.Sink, 0, data)
+	case base == "vocab.json":
+		// vocab.json is a flat {token: id} table with nothing else in it, so the
+		// whole document is vocabulary data and only the reachable-secret tier
+		// applies. Its tokens are ordinary words, including `subprocess`; reading
+		// them as prose reported code execution on Qwen3-0.6B and Qwen3-14B.
+		stringscan.EmitKind(ctx.Sink, 0, data, stringscan.KindSecrets)
+	case base == "unigram.json":
+		// A sentencepiece unigram vocabulary: a "type"/"unk_id" header and the
+		// table itself, which VocabSpans locates.
+		emitTokenizerDocument(ctx, data)
 	case isHFMetaName(base):
 		hfMeta(ctx, name, base, data, truncated)
 	case base == ".gitattributes":
@@ -253,6 +263,17 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 // so hfmeta.go can scan a truncated document's prefix without importing the
 // engine's helpers in two spellings.
 func stringscanBytes(ctx *artifact.Ctx, data []byte) { stringscan.Emit(ctx.Sink, 0, data) }
+
+// emitTokenizerDocument runs the shared indicator engine over a tokenizer
+// document with its vocabulary left out. A vocabulary is a table of every token
+// the model can emit — byte-level BPE fills it with joiners, soft hyphens and
+// bidi marks, and words such as `subprocess` are tokens like any other — so
+// judging it as prose reports ordinary data as hostile. The configuration around
+// it (pre_tokenizer patterns, normalizer rules, added-token names) is still
+// scanned at exact offsets, because that part is what the loader acts on.
+func emitTokenizerDocument(ctx *artifact.Ctx, data []byte) {
+	stringscan.EmitExcept(ctx.Sink, 0, data, tokenizer.VocabSpans(data))
+}
 
 // readText reads the artifact's bytes up to MaxStringBlob. A larger artifact is
 // not truncated silently: SC4N-LIMIT-STRING is emitted with the observed size,
