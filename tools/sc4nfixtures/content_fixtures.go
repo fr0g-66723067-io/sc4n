@@ -29,6 +29,7 @@ func init() {
 				},
 				"content_auto_map/config.json": {
 					Expect: []string{"SC4N-CONFIG-AUTO-MAP"},
+					Forbid: []string{"SC4N-STRING-LOADER-FLAG"},
 					Notes: "A config.json whose auto_map imports modeling_x.CustomModel. The loader " +
 						"executes that module when trust_remote_code is set, and the module file is not " +
 						"present beside the config, which the evidence states. Reproduces the " +

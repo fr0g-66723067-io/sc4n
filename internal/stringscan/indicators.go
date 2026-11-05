@@ -79,6 +79,16 @@ const (
 	// knows it is reading a template; the generic metadata rule cannot tell it
 	// from an injection, and reporting both is a duplicate with a worse verdict.
 	KindTemplate
+	// KindCard applies every rule except the four that describe what a *loader or
+	// a callable* would do with the text: the code indicator, the loader flag, the
+	// decoder pairing and the credential reference. A model card is documentation.
+	// Its code blocks legitimately contain `eval(`, `trust_remote_code=True`,
+	// `os.environ["GITHUB_TOKEN"]`, `urllib.request` and `subprocess`; the timm and
+	// sentence-transformers cards on the Hub hold all of them. The card's own
+	// intent is judged by SC4N-CARD-INJECTION/-HIDDEN/-INVISIBLE/-COMMENT and the
+	// injection table, which stay on, and a *secret value* is still a secret
+	// wherever it appears.
+	KindCard
 )
 
 // tier is which family a rule belongs to, for the Kind filter.
@@ -106,6 +116,19 @@ var ruleTiers = map[*report.Rule]tier{
 	ruleEICAR:       tierSecret,
 }
 
+// cardExcluded are the rules KindCard leaves out: each one reports a value the
+// loader or a callable will act on, which is what a *configuration* file means by
+// the same text and what a card only documents. Keeping the list here rather than
+// adding a third tier keeps tierOf's meaning ("is this a reachable secret")
+// intact: ruleCredential is genuinely a secret-bearing rule and must stay in the
+// KindSecrets tier, it is only its *usage* reading that a card does not support.
+var cardExcluded = map[*report.Rule]bool{
+	ruleMetadataCode: true,
+	ruleLoaderFlag:   true,
+	ruleDecoder:      true,
+	ruleCredential:   true,
+}
+
 func tierOf(r *report.Rule) tier {
 	if t, ok := ruleTiers[r]; ok {
 		return t
@@ -124,6 +147,8 @@ func (k Kind) allows(h Hit) bool {
 		return tierOf(h.Rule) == tierSecret
 	case KindTemplate:
 		return h.Rule != ruleInjection
+	case KindCard:
+		return !cardExcluded[h.Rule]
 	default:
 		return true
 	}
@@ -450,11 +475,18 @@ func buildIndicatorTable() []indicator {
 	)
 
 	// Loader flags that turn a data file into a code-loading path.
+	// `auto_map` is deliberately absent: the bare field name is the *key* of every
+	// config that uses remote code, and SC4N-CONFIG-AUTO-MAP already reports that
+	// decision once per referenced repository. Reporting the key again here said
+	// nothing the config rule had not said, at a worse location (config.json:147
+	// on nomic-embed-text-v1.5). `trust_remote_code` likewise only counts with the
+	// value that turns it on, as every other flag in this table does.
 	add(
 		ruleLoaderFlag, "loader-flag", false,
-		"trust_remote_code", "allow_pickle=true", "allow_pickle=True",
+		"trust_remote_code=true", "trust_remote_code=True",
+		"allow_pickle=true", "allow_pickle=True",
 		"weights_only=false", "weights_only=False", "safe_mode=false",
-		"yaml.unsafe_load", "yaml.load(", "auto_map", "load_in_8bit",
+		"yaml.unsafe_load", "yaml.load(", "load_in_8bit",
 	)
 
 	// Prompt-injection phrasing. The literals are the ones that appear in the

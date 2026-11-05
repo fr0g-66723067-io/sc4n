@@ -115,6 +115,13 @@
       ],
       "notes": "A card whose frontmatter carries the standard model-index block: a list of mappings with an indented results:/metrics: subtree. Valid YAML the subset does not model, and any indented non-list line used to fail the whole block — 68 cards of the campaign were reported unparseable and scanned as raw text."
     },
+    "card_secret/README.md": {
+      "expect": [
+        "SC4N-METADATA-INJECTION",
+        "SC4N-STRING-SECRET-VALUE"
+      ],
+      "notes": "A card that both instructs the model and carries a hard-coded AWS key. Proves the card tier removed the documentation readings (code, loader flag, decoder, credential reference) and kept the two that describe what the card does to a reader."
+    },
     "card_unclosed_frontmatter/README.md": {
       "expect": [
         "SC4N-CARD-PARSE"
@@ -139,6 +146,9 @@
     "content_auto_map/config.json": {
       "expect": [
         "SC4N-CONFIG-AUTO-MAP"
+      ],
+      "forbid": [
+        "SC4N-STRING-LOADER-FLAG"
       ],
       "notes": "A config.json whose auto_map imports modeling_x.CustomModel. The loader executes that module when trust_remote_code is set, and the module file is not present beside the config, which the evidence states. Reproduces the VU#456290 / CVE-2026-4372 remote-code surface."
     },
@@ -1479,6 +1489,10 @@
     "benign/card/README.md": {
       "expect": null,
       "notes": "An ordinary dataset card with frontmatter and prose. It has no HTML comment, no invisible characters and no instruction-shaped text, so the card and shared indicator rules must all stay silent."
+    },
+    "benign/card_prose/README.md": {
+      "expect": null,
+      "notes": "An ordinary model card whose usage section contains a Python example with eval(, urllib.request, subprocess, trust_remote_code=True, os.environ[\"GITHUB_TOKEN\"] and a shell line with $HF_TOKEN. All of it is documentation, so no finding of any severity may fire."
     },
     "benign/clean.ipynb": {
       "expect": null,

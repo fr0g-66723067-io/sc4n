@@ -48,6 +48,18 @@ var decodedDirectives = []string{
 // ScanText runs the card and metadata detectors over arbitrary text: a README, a
 // dataset card, or one metadata value. what labels the source in evidence.
 func ScanText(sink *report.Sink, base int64, what, text string) {
+	scanWithKind(sink, base, what, text, stringscan.KindCard)
+}
+
+// ScanMetadata runs the same detectors over a *metadata* value, with the full
+// indicator tier. The difference is the document's role, not its bytes: a
+// configuration value that says `subprocess` or `trust_remote_code` is what the
+// loader will do, while the same words in a card are an example in a code block.
+func ScanMetadata(sink *report.Sink, base int64, what, text string) {
+	scanWithKind(sink, base, what, text, stringscan.KindText)
+}
+
+func scanWithKind(sink *report.Sink, base int64, what, text string, kind stringscan.Kind) {
 	if text == "" {
 		return
 	}
@@ -56,7 +68,7 @@ func ScanText(sink *report.Sink, base int64, what, text string) {
 	}
 	// The shared engine already owns the injection phrases, chat pseudo-tags,
 	// webhooks, credential paths and unicode anomalies. Do not duplicate them.
-	stringscan.EmitString(sink, base, text)
+	stringscan.EmitStringKind(sink, base, text, kind)
 	hidden(sink, base, what, text)
 	directives(sink, base, what, text)
 	base64Payloads(sink, base, what, text)
@@ -106,7 +118,7 @@ func ScanJSONFile(sink *report.Sink, base int64, path string, data []byte) {
 		}
 		decoded++
 		walkJSONStrings(doc, func(s string) {
-			ScanText(sink, base+idx.locate(data, s), path, s)
+			ScanMetadata(sink, base+idx.locate(data, s), path, s)
 		})
 	}
 }

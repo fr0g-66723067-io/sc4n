@@ -116,11 +116,14 @@ var (
 		Confidence: report.ConfidenceMedium,
 		CWE:        []string{"CWE-502"},
 		Class:      "content",
-		Description: "A string in the artifact contains trust_remote_code, allow_pickle=True, " +
-			"weights_only=False, safe_mode=False, yaml.unsafe_load, or an auto_map reference. Each of " +
-			"these is a documented way to make a loader execute code that the artifact supplies, and a " +
-			"model card or config that carries one is telling the user to disable the check that would " +
-			"have stopped it.",
+		Description: "A data string sets trust_remote_code=true, allow_pickle=True, " +
+			"weights_only=False, safe_mode=False, yaml.unsafe_load or load_in_8bit, or calls yaml.load. " +
+			"Each of these is a documented way to make a loader execute code that the artifact " +
+			"supplies, and a config that carries one is telling the loader to disable the check that " +
+			"would have stopped it. The bare name of a flag is not reported: `auto_map` as a key and " +
+			"`trust_remote_code` as a key are the field names of ordinary configuration, and the " +
+			"document-level decision they encode belongs to SC4N-CONFIG-AUTO-MAP and " +
+			"SC4N-CONFIG-TRUST-REMOTE-CODE, which can state whether the referenced module is present.",
 		Refs: []string{
 			"https://cwe.mitre.org/data/definitions/502.html",
 			"https://huggingface.co/docs/hub/security",
