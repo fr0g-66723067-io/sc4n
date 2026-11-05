@@ -30,6 +30,10 @@ func TestPlaceholderAssignmentsAreNotSecrets(t *testing.T) {
 		{`api_key="unused-token"`, false},
 		{`api_key="foo"`, false},
 		{`api_key="unusedX9k2mQ7p"`, true},
+		// A lower-case hyphenated phrase names a thing; it is the default in a
+		// documented `export ..._PASSWORD="kvcache-redis"` (sglang's bundled redis
+		// README), not a credential.
+		{`AIBRIX_KV_CACHE_PASSWORD="kvcache-redis"`, false},
 		{`password=hunter2`, true},
 		{`client_secret=a1b2c3d4e5f60718293a4b5c6d7e8f90`, true},
 		{`AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, true},

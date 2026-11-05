@@ -629,6 +629,12 @@ func assignmentValueIsPlaceholder(b []byte, h Hit) bool {
 	case '<', '$', '{', '%', '@', '*', '.':
 		return true
 	}
+	// A lower-case hyphenated phrase is a name, not a secret:
+	// `AIBRIX_KV_CACHE_OL_PRIS_PASSWORD="kvcache-redis"` is a default a reader
+	// replaces. A value that mixes case, digits or symbols is a credential shape.
+	if isLowerHyphenated(value) {
+		return true
+	}
 	nv := normaliseCredential(value)
 	nn := normaliseCredential(name)
 	if nv == nn {
@@ -659,6 +665,23 @@ func assignmentValueIsPlaceholder(b []byte, h Hit) bool {
 var credentialNameSuffixes = []string{
 	"apikey", "apisecret", "secretkey", "accesstoken", "authtoken",
 	"password", "passwd", "passphrase", "credential", "credentials", "token", "secret",
+}
+
+// isLowerHyphenated reports whether s is one or more lower-case words joined by
+// hyphens ("kvcache-redis", "my-super-secret"). Such a value names a thing; a
+// hard-coded secret carries case, digits or symbols.
+func isLowerHyphenated(s string) bool {
+	if len(s) < 3 || strings.Contains(s, "--") || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // isCredentialByte reports whether c can appear inside an unquoted credential

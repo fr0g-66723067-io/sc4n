@@ -27,8 +27,6 @@ const (
 
 	// maxKeyBytes is the GGUF metadata key length cap.
 	maxKeyBytes = 65535
-	// maxTensorNameBytes is the GGUF tensor name length cap.
-	maxTensorNameBytes = 64
 	// maxDims is the GGUF tensor rank cap.
 	maxDims = 4
 	// maxArrayDepth bounds metadata ARRAY-of-ARRAY nesting.
@@ -261,9 +259,6 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 			st.structf(infoOff, "tensor_count %d exceeds the bytes present", tensorCount)
 			return st.meta, nil
 		}
-		if nl > maxTensorNameBytes {
-			st.structf(infoOff, "tensor name length %d exceeds %d", nl, maxTensorNameBytes)
-		}
 		nb, ok := r.take(nl)
 		if !ok {
 			st.structf(infoOff, "tensor name of %d bytes runs past EOF", nl)
@@ -453,7 +448,7 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 		}
 		prevOff, prevEnd, prevVerified = int64(t.off), int64(end), true
 	}
-	if pastEOF > 1 {
+	if pastEOF > 1 && !st.partial {
 		st.emitExtra(RuleStruct, pastEOFAt,
 			fmt.Sprintf("%d further tensor extents run past EOF (%d); the first of them ends at %d and the last at %d",
 				pastEOF-1, size, pastEOFFirstEnd, pastEOFLastEnd),
@@ -527,11 +522,24 @@ func (st *state) emitExtra(r *report.Rule, off int64, ev string, extra map[strin
 
 func (st *state) structf(off int64, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	if st.partial && strings.Contains(msg, "past EOF") {
+	if st.partial && sliceBoundary(msg) {
 		st.eofSkips++
 		return
 	}
 	st.emit(RuleStruct, off, msg)
+}
+
+// sliceBoundary reports whether a structural violation is a statement that the
+// bytes ran out rather than that the header contradicts itself. On a header slice
+// the metadata region itself can be cut, so "string X declares 18 bytes but only 6
+// remain" is the slice and not a malformed file.
+func sliceBoundary(msg string) bool {
+	for _, shape := range []string{"past EOF", "but only", "beyond the end"} {
+		if strings.Contains(msg, shape) {
+			return true
+		}
+	}
+	return false
 }
 
 // flushSlice reports, once, that the extents a slice declares run past its end.
