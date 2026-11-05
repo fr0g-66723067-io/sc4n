@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +63,27 @@ type Entry struct {
 	Skip error
 }
 
+// SymlinkPolicy bounds where a symbolic link met during a directory walk may
+// resolve.
+type SymlinkPolicy int
+
+const (
+	// SymlinkRoot is the default: a link must resolve inside the tree being
+	// scanned. A target outside it is not opened and is recorded with the escape
+	// named, so the artifact summary and the exit code say the tree was left.
+	//
+	// It is the default because the walk is the only path-expansion seam that had
+	// no containment: `ln -s /etc/shadow repo/leak.txt && sc4n scan repo` read the
+	// outside file and reported a clean scan.
+	SymlinkRoot SymlinkPolicy = iota
+	// SymlinkFollow reads a file link wherever it resolves. It is the pre-0.1
+	// behaviour and exists for a tree that is deliberately assembled out of links
+	// into a shared cache. A link that resolves to a directory is still not
+	// descended into — filepath.WalkDir does not follow links — so following does
+	// not widen the walk, only what a file link may read.
+	SymlinkFollow
+)
+
 // Config is the scan request.
 type Config struct {
 	// Paths are files or directories to scan.
@@ -87,6 +109,10 @@ type Config struct {
 	// disk can report "unverifiable" instead of a violation. Paths are as the
 	// report names them, or relative to Root.
 	Partial []string
+	// Symlinks says what a symbolic link met during the walk may resolve to.
+	// The zero value refuses a target outside the walk root, which is what makes
+	// `sc4n scan ./model` a scan of ./model.
+	Symlinks SymlinkPolicy
 	// DeepStats enables the informational weight-statistics rules.
 	DeepStats bool
 	// Timeout, when non-zero, bounds the whole scan.
@@ -740,6 +766,13 @@ func expand(cfg Config) ([]Entry, error) {
 			out = append(out, Entry{Path: p, Display: p})
 			continue
 		}
+		// The root a link must stay inside. EvalSymlinks on the named directory so
+		// that scanning a path that is itself reached through a link (a mounted
+		// cache) compares resolved targets, not spellings.
+		root, rerr := filepath.EvalSymlinks(p)
+		if rerr != nil {
+			root = filepath.Clean(p)
+		}
 		walkErr := filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				// An unreadable directory does not abort the walk; it becomes a
@@ -762,12 +795,30 @@ func expand(cfg Config) ([]Entry, error) {
 				return nil
 			}
 			if d.Type()&os.ModeSymlink != 0 {
-				// A link that resolves to a directory is not an artifact. The walk
-				// does not descend into it (filepath.WalkDir does not follow links)
-				// and the directory's own contents are scanned through their real
-				// path, so reporting the link as an unreadable path made a completely
-				// readable tree exit 3 on a benign `models/current -> models/v3`.
-				if st, err := os.Stat(path); err == nil && st.IsDir() {
+				target, lerr := filepath.EvalSymlinks(path)
+				if lerr != nil {
+					out = append(out, Entry{Path: path, Display: path, Skip: lerr})
+					return nil
+				}
+				escape := cfg.Symlinks == SymlinkRoot && !withinRoot(root, target)
+				if st, serr := os.Stat(path); serr == nil && st.IsDir() {
+					// A link that resolves to a directory is not an artifact. The
+					// walk does not descend into it (filepath.WalkDir does not follow
+					// links) and the directory's own contents are scanned through
+					// their real path, so reporting the link as an unreadable path
+					// made a completely readable tree exit 3 on a benign
+					// `models/current -> models/v3`. A directory link that leaves the
+					// tree is recorded instead of being dropped: an entire subtree
+					// outside the root would otherwise be unscanned with no trace.
+					if escape {
+						out = append(out, Entry{Path: path, Display: path,
+							Skip: symlinkEscape(path, target)})
+					}
+					return nil
+				}
+				if escape {
+					out = append(out, Entry{Path: path, Display: path,
+						Skip: symlinkEscape(path, target)})
 					return nil
 				}
 			}
@@ -780,6 +831,24 @@ func expand(cfg Config) ([]Entry, error) {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return dedupeEntries(out), firstErr
+}
+
+// withinRoot reports whether target resolves inside root. Both are absolute or
+// both relative to the same working directory, because root came from the same
+// argument the walk started from.
+func withinRoot(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// symlinkEscape is the error an out-of-root link is recorded with: it names the
+// link, the target and the flag that relaxes the rule, because the exit code alone
+// (3, unreadable) does not say the scan read less than the tree it was given.
+func symlinkEscape(path, target string) error {
+	return fmt.Errorf("%s is a symlink out of the scan root (%s): it was not opened; pass -symlinks follow to read it", path, target)
 }
 
 // dedupeEntries drops a repeated path, keeping the first entry. The same path can

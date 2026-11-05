@@ -138,3 +138,150 @@ func TestSymlinkedDirectoryIsNotUnreadable(t *testing.T) {
 		}
 	}
 }
+
+// TestSymlinkOutOfRootIsNotOpened is the containment contract. The walk used to
+// hand every non-directory symlink to the reader with no check, so
+// `ln -s /etc/shadow repo/leak.txt && sc4n scan repo` read the outside file,
+// reported a clean scan and exited 0. Nothing in the tree said the scan had left
+// it.
+func TestSymlinkOutOfRootIsNotOpened(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("AKIAIOSFODNN7EXAMPLE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repo, "leak.txt")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	res, err := scan.Run(context.Background(), scan.Config{Paths: []string{repo}, Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if res.Unreadable != 1 {
+		t.Fatalf("unreadable paths = %d, want 1: the escaping link was not recorded", res.Unreadable)
+	}
+	if len(res.Collector.Findings()) != 0 {
+		t.Fatalf("findings = %d, want 0: the target outside the root must not be read", len(res.Collector.Findings()))
+	}
+	var named bool
+	for _, a := range res.Artifacts {
+		if strings.Contains(a.Error, "out of the scan root") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("no artifact error named the escape: %+v", res.Artifacts)
+	}
+}
+
+// TestSymlinkOutOfRootFollowedWithFlag is the opt-out: -symlinks follow restores
+// reading a file link wherever it resolves, and the artifact is scanned.
+func TestSymlinkOutOfRootFollowedWithFlag(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("AKIAIOSFODNN7EXAMPLE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repo, "leak.txt")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	res, err := scan.Run(context.Background(), scan.Config{
+		Paths:    []string{repo},
+		Limits:   limits.Default(),
+		Symlinks: scan.SymlinkFollow,
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if res.Unreadable != 0 {
+		t.Fatalf("unreadable paths = %d, want 0 under -symlinks follow", res.Unreadable)
+	}
+	if len(res.Collector.Findings()) == 0 {
+		t.Fatal("the followed target was not scanned")
+	}
+}
+
+// TestSymlinkOutOfRootDirectoryIsNamed: the walk does not descend a directory link
+// (filepath.WalkDir does not follow links), and before this a link leaving the tree
+// was dropped with no trace — an entire subtree outside the root would be unscanned
+// and unreported.
+func TestSymlinkOutOfRootDirectoryIsNamed(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(dir, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(elsewhere, "w.bin"), []byte("weights\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(repo, "weights")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	res, err := scan.Run(context.Background(), scan.Config{Paths: []string{repo}, Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if res.Unreadable != 1 {
+		t.Fatalf("unreadable paths = %d, want 1 for the escaping directory link", res.Unreadable)
+	}
+	var named bool
+	for _, a := range res.Artifacts {
+		if strings.Contains(a.Error, "out of the scan root") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the directory link was dropped with no trace: %+v", res.Artifacts)
+	}
+}
+
+// TestSymlinkInsideRootStillFollowed is the regression guard for the ordinary
+// layouts: a sibling file link and a `current -> v3` directory link inside the
+// tree must scan without an error.
+func TestSymlinkInsideRootStillFollowed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "real.bin"), []byte("plain text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.bin", filepath.Join(dir, "alias.bin")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "v3"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("v3", filepath.Join(dir, "current")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	res, err := scan.Run(context.Background(), scan.Config{Paths: []string{dir}, Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if res.Unreadable != 0 {
+		t.Fatalf("unreadable paths = %d, want 0: every link resolves inside the root", res.Unreadable)
+	}
+	var scanned bool
+	for _, a := range res.Artifacts {
+		if strings.HasSuffix(a.Path, "alias.bin") && a.Error == "" {
+			scanned = true
+		}
+	}
+	if !scanned {
+		t.Fatalf("the in-root file link was not scanned: %+v", res.Artifacts)
+	}
+}

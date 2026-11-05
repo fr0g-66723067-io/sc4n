@@ -35,6 +35,7 @@ type scanFlags struct {
 	baseline    string
 	hfCache     bool
 	hfCacheDir  string
+	symlinks    string
 	deepStats   bool
 	timings     bool
 	quiet       bool
@@ -57,6 +58,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&f.maxFindings, "max-findings", 100000, "finding cap, applied after -baseline suppression; the most severe findings are kept, so a dropped finding is never more severe than a kept one")
 	fs.DurationVar(&f.timeout, "timeout", 0, "bound the whole scan (e.g. 10m; 0 = unbounded)")
 	fs.StringVar(&f.root, "root", "", "containment root for path-shaped values")
+	fs.StringVar(&f.symlinks, "symlinks", "root", "symlink targets: root (must resolve inside the scanned tree) or follow")
 	fs.StringVar(&f.baseline, "baseline", "", "suppress findings already present in a previous JSON report")
 	fs.BoolVar(&f.hfCache, "hf-cache", false, "scan a Hugging Face download cache instead of paths")
 	fs.StringVar(&f.hfCacheDir, "hf-cache-dir", "", "cache root for -hf-cache (default $HF_HOME/hub or ~/.cache/huggingface/hub)")
@@ -130,8 +132,19 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		}
 		baseline = base
 	}
+	var symlinkPolicy scan.SymlinkPolicy
+	switch f.symlinks {
+	case "root":
+		symlinkPolicy = scan.SymlinkRoot
+	case "follow":
+		symlinkPolicy = scan.SymlinkFollow
+	default:
+		fmt.Fprintf(stderr, "sc4n: -symlinks must be root or follow\n")
+		return exitUsage
+	}
 	cfg := scan.Config{
 		Paths:       paths,
+		Symlinks:    symlinkPolicy,
 		Limits:      l,
 		Jobs:        f.jobs,
 		MemBudget:   budget,
