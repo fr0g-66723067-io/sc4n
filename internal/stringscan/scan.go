@@ -48,7 +48,7 @@ func scanInto(b []byte, hits []Hit) []Hit {
 	hits = scanSecretTokens(b, hits)
 	hits = scanOpaqueLiterals(b, hits)
 	hits = scanUnicodeAnomalies(b, hits)
-	return dedupe(sortedHits(hits))
+	return dedupeRepeatedURLs(dedupe(sortedHits(hits)))
 }
 
 // dropUncorroborated removes the hits that are words rather than uses unless the
@@ -99,6 +99,31 @@ func dedupe(hits []Hit) []Hit {
 			continue
 		}
 		lastRule, lastOff = h.Rule.ID, h.Off
+		out = append(out, h)
+	}
+	return out
+}
+
+// dedupeRepeatedURLs keeps one raw-IP URL finding per distinct URL string in a
+// buffer.
+//
+// The rule reports an address instead of a name, and the same address written
+// twenty times is one decision to point at it: sglang's bundled flexkv card wrote
+// `http://127.0.0.1:8000` in every usage snippet and produced the same medium
+// finding repeatedly. A different notation of the same address is a different
+// string and stays a separate finding, because the notation is what the evidence
+// explains (0x7f000001 is not the same reading as 127.0.0.1 to a reviewer who has
+// to check it).
+func dedupeRepeatedURLs(hits []Hit) []Hit {
+	seen := make(map[string]bool, 4)
+	out := hits[:0]
+	for _, h := range hits {
+		if h.Rule == ruleRawIPURL {
+			if seen[h.Match] {
+				continue
+			}
+			seen[h.Match] = true
+		}
 		out = append(out, h)
 	}
 	return out

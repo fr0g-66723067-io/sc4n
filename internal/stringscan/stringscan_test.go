@@ -15,6 +15,15 @@ func hitsFor(t *testing.T, s string) []Hit {
 	return ScanString(s)
 }
 
+func containsRule(hits []Hit, id string) bool {
+	for _, h := range hits {
+		if h.Rule.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func hasRuleAt(hits []Hit, id string, off int64) bool {
 	for _, h := range hits {
 		if h.Rule.ID == id && h.Off == off {
@@ -932,5 +941,33 @@ func TestBytesConstantGetsTheByteSafeTier(t *testing.T) {
 	}
 	if !rawIP {
 		t.Fatal("the byte-safe endpoint rule did not run on a binary bytes constant")
+	}
+}
+
+// TestRepeatedRawIPURLIsOneFinding: the same literal-address URL written many times
+// in one buffer is one decision to point at that address. sglang's bundled flexkv
+// card repeated http://127.0.0.1:8000 in every usage snippet.
+func TestRepeatedRawIPURLIsOneFinding(t *testing.T) {
+	one := `base_url = "http://127.0.0.1:8000/v1"`
+	twice := one + "\n" + `other = "http://127.0.0.1:8000/v1"`
+	count := func(s string) int {
+		n := 0
+		for _, h := range ScanString(s) {
+			if h.Rule.ID == "SC4N-STRING-RAW-IP-URL" {
+				n++
+			}
+		}
+		return n
+	}
+	if got := count(one); got != 1 {
+		t.Fatalf("one URL produced %d findings, want 1", got)
+	}
+	if got := count(twice); got != 1 {
+		t.Fatalf("the same URL twice produced %d findings, want 1", got)
+	}
+	// A different notation is a different reading, and stays a separate finding.
+	both := one + "\n" + `hex = "http://0x7f000001:8000/v1"`
+	if got := count(both); got != 2 {
+		t.Fatalf("two notations produced %d findings, want 2", got)
 	}
 }

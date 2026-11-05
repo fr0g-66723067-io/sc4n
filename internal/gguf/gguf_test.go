@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/gguf"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
@@ -859,5 +860,48 @@ func TestOverlapsStayPerTensor(t *testing.T) {
 		if strings.Contains(f.Evidence, "further tensor extents") {
 			t.Errorf("the past-EOF aggregate must not fire on an in-file overlap: %q", f.Evidence)
 		}
+	}
+}
+
+// TestSliceExtentsAreInfoNotStruct is the slice contract for GGUF. A campaign
+// fetches a byte prefix of a multi-gigabyte quant under a per-file budget, so the
+// tensor extents it declares run past the end by construction: on the benign
+// corpus 231 tensors were reported SC4N-GGUF-STRUCT (medium) for exactly that. A
+// marked slice reports one informational finding instead, and an *unmarked*
+// truncated file keeps the structural finding, because then a short extent really
+// is a contradiction.
+func TestSliceExtentsAreInfoNotStruct(t *testing.T) {
+	// A minimal valid GGUF with one F32 tensor of 1024 elements whose data was
+	// never written: the extent runs past the end of the file.
+	b := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "general.name", valType: 8, val: append(u64b(1, binary.LittleEndian), 'x')}},
+		tensors: []tensor{{name: "t", dims: []uint64{1024}, typ: 0}},
+	})
+
+	c := report.NewCollector(0)
+	if _, err := gguf.Parse(source.Mem("m.gguf", b), limits.Default(), c.For("m.gguf")); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !hasRule(c.Findings(), "SC4N-GGUF-STRUCT") {
+		t.Fatalf("an unmarked truncated file must keep the structural finding; got %v", ids(c.Findings()))
+	}
+
+	c = report.NewCollector(0)
+	l := limits.Default()
+	sess := artifact.NewSession(c, "", l)
+	sess.SetPartial([]string{"m.gguf"})
+	ctx := sess.NewCtx("m.gguf", l)
+	src := source.Mem("m.gguf", b)
+	defer src.Close()
+	if _, err := artifact.Scan(ctx, src); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	got := ids(c.Findings())
+	if !hasRule(c.Findings(), "SC4N-PARTIAL-SLICE") {
+		t.Fatalf("a marked slice must report SC4N-PARTIAL-SLICE; got %v", got)
+	}
+	if hasRule(c.Findings(), "SC4N-GGUF-STRUCT") {
+		t.Fatalf("a marked slice must not be reported as malformed; got %v", got)
 	}
 }

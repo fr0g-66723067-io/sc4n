@@ -85,13 +85,17 @@ type Meta struct {
 	Templates []string
 }
 
-// Parse reads the GGUF structure and emits findings through sink. A nil sink
-// collects Meta only, which is what ChatTemplates uses.
+// parse is Parse with the slice flag: when the artifact is a known header slice
+// (the campaign fetched a byte prefix under a per-file budget), an extent that
+// runs past the end is the slice, not a malformed file.
 //
 // A structural violation is a finding and parsing continues where it is
 // meaningful; the returned error is only ErrNotGGUF (or an unreadable source).
-func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
-	st := &state{src: s, sink: sink, lim: l, meta: &Meta{Alignment: defaultAlignment}}
+func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*Meta, error) {
+	st := &state{src: s, sink: sink, lim: l, meta: &Meta{Alignment: defaultAlignment}, partial: partial}
+	if partial {
+		defer st.flushSlice()
+	}
 	size := s.Size()
 
 	// Format-independent evidence first: it stays valid even when the structure
@@ -486,8 +490,14 @@ type parser struct{}
 
 // Parse implements artifact.Parser.
 func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
-	_, err := Parse(s, ctx.Limits, ctx.Sink)
+	partial := ctx.Session != nil && ctx.Session.IsPartial(ctx.Sink.Artifact())
+	_, err := parse(s, ctx.Limits, ctx.Sink, partial)
 	return err
+}
+
+// Parse reads the GGUF structure and emits findings through sink.
+func Parse(s source.Source, l limits.Limits, sink *report.Sink) (*Meta, error) {
+	return parse(s, l, sink, false)
 }
 
 // state carries the sink, budget and collected metadata through the walk.
@@ -496,6 +506,11 @@ type state struct {
 	sink *report.Sink
 	lim  limits.Limits
 	meta *Meta
+	// partial marks a known header slice: an extent declared past the end of the
+	// bytes is expected, so it is counted here and reported once as
+	// SC4N-PARTIAL-SLICE instead of as a structural violation per tensor.
+	partial  bool
+	eofSkips int
 }
 
 func (st *state) emit(r *report.Rule, off int64, ev string) {
@@ -511,7 +526,24 @@ func (st *state) emitExtra(r *report.Rule, off int64, ev string, extra map[strin
 }
 
 func (st *state) structf(off int64, format string, args ...any) {
-	st.emit(RuleStruct, off, fmt.Sprintf(format, args...))
+	msg := fmt.Sprintf(format, args...)
+	if st.partial && strings.Contains(msg, "past EOF") {
+		st.eofSkips++
+		return
+	}
+	st.emit(RuleStruct, off, msg)
+}
+
+// flushSlice reports, once, that the extents a slice declares run past its end.
+func (st *state) flushSlice() {
+	if st.eofSkips == 0 || st.sink == nil {
+		return
+	}
+	size := st.src.Size()
+	st.emitExtra(artifact.RulePartialSlice, 0,
+		fmt.Sprintf("the artifact is a %d-byte slice of a larger file, so %d declared extent(s) run past its end; the parse stopped at the slice boundary",
+			size, st.eofSkips),
+		map[string]string{"bytes": strconv.FormatInt(size, 10), "extents": strconv.Itoa(st.eofSkips)})
 }
 
 func (st *state) limit(r *report.Rule, name string, value, cap int64, detail string) {
