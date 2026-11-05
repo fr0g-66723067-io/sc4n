@@ -17,6 +17,7 @@ package onnx
 
 import (
 	"errors"
+	"io"
 	"math"
 	"os"
 	"path"
@@ -72,12 +73,17 @@ type parser struct{}
 // violation is a finding, and the walk continues where continuing is meaningful.
 func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	base, contain := resolutionPaths(ctx, s)
+	// A header slice of a larger model is not malformed: the campaign fetched a
+	// byte prefix under a per-file budget, so a declared extent running past the
+	// end is the expected shape. Ask the session before claiming a violation.
+	selfPartial := ctx.Session != nil && ctx.Session.IsPartial(ctx.Sink.Artifact())
 	w := &walker{
-		s:       s,
-		l:       ctx.Limits,
-		sink:    ctx.Sink,
-		root:    base,
-		contain: contain,
+		s:           s,
+		l:           ctx.Limits,
+		sink:        ctx.Sink,
+		root:        base,
+		contain:     contain,
+		selfPartial: selfPartial,
 		partial: func(rel string) bool {
 			if ctx.Session == nil {
 				return false
@@ -98,6 +104,12 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 
 	st := w.walkModel(newReader(s, 0, s.Size()))
 	w.flushDomains()
+	if selfPartial {
+		// The walk stopped where the bytes did. Report the slice once and skip the
+		// required-field checks, which describe a file that claims to be whole.
+		w.noteSlice(s.Size())
+		return nil
+	}
 	if !st.hasIRVersion {
 		w.structAt(0, "ModelProto has no ir_version field")
 	}
@@ -122,7 +134,10 @@ type modelShape struct {
 	hasMetadata  bool
 	graphSeen    bool
 	graphShaped  bool
-	fields       int
+	// truncated records that the walk stopped inside a declared length rather
+	// than at an illegal tag: the artifact is a prefix of a larger file.
+	truncated bool
+	fields    int
 }
 
 // decisive reports whether the shape is enough to tell ONNX from the other
@@ -163,6 +178,11 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 	}
 	sh, ok := sniffShape(newReader(s, 0, s.Size()), s)
 	if !ok {
+		// The walk stopped early. Only truncation can still be ONNX: an illegal
+		// tag or an impossible wire type is a different format's bytes.
+		if sh.truncated && sh.firstIR {
+			return artifact.FormatONNX, true
+		}
 		return artifact.FormatUnknown, false
 	}
 	if sh.firstIR || sh.graphShaped {
@@ -249,6 +269,10 @@ func sniffShape(r *reader, s source.Source) (modelShape, bool) {
 			m.hasConfig = true
 		}
 	}
+	// An unexpected EOF is the slice shape: the declared length runs past the end
+	// of the bytes we were given. A parse error is not — that is a tag that cannot
+	// be read at all.
+	m.truncated = errors.Is(r.err, io.ErrUnexpectedEOF)
 	return m, m.ok
 }
 
@@ -275,6 +299,10 @@ type walker struct {
 	// and partialNoted keeps the informational finding to one per artifact.
 	partial      func(rel string) bool
 	partialNoted bool
+	// selfPartial marks this artifact (not a sibling) as a header slice, and
+	// selfNoted keeps its informational finding to one per artifact.
+	selfPartial bool
+	selfNoted   bool
 
 	elems    int64
 	elemsHit bool
@@ -354,7 +382,28 @@ func (w *walker) structAt(off int64, msg string) {
 }
 
 func (w *walker) badWire(off int64, what string) {
+	if w.selfPartial {
+		// The stream ended inside a declared length because the artifact is a
+		// prefix of a larger file; the slice note covers it.
+		w.noteSlice(0)
+		return
+	}
 	w.sink.Emit(ruleStruct, off, "truncated or malformed "+what)
+}
+
+// noteSlice reports, once per artifact, that this artifact is a header slice.
+func (w *walker) noteSlice(size int64) {
+	if w.selfNoted {
+		return
+	}
+	w.selfNoted = true
+	ev := "the artifact is a header slice of a larger file, so the parse stopped at the slice boundary"
+	extra := map[string]string{}
+	if size > 0 {
+		ev = "the artifact is a " + strconv.FormatInt(size, 10) + "-byte slice of a larger file, so the parse stopped at the slice boundary"
+		extra["bytes"] = strconv.FormatInt(size, 10)
+	}
+	w.sink.EmitExtra(artifact.RulePartialSlice, 0, ev, extra)
 }
 
 // checkField reports a structure finding when a known field carries a wire type

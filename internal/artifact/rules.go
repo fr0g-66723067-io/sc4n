@@ -68,3 +68,32 @@ var RuleAmbiguous = report.DefineRule(report.Rule{
 		"did not run.",
 	Tags: []string{"format"},
 })
+
+// RulePartialSlice fires when the artifact is a known header slice of a larger
+// file — the shape a campaign fetches under a per-file byte cap — and a parser had
+// to stop at the slice boundary.
+//
+// It exists because the alternative is a medium-severity malformed-structure
+// finding for every sliced weight file: on the 25 most-downloaded Hub models, 271
+// of 1038 artifacts are slices and the safetensors parser alone reported 120
+// SC4N-SAFETENSORS-TRUNCATED findings for them, none of which says anything
+// about the model. The session knows which artifacts were fetched this way
+// (Session.SetPartial), so a parser that would compare a declared extent against
+// bytes it does not have can say "this is a slice" instead of "this is broken".
+// Informational: the reviewer still learns that the artifact was not read in full.
+var RulePartialSlice = report.DefineRule(report.Rule{
+	ID:         "SC4N-PARTIAL-SLICE",
+	Title:      "Artifact is a header slice, so declared extents run past its end",
+	Severity:   report.SeverityInfo,
+	Confidence: report.ConfidenceHigh,
+	CWE:        []string{"CWE-1059"},
+	Class:      "structure",
+	Description: "The scanner was given a byte prefix of a larger artifact (for example the first 2 MiB " +
+		"of a multi-gigabyte checkpoint, fetched under a per-file budget), and the format's declared " +
+		"extents therefore stop inside the slice. Nothing is wrong with the file: the structure was " +
+		"followed as far as the bytes go. Informational, because the consequence for a reviewer is " +
+		"coverage — what lies past the slice was not scanned, and a clean result for this artifact " +
+		"does not describe the whole file.",
+	Refs: []string{"https://huggingface.co/docs/hub/security"},
+	Tags: []string{"coverage", "truncation"},
+})

@@ -717,6 +717,15 @@
       ],
       "notes": "The negative control for the CoreML description discriminator: field 2 carries the string \"pytorch\", which is a well-formed-looking tag sequence only until the third byte, so the file stays ONNX. It pins that a real ModelProto's producer_name is not stolen by the CoreML sniffer."
     },
+    "onnx_slice.onnx": {
+      "expect": [
+        "SC4N-ONNX-STRUCT"
+      ],
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A ModelProto whose graph field declares 1 MiB and delivers 64 bytes: a header slice of a larger model. The sniffer must claim it as ONNX (a truncated walk with an ir_version opening) so the ONNX rules run and the parser says the stream stopped at the slice boundary, instead of scanning the protobuf as text and reporting an extension mismatch."
+    },
     "pickle_b64_exec.pkl": {
       "expect": [
         "SC4N-PICKLE-GLOBAL-CRITICAL",
@@ -1316,6 +1325,15 @@
         "SC4N-ARCHIVE-UNSUPPORTED-COMPRESSION"
       ],
       "notes": "7z signature under a .pt name (the February 2025 Hugging Face campaign). sc4n names both the disguise and the unreadable payload, and never claims the pickle inside was scanned."
+    },
+    "torch_legacy.bin": {
+      "expect": [
+        "SC4N-TORCH-LEGACY-TAR"
+      ],
+      "forbid": [
+        "SC4N-FORMAT-EXTENSION-MISMATCH"
+      ],
+      "notes": "A legacy torch tar named .bin, which is how Transformers repositories store it (pytorch_model.bin). The extension is plausible for the format, so the container mismatch must not be reported; the legacy container itself still is."
     },
     "torch_legacy.pt": {
       "expect": [

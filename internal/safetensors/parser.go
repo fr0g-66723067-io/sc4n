@@ -23,10 +23,12 @@ import (
 	"fmt"
 	"math/bits"
 	"sort"
+	"strconv"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 	"github.com/fr0g-66723067-io/sc4n/internal/stringscan"
 )
@@ -60,9 +62,23 @@ func init() {
 	artifact.RegisterParser(artifact.FormatSafetensors, parser{})
 }
 
+// emitSlice reports a known header slice: the artifact is a prefix of a larger
+// file, so what it declares runs past its end by design.
+func emitSlice(sink *report.Sink, size, declared int64, what string) {
+	sink.EmitExtra(artifact.RulePartialSlice, 0,
+		fmt.Sprintf("the artifact is a %d-byte slice and %s runs to %d bytes, so the parse stopped at the slice boundary", size, what, declared),
+		map[string]string{"bytes": strconv.FormatInt(size, 10), "declared": strconv.FormatInt(declared, 10)})
+}
+
 // Parse validates and analyses one safetensors artifact.
 func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	size := s.Size()
+	// A header slice of a larger checkpoint is not a malformed file: the campaign
+	// fetched a prefix under a per-file budget, so the declared extents run past
+	// the bytes on purpose. Ask the session before claiming a violation (271 of
+	// the 1038 artifacts in the benign corpus are slices; 120 of them were reported
+	// SC4N-SAFETENSORS-TRUNCATED before this check).
+	partial := ctx.Session != nil && ctx.Session.IsPartial(ctx.Sink.Artifact())
 	if size < 8 {
 		ctx.Sink.Emit(RuleStruct, 0, "file is shorter than the 8-byte header length")
 		return nil
@@ -91,6 +107,10 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 
 	raw, _ := s.Bytes(8, n)
 	if int64(len(raw)) < n {
+		if partial {
+			emitSlice(ctx.Sink, size, 8+n, "the header and the tensor data")
+			return nil
+		}
 		ctx.Sink.Emit(RuleTruncated, 8+int64(len(raw)),
 			fmt.Sprintf("file is %d bytes but the header declares %d, so 8+%d=%d bytes are required", size, n, n, 8+n))
 		// The available prefix may still decode far enough to be worth a look,
@@ -157,6 +177,10 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		ctx.Sink.EmitExtra(RuleTrailingData, dataBase+claimed,
 			fmt.Sprintf("%d bytes follow the last declared tensor", bufferLen-claimed), extra)
 	case claimed > bufferLen:
+		if partial {
+			emitSlice(ctx.Sink, size, dataBase+claimed, "the last declared tensor")
+			return nil
+		}
 		ctx.Sink.Emit(RuleTruncated, dataBase+bufferLen,
 			fmt.Sprintf("last tensor ends at %d but the byte buffer is only %d bytes", claimed, bufferLen))
 	}

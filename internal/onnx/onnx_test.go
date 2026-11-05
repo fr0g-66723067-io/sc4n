@@ -1018,3 +1018,67 @@ func TestExternalDataResolvesRelativeToTheModel(t *testing.T) {
 		t.Fatalf("an escaping reference was not reported; findings %v", sortedKeys(got))
 	}
 }
+
+// TestTruncatedModelProtoIsClaimedAndIsASlice covers the two halves of the slice
+// contract for ONNX.
+//
+// First: a ModelProto whose graph field declares more bytes than exist must still
+// be claimed as ONNX. Before this, the sniffer refused any stream whose walk
+// stopped early, so nomic-embed-text-v1.5's onnx/model.onnx (2 MiB of a larger
+// file) was dispatched as *text*: that produced SC4N-FORMAT-EXTENSION-MISMATCH
+// and Unicode findings decoded from tensor bytes, and no ONNX rule ever ran.
+//
+// Second: when the session knows the artifact is a header slice, the finding is
+// the informational SC4N-PARTIAL-SLICE and not a structural complaint about a
+// file that was never broken.
+func TestTruncatedModelProtoIsClaimedAndIsASlice(t *testing.T) {
+	// ir_version, producer, producer_version, then a graph field that declares
+	// 1 MiB and delivers 64 bytes.
+	data := tcat(
+		tv(1, 7),
+		tstr(2, "pytorch"),
+		tstr(3, "2.1.0"),
+		pbLocalTag(7, 2),
+		pbLocalVarint(1<<20),
+		make([]byte, 64),
+	)
+	found := parseFindings(t, "model.onnx", data, "")
+	if !ids(found)["SC4N-ONNX-STRUCT"] {
+		t.Fatalf("an unmarked truncated ModelProto must report the structure; got %v", ids(found))
+	}
+
+	c := report.NewCollector(0)
+	l := limits.Default()
+	sess := artifact.NewSession(c, "", l)
+	sess.SetPartial([]string{"model.onnx"})
+	ctx := sess.NewCtx("model.onnx", l)
+	src := source.Mem("model.onnx", data)
+	defer src.Close()
+	if err := (parser{}).Parse(ctx, src); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := ids(c.Findings())
+	if !got["SC4N-PARTIAL-SLICE"] {
+		t.Fatalf("a marked slice must report SC4N-PARTIAL-SLICE; got %v", got)
+	}
+	if got["SC4N-ONNX-STRUCT"] {
+		t.Fatalf("a marked slice must not be reported as malformed; got %v", got)
+	}
+}
+
+// TestSliceSniff keeps the sniffer honest in both directions: truncation with an
+// ir_version opening is ONNX, and a stream whose wire types are impossible is not
+// — a random binary that happens to start with 0x08 must not become ONNX just
+// because the walk stops.
+func TestSliceSniff(t *testing.T) {
+	truncated := tcat(tv(1, 7), pbLocalTag(7, 2), pbLocalVarint(1<<20), make([]byte, 64))
+	if f, ok := sniff(source.Mem("a.onnx", truncated), limits.Default()); !ok || f != artifact.FormatONNX {
+		t.Fatalf("truncated ModelProto sniff = %v, %v; want ONNX", f, ok)
+	}
+	// field 2 (producer_name) declared as a varint instead of a length-delimited
+	// string: an impossible wire type, so the bytes are not ONNX.
+	wrongWire := tcat(tv(1, 7), tv(2, 9), pbLocalTag(7, 2), pbLocalVarint(1<<20), make([]byte, 64))
+	if f, ok := sniff(source.Mem("a.onnx", wrongWire), limits.Default()); ok {
+		t.Fatalf("impossible wire type sniff = %v; want not ONNX", f)
+	}
+}

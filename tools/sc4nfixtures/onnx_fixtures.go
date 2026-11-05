@@ -118,6 +118,20 @@ func onnxFixtures(f *fixtureSet) {
 		pbStr(2, "pytorch"),
 	))
 
+	// A ModelProto whose graph field declares more bytes than the file holds: the
+	// shape of a header slice of a large model. nomic-embed-text-v1.5's
+	// onnx/model.onnx is this shape, and before the sniffer accepted a truncated
+	// walk it was dispatched as *text*, so every ONNX rule was skipped and the
+	// tensor bytes produced a format-extension mismatch and Unicode findings.
+	f.add("onnx_slice.onnx", pbCat(
+		pbVar(1, 7),
+		pbStr(2, "pytorch"),
+		pbStr(3, "2.1.0"),
+		pbTag(7, 2),
+		pbVarint(1<<20),
+		make([]byte, 64),
+	))
+
 	// The benign control: a well-formed model with a standard domain, one node
 	// and one initializer whose raw_data length matches its dims exactly. It must
 	// produce no high or critical finding, otherwise the ONNX rules are not usable
@@ -141,6 +155,15 @@ func onnxFixtures(f *fixtureSet) {
 
 func onnxExpectations() map[string]expectation {
 	return map[string]expectation{
+		"onnx_slice.onnx": {
+			Expect: []string{"SC4N-ONNX-STRUCT"},
+			Forbid: []string{"SC4N-FORMAT-EXTENSION-MISMATCH"},
+			Notes: "A ModelProto whose graph field declares 1 MiB and delivers 64 bytes: a header " +
+				"slice of a larger model. The sniffer must claim it as ONNX (a truncated walk with an " +
+				"ir_version opening) so the ONNX rules run and the parser says the stream stopped at " +
+				"the slice boundary, instead of scanning the protobuf as text and reporting an " +
+				"extension mismatch.",
+		},
 		"onnx_producer_name_string.onnx": {
 			Forbid: []string{"SC4N-FORMAT-EXTENSION-MISMATCH"},
 			Notes: "The negative control for the CoreML description discriminator: field 2 " +

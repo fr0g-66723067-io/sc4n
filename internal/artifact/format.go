@@ -379,7 +379,7 @@ var extensions = map[string][]Format{
 	"ckpt":        {FormatTorchNew, FormatTorchLegacy, FormatPickle, FormatZip, FormatTFCheckpoint},
 	"npy":         {FormatNPY},
 	"npz":         {FormatNPZ, FormatZip},
-	"bin":         {FormatSafetensors, FormatPickle, FormatTorchNew, FormatZip, FormatNative, FormatText, FormatImageMeta},
+	"bin":         {FormatSafetensors, FormatPickle, FormatTorchNew, FormatTorchLegacy, FormatZip, FormatNative, FormatText, FormatImageMeta},
 	"safetensors": {FormatSafetensors},
 	"gguf":        {FormatGGUF},
 	"onnx":        {FormatONNX},

@@ -74,6 +74,13 @@ func torchFixtures(f *fixtureSet) {
 	tensorsMember := cat(proto(2), []byte{bBININT1, 0x00}, stop())
 	f.add("torch_legacy_tar.pt", torchTarBytes(pickleMember, storagesMember, tensorsMember))
 
+	// The same container under the extension every Transformers repository uses
+	// for it. google-bert/bert-base-uncased, google-t5/t5-small, openai-community/gpt2
+	// and google/electra-base-discriminator all ship a torch-legacy tar as
+	// pytorch_model.bin, and `.bin` was plausible for pickle and torch-new but not
+	// for torch-legacy, so each of them reported SC4N-FORMAT-EXTENSION-MISMATCH.
+	f.add("torch_legacy.bin", torchTarBytes(pickleMember, storagesMember, tensorsMember))
+
 	// --- 7z disguised as a .pt ---------------------------------------------------
 	// The February 2025 Hugging Face campaign: a .pt whose bytes are a 7z archive.
 	// An extension-driven scanner saw "not a zip"; sc4n cannot decode 7z and says so.
@@ -169,6 +176,13 @@ func torchExpectations() map[string]expectation {
 			Forbid: []string{"SC4N-PICKLE-TRAILING"},
 			Notes: "Legacy binary checkpoint: the object pickle is the gadget and the appended raw storage " +
 				"is the container's payload, not an attack suffix.",
+		},
+		"torch_legacy.bin": {
+			Expect: []string{"SC4N-TORCH-LEGACY-TAR"},
+			Forbid: []string{"SC4N-FORMAT-EXTENSION-MISMATCH"},
+			Notes: "A legacy torch tar named .bin, which is how Transformers repositories " +
+				"store it (pytorch_model.bin). The extension is plausible for the format, so the " +
+				"container mismatch must not be reported; the legacy container itself still is.",
 		},
 		"torch_legacy_tar.pt": {
 			Expect: []string{"SC4N-TORCH-LEGACY-TAR", "SC4N-PICKLE-REDUCE"},

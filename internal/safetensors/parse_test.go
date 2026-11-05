@@ -663,3 +663,45 @@ func deepStatsIDs(t *testing.T, header string, data []byte) map[string]bool {
 	}
 	return ids(c.Findings())
 }
+
+// TestPartialSliceIsInfoNotTruncation is the slice contract: a campaign fetches
+// a byte prefix of a large checkpoint under a per-file budget, so a declared
+// tensor extent runs past the end on purpose. The session says which artifacts
+// were fetched that way, and then the finding is the informational coverage note
+// — not SC4N-SAFETENSORS-TRUNCATED, which on the benign corpus fired 120 times
+// for 271 sliced artifacts and said nothing about any model.
+func TestPartialSliceIsInfoNotTruncation(t *testing.T) {
+	// One F32 tensor that declares 4 KiB but is given 16 bytes.
+	const hdr = `{"w":{"dtype":"F32","shape":[32,32],"data_offsets":[0,4096]}}`
+	data := st(hdr, make([]byte, 16))
+
+	if got := ids(scan(t, data)); !got["SC4N-SAFETENSORS-TRUNCATED"] {
+		t.Fatalf("without a partial mark, a declared extent past the end must be the truncation rule; got %v", got)
+	}
+
+	c := report.NewCollector(0)
+	lim := limits.Default()
+	sess := artifact.NewSession(c, "", lim)
+	sess.SetPartial([]string{"model.safetensors"})
+	ctx := &artifact.Ctx{
+		Session: sess,
+		Sink:    c.For("model.safetensors"),
+		Limits:  lim,
+		Format:  artifact.FormatSafetensors,
+	}
+	src := source.Mem("model.safetensors", data)
+	defer src.Close()
+	if err := (parser{}).Parse(ctx, src); err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	got := ids(c.Findings())
+	if !got["SC4N-PARTIAL-SLICE"] {
+		t.Fatalf("a marked slice must report SC4N-PARTIAL-SLICE; got %v", got)
+	}
+	if got["SC4N-SAFETENSORS-TRUNCATED"] {
+		t.Fatalf("a marked slice must not be reported as a malformed file; got %v", got)
+	}
+	if len(c.Findings()) != 1 {
+		t.Fatalf("a slice must produce exactly the one informational finding; got %d", len(c.Findings()))
+	}
+}
