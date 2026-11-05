@@ -152,6 +152,15 @@
       ],
       "notes": "A config.json whose auto_map imports modeling_x.CustomModel. The loader executes that module when trust_remote_code is set, and the module file is not present beside the config, which the evidence states. Reproduces the VU#456290 / CVE-2026-4372 remote-code surface."
     },
+    "content_auto_map_remote/config.json": {
+      "expect": [
+        "SC4N-CONFIG-AUTO-MAP"
+      ],
+      "forbid": [
+        "SC4N-STRING-LOADER-FLAG"
+      ],
+      "notes": "Seven auto_map entries resolving to one module package in one repository: one decision to load that package, reported once (the count is asserted by TestAutoMapRemoteIsReportedOnce). This is nomic-embed-text-v1.5's config, which produced seven identical criticals on the benign corpus."
+    },
     "content_binary_blob.bin": {
       "expect": [
         "SC4N-CONTENT-NOT-UTF8"
@@ -190,7 +199,7 @@
       "expect": [
         "SC4N-MODULES-REMOTE-MODULE"
       ],
-      "notes": "A sentence-transformers modules.json whose Transformer entry has an empty path, i.e. the module is fetched from the Hub. Ordinary for published models, hence medium/low confidence; it records that the load path leaves the repo."
+      "notes": "A sentence-transformers modules.json whose third entry names an https URL instead of a subdirectory, so the load path fetches code the scan did not read. The empty path of entry 0 and the bare subdirectories of entries 1 and 3 are local."
     },
     "content_trust_remote_code/config.json": {
       "expect": [
@@ -1675,6 +1684,13 @@
     "benign/model.safetensors": {
       "expect": null,
       "notes": "A correct multi-dtype file (F32/F16/BF16/I8/U8/I64/F64/C64/BOOL) with exact coverage and innocuous __metadata__; the correct output is no finding at all."
+    },
+    "benign/modules_local/modules.json": {
+      "expect": null,
+      "forbid": [
+        "SC4N-MODULES-REMOTE-MODULE"
+      ],
+      "notes": "The ordinary published sentence-transformers layout: entry 0 is the top-level Transformer with an empty path (the repository root) and the rest are bare subdirectories. Six of the 25 most-downloaded Hub models ship exactly this file and every one of them produced a false SC4N-MODULES-REMOTE-MODULE."
     },
     "benign/plain.zip": {
       "expect": null,

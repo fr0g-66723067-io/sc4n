@@ -35,6 +35,14 @@ func init() {
 						"present beside the config, which the evidence states. Reproduces the " +
 						"VU#456290 / CVE-2026-4372 remote-code surface.",
 				},
+				"content_auto_map_remote/config.json": {
+					Expect: []string{"SC4N-CONFIG-AUTO-MAP"},
+					Forbid: []string{"SC4N-STRING-LOADER-FLAG"},
+					Notes: "Seven auto_map entries resolving to one module package in one repository: " +
+						"one decision to load that package, reported once (the count is asserted by " +
+						"TestAutoMapRemoteIsReportedOnce). This is nomic-embed-text-v1.5's config, which " +
+						"produced seven identical criticals on the benign corpus.",
+				},
 				"content_unknown_arch/config.json": {
 					Expect: []string{"SC4N-CONFIG-ARCHITECTURE-UNKNOWN"},
 					Notes: "A config.json naming an architecture Transformers does not ship. " +
@@ -53,9 +61,9 @@ func init() {
 				},
 				"content_modules/modules.json": {
 					Expect: []string{"SC4N-MODULES-REMOTE-MODULE"},
-					Notes: "A sentence-transformers modules.json whose Transformer entry has an empty " +
-						"path, i.e. the module is fetched from the Hub. Ordinary for published models, " +
-						"hence medium/low confidence; it records that the load path leaves the repo.",
+					Notes: "A sentence-transformers modules.json whose third entry names an https URL " +
+						"instead of a subdirectory, so the load path fetches code the scan did not read. " +
+						"The empty path of entry 0 and the bare subdirectories of entries 1 and 3 are local.",
 				},
 				"content_gitattributes_lfs/.gitattributes": {
 					Expect: []string{"SC4N-GITATTRIBUTES-LFS"},
@@ -77,6 +85,13 @@ func init() {
 						"not only the first.",
 				},
 			}, map[string]expectation{
+				"benign/modules_local/modules.json": {
+					Forbid: []string{"SC4N-MODULES-REMOTE-MODULE"},
+					Notes: "The ordinary published sentence-transformers layout: entry 0 is the " +
+						"top-level Transformer with an empty path (the repository root) and the rest are " +
+						"bare subdirectories. Six of the 25 most-downloaded Hub models ship exactly this " +
+						"file and every one of them produced a false SC4N-MODULES-REMOTE-MODULE.",
+				},
 				"benign/hf_config/config.json": {
 					Notes: "An ordinary BERT config: a known architecture, no auto_map, no " +
 						"trust_remote_code and no chat_template, so no content rule may fire.",
@@ -132,6 +147,23 @@ func contentFixtures(f *fixtureSet) {
 			"  }\n"+
 			"}\n")
 
+	// The nomic-embed-text-v1.5 shape: seven Auto* classes that all resolve to
+	// one module package in another repository. One decision, one finding.
+	f.addText("content_auto_map_remote/config.json",
+		"{\n"+
+			"  \"architectures\": [\"NomicBertModel\"],\n"+
+			"  \"model_type\": \"nomic_bert\",\n"+
+			"  \"auto_map\": {\n"+
+			"    \"AutoConfig\": \"nomic-ai/nomic-bert-2048--configuration_hf_nomic_bert.NomicBertConfig\",\n"+
+			"    \"AutoModel\": \"nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertModel\",\n"+
+			"    \"AutoModelForPreTraining\": \"nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForPreTraining\",\n"+
+			"    \"AutoModelForSequenceClassification\": \"nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForSequenceClassification\",\n"+
+			"    \"AutoModelForMultipleChoice\": \"nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForMultipleChoice\",\n"+
+			"    \"AutoModelForQuestionAnswering\": \"nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForQuestionAnswering\",\n"+
+			"    \"AutoModelForTokenClassification\": \"nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForTokenClassification\"\n"+
+			"  }\n"+
+			"}\n")
+
 	f.addText("content_unknown_arch/config.json",
 		"{\n"+
 			"  \"architectures\": [\"Sc4nUnknownForCausalLM\"],\n"+
@@ -157,7 +189,18 @@ func contentFixtures(f *fixtureSet) {
 	f.addText("content_modules/modules.json",
 		"[\n"+
 			"  {\"idx\": 0, \"name\": \"0\", \"path\": \"\", \"type\": \"sentence_transformers.models.Transformer\"},\n"+
-			"  {\"idx\": 1, \"name\": \"1\", \"path\": \"1_Pooling\", \"type\": \"sentence_transformers.models.Pooling\"}\n"+
+			"  {\"idx\": 1, \"name\": \"1\", \"path\": \"1_Pooling\", \"type\": \"sentence_transformers.models.Pooling\"},\n"+
+			"  {\"idx\": 2, \"name\": \"2\", \"path\": \"https://huggingface.co/o/remote/modules.json\", \"type\": \"sentence_transformers.models.Dense\"}\n"+
+			"]\n")
+
+	// The ordinary published layout: entry 0 is the top-level Transformer and its
+	// path is the repository root. An empty path is local, not remote — every
+	// sentence-transformers repository on the Hub writes it this way.
+	f.addText("benign/modules_local/modules.json",
+		"[\n"+
+			"  {\"idx\": 0, \"name\": \"0\", \"path\": \"\", \"type\": \"sentence_transformers.models.Transformer\"},\n"+
+			"  {\"idx\": 1, \"name\": \"1\", \"path\": \"1_Pooling\", \"type\": \"sentence_transformers.models.Pooling\"},\n"+
+			"  {\"idx\": 2, \"name\": \"2\", \"path\": \"2_Dense\", \"type\": \"sentence_transformers.models.Dense\"}\n"+
 			"]\n")
 
 	f.addText("content_gitattributes_lfs/.gitattributes",

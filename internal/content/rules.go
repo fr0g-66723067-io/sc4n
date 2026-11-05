@@ -45,9 +45,12 @@ var (
 		Description: "A Hugging Face config carries an `auto_map`, which maps an Auto* class " +
 			"(AutoConfig, AutoModel, AutoTokenizer, …) to a Python module and class name inside the " +
 			"repository. With trust_remote_code enabled the loader imports that module and executes " +
-			"it, so the model file itself is code. The finding names each referenced module and states " +
-			"whether sc4n found the matching .py file in the scanned tree (a local module is code that " +
-			"will run; a module that is absent still fails the same way at load time). This is the " +
+			"it, so the model file itself is code. The finding is one per referenced repository, not one " +
+			"per entry: seven Auto* classes that resolve to the same module package are one decision to " +
+			"load it, and the evidence states how many entries were folded and which classes they name. " +
+			"For a module inside the repository the finding also states whether sc4n found the matching " +
+			".py file in the scanned tree (a local module is code that will run; a module that is absent " +
+			"still fails the same way at load time). This is the " +
 			"VU#456290 / CVE-2026-4372 surface. Critical because an auto_map is code execution on the " +
 			"artifact's normal load path.",
 		Refs: []string{
@@ -159,12 +162,13 @@ var (
 		Confidence: report.ConfidenceLow,
 		CWE:        []string{"CWE-829"},
 		Class:      "modules",
-		Description: "A sentence-transformers `modules.json` has an entry whose `path` is empty or names " +
-			"an external repository, so loading the model fetches a module from the Hub and composes " +
-			"it with the local ones. An empty path for the Transformer module is ordinary and appears " +
-			"in most published sentence-transformers repositories, which is why the severity is medium " +
-			"and the confidence low: the finding's value is that it tells a reviewer the scan does not " +
-			"cover the whole load path, and names which module type is remote.",
+		Description: "A sentence-transformers `modules.json` has an entry whose `path` is a URL, an " +
+			"absolute path, or a relative path that walks out of the repository, so loading the model " +
+			"fetches a module the scan did not read and composes it with the local ones. An empty path " +
+			"is NOT this rule's subject: entry 0 of every published sentence-transformers repository is " +
+			"the top-level Transformer with `path: \"\"`, meaning the repository root itself. Severity " +
+			"is medium and confidence low because the remote module may be a legitimate published " +
+			"stack; the finding's value is naming the module type that comes from somewhere else.",
 		Refs: []string{
 			"https://sbert.net/docs/package_reference/sentence_transformer/models.html",
 			"https://huggingface.co/docs/hub/security",

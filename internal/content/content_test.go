@@ -75,6 +75,13 @@ func TestRuleFiring(t *testing.T) {
 		{
 			name: "modules.json",
 			data: `[{"idx":0,"path":"","type":"sentence_transformers.models.Transformer"}]`,
+			// Entry 0 of every published sentence-transformers repository is the
+			// top-level Transformer, and its path is the repository root.
+			absent: []string{"SC4N-MODULES-REMOTE-MODULE"},
+		},
+		{
+			name: "modules.json",
+			data: `[{"idx":0,"path":"https://huggingface.co/o/remote/modules.json","type":"sentence_transformers.models.Dense"}]`,
 			want: []string{"SC4N-MODULES-REMOTE-MODULE"},
 		},
 		{
@@ -477,5 +484,37 @@ func TestBinaryBufferGetsNeitherTextClaim(t *testing.T) {
 	}
 	if !got["SC4N-STRING-RAW-IP-URL"] {
 		t.Fatalf("byte-safe tier did not run over the binary buffer: %v", got)
+	}
+}
+
+// TestAutoMapRemoteIsReportedOnce pins the count contract of a remote auto_map:
+// seven Auto* entries that all resolve to one repository are one decision to load
+// that repository, so one finding — naming it, and saying how many entries were
+// folded — is the right answer. nomic-embed-text-v1.5's config.json is this shape
+// and produced seven identical criticals on the benign corpus.
+func TestAutoMapRemoteIsReportedOnce(t *testing.T) {
+	const ref = "nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert."
+	cfg := `{"architectures":["NomicBertModel"],"auto_map":{` +
+		`"AutoConfig":"nomic-ai/nomic-bert-2048--configuration_hf_nomic_bert.NomicBertConfig",` +
+		`"AutoModel":"` + ref + `NomicBertModel",` +
+		`"AutoModelForPreTraining":"` + ref + `NomicBertForPreTraining",` +
+		`"AutoModelForSequenceClassification":"` + ref + `NomicBertForSequenceClassification",` +
+		`"AutoModelForMultipleChoice":"` + ref + `NomicBertForMultipleChoice",` +
+		`"AutoModelForQuestionAnswering":"` + ref + `NomicBertForQuestionAnswering",` +
+		`"AutoModelForTokenClassification":"` + ref + `NomicBertForTokenClassification"}}`
+	var got []report.Finding
+	for _, f := range scanBytes(t, "config.json", []byte(cfg), limits.Default()) {
+		if f.RuleID == "SC4N-CONFIG-AUTO-MAP" {
+			got = append(got, f)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("auto_map for one repository produced %d findings, want 1: %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Evidence, "nomic-ai/nomic-bert-2048 in 7 entries") {
+		t.Fatalf("evidence does not name the repository and the folded entry count: %q", got[0].Evidence)
+	}
+	if len(got[0].Extra) > 0 && got[0].Extra["entries"] != "7" {
+		t.Fatalf("Extra[entries] = %q, want 7", got[0].Extra["entries"])
 	}
 }

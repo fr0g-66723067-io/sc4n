@@ -54,28 +54,110 @@ func hfMeta(ctx *artifact.Ctx, name, base string, data []byte, truncated bool) {
 }
 
 // autoMapRule reports every auto_map it finds, wherever in the document it sits
-// (a config may nest it under a sub-config). Each referenced module is named, and
-// sc4n states whether the matching .py file exists next to the artifact, because
-// a local module is code the loader will import.
+// (a config may nest it under a sub-config). The finding is per *referenced
+// repository*, not per entry: a config that maps seven Auto* classes to the same
+// module package is one decision to load that package, and nomic-embed-text-v1.5
+// was reported seven times for it. Each finding names the module, how many entries
+// it was folded from, and whether the matching .py file exists next to the
+// artifact, because a local module is code the loader will import.
 func autoMapRule(ctx *artifact.Ctx, name string, data []byte, doc any) {
+	type group struct{ refs []string }
+	groups := map[string]*group{}
+	var order []string
 	walkMaps(doc, func(m map[string]any) {
 		v, ok := m["auto_map"]
 		if !ok {
 			return
 		}
 		for _, ref := range moduleRefs(v) {
-			ev := "auto_map references " + ref
-			if mod := moduleOfRef(ref); mod != "" {
-				if p, present := moduleExists(name, mod); present {
-					ev += "; the module file " + p + " exists in the scanned tree"
-				} else {
-					ev += "; the module file " + mod + ".py is not present in the scanned tree"
-				}
+			k := autoMapKey(ref)
+			g := groups[k]
+			if g == nil {
+				g = &group{}
+				groups[k] = g
+				order = append(order, k)
 			}
-			ctx.Sink.EmitExtra(ruleAutoMap, offsetOf(data, ref), ev,
-				map[string]string{"module": ref, "file": baseName(name)})
+			g.refs = append(g.refs, ref)
 		}
 	})
+	for _, k := range order {
+		refs := groups[k].refs
+		ref := refs[0]
+		extra := map[string]string{"module": ref, "file": baseName(name)}
+		ev := "auto_map references " + ref
+		if repo := autoMapRepo(ref); repo != "" && len(refs) > 1 {
+			classes := make([]string, 0, len(refs))
+			for _, r := range refs {
+				classes = append(classes, autoMapClass(r))
+			}
+			ev = "auto_map loads code from " + repo + " in " + itoa(len(refs)) + " entries (" +
+				clip(strings.Join(classes, ", "), 200) + ")"
+			extra["repo"] = repo
+			extra["entries"] = itoa(len(refs))
+		} else if mod := moduleOfRef(ref); mod != "" {
+			if p, present := moduleExists(name, mod); present {
+				ev += "; the module file " + p + " exists in the scanned tree"
+			} else {
+				ev += "; the module file " + mod + ".py is not present in the scanned tree"
+			}
+		}
+		ctx.Sink.EmitExtra(ruleAutoMap, offsetOf(data, ref), ev, extra)
+	}
+}
+
+// autoMapKey groups references that resolve to the same code. A remote reference
+// is `owner/repo--module.Class`, so the repository is what is loaded; anything
+// else is a module path beside the artifact and is its own group.
+func autoMapKey(ref string) string {
+	if repo := autoMapRepo(ref); repo != "" {
+		return "repo:" + repo
+	}
+	return "module:" + ref
+}
+
+// autoMapRepo returns the repository an `owner/repo--module.Class` reference
+// names, or "" for a reference that is local to the artifact.
+func autoMapRepo(ref string) string {
+	i := strings.Index(ref, "--")
+	if i <= 0 {
+		return ""
+	}
+	repo := ref[:i]
+	if !strings.Contains(repo, "/") {
+		return ""
+	}
+	for _, part := range strings.Split(repo, "/") {
+		if !isRepoPart(part) {
+			return ""
+		}
+	}
+	return repo
+}
+
+// isRepoPart reports whether s can be one path component of a Hub repository id.
+// It is not isIdent: a repository name may carry hyphens, dots and underscores
+// (`nomic-bert-2048`, `bge-m3.5`), which a Python module name may not.
+func isRepoPart(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '-' || c == '_' || c == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// autoMapClass returns the module.Class part of a reference, for evidence.
+func autoMapClass(ref string) string {
+	if i := strings.Index(ref, "--"); i >= 0 && i+2 <= len(ref) {
+		return ref[i+2:]
+	}
+	return ref
 }
 
 // moduleRefs flattens an auto_map value: it is a string, an array of strings, or
@@ -214,8 +296,19 @@ func adapterExternalBase(ctx *artifact.Ctx, name string, data []byte, doc any) {
 		map[string]string{"base_model_name_or_path": s, "file": baseName(name)})
 }
 
-// modulesRemote reports a sentence-transformers module entry whose path is empty
-// or points outside the scanned tree.
+// modulesRemote reports a sentence-transformers module entry whose path leaves
+// the scanned tree: an https/hf URL, an absolute path, or a relative path that
+// walks out of it with `..`.
+//
+// An empty path is NOT remote. It is the top-level module — entry 0 of every
+// published sentence-transformers repository is
+// {"path": "", "type": "sentence_transformers.models.Transformer"}, meaning "the
+// repository root itself" — and treating it as a Hub fetch reported six false
+// SC4N-MODULES-REMOTE-MODULE findings on the 25 most-downloaded models
+// (all-MiniLM-L6-v2, all-mpnet-base-v2, bge-m3, bge-small-en-v1.5,
+// paraphrase-multilingual-MiniLM-L12-v2, nomic-embed-text-v1.5). A bare
+// subdirectory name that is absent from the tree is a partial checkout, not a
+// remote module either.
 func modulesRemote(ctx *artifact.Ctx, name string, data []byte, doc any) {
 	arr, ok := doc.([]any)
 	if !ok {
@@ -228,28 +321,27 @@ func modulesRemote(ctx *artifact.Ctx, name string, data []byte, doc any) {
 		}
 		typ, _ := m["type"].(string)
 		path, _ := m["path"].(string)
-		if path != "" && !strings.HasPrefix(path, "http://") && !strings.HasPrefix(path, "https://") &&
-			!filepath.IsAbs(path) && !strings.Contains(path, "..") && localDirExists(name, path) {
+		if path == "" || path == "." {
 			continue
 		}
-		if path != "" && !strings.HasPrefix(path, "http://") && !strings.HasPrefix(path, "https://") &&
-			!filepath.IsAbs(path) && !strings.Contains(path, "..") && !strings.Contains(path, "/") {
-			// A bare subdirectory name with no separator is a local module
-			// (e.g. "1_Pooling"); an absent directory only means the tree is a
-			// partial checkout, which is not this rule's subject.
+		remote := strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") ||
+			strings.HasPrefix(path, "hf://") || strings.HasPrefix(path, "s3://")
+		if !remote && filepath.IsAbs(path) {
+			remote = true
+		}
+		if !remote && strings.Contains(path, "..") {
+			remote = true
+		}
+		if !remote {
+			// A relative path is a subdirectory of the repository, with or without
+			// a separator. An absent directory only means the tree is a partial
+			// checkout.
 			continue
 		}
-		ctx.Sink.EmitExtra(ruleModulesRemoteModule, offsetOf(data, pathOrType(path, typ)),
+		ctx.Sink.EmitExtra(ruleModulesRemoteModule, offsetOf(data, path),
 			"modules.json entry "+clip(typ, 80)+" resolves to a remote module (path "+clip(path, 80)+")",
 			map[string]string{"type": typ, "path": path, "file": baseName(name)})
 	}
-}
-
-func pathOrType(path, typ string) string {
-	if path != "" {
-		return path
-	}
-	return typ
 }
 
 // gitAttributes reports LFS and non-LFS filter/diff drivers. It parses the file
