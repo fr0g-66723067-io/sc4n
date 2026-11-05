@@ -92,6 +92,19 @@ func init() {
 						"bare subdirectories. Six of the 25 most-downloaded Hub models ship exactly this " +
 						"file and every one of them produced a false SC4N-MODULES-REMOTE-MODULE.",
 				},
+				"benign/training_log/log.txt": {
+					Forbid: []string{"SC4N-METADATA-CODE", "SC4N-STRING-DECODER"},
+					Notes: "A training log whose metrics lines read eval(step 1830050). Nothing loads a " +
+						".txt as code, so the document tier applies: burner22/numbat's " +
+						"training_log_tail.txt produced seven high SC4N-METADATA-CODE findings and " +
+						"seven medium decoders for these lines.",
+				},
+				"benign/vocab_json/tekken.json": {
+					Forbid: []string{"SC4N-METADATA-CODE", "SC4N-UNICODE-ANOMALY"},
+					Notes: "A tokenizer vocabulary in a JSON file that is not named tokenizer.json: the " +
+						"tokens sit in a top-level `vocab` list of {rank, token_str} objects. Mistral's " +
+						"tekken.json holds the token `subprocess`, which was reported as code execution.",
+				},
 				"benign/hf_config/config.json": {
 					Notes: "An ordinary BERT config: a known architecture, no auto_map, no " +
 						"trust_remote_code and no chat_template, so no content rule may fire.",
@@ -192,6 +205,23 @@ func contentFixtures(f *fixtureSet) {
 			"  {\"idx\": 1, \"name\": \"1\", \"path\": \"1_Pooling\", \"type\": \"sentence_transformers.models.Pooling\"},\n"+
 			"  {\"idx\": 2, \"name\": \"2\", \"path\": \"https://huggingface.co/o/remote/modules.json\", \"type\": \"sentence_transformers.models.Dense\"}\n"+
 			"]\n")
+
+	// A plain-text document: the tier that keeps cards quiet applies to it too.
+	f.addText("benign/training_log/log.txt",
+		"[2026-10-08T14:02:46Z step 1830096] eval(step 1830050). loss=1.1908 mmlu=0.8719(n=281)\n"+
+			"[2026-10-08T15:02:46Z step 1831096] eval(step 1831050). loss=1.1830 mmlu=0.8731(n=281)\n")
+
+	// A vocabulary in a JSON file whose name is not a tokenizer name: tekken.json
+	// is Mistral's, and its `vocab` list holds the token "subprocess".
+	f.addText("benign/vocab_json/tekken.json",
+		"{\n"+
+			"  \"config\": {\"pattern\": \"[^\\\\r\\\\n\\\\p{L}\\\\p{N}]\"},\n"+
+			"  \"vocab\": [\n"+
+			"    {\"rank\": 0, \"token_bytes\": \"c3A=\"},\n"+
+			"    {\"rank\": 1, \"token_str\": \"subprocess\"},\n"+
+			"    {\"rank\": 2, \"token_str\": \"b a\u202cb\"}\n"+
+			"  ]\n"+
+			"}\n")
 
 	// The ordinary published layout: entry 0 is the top-level Transformer and its
 	// path is the repository root. An empty path is local, not remote — every

@@ -208,14 +208,22 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	}
 
 	switch {
-	case isMarkdown(base):
-		cards.ScanText(ctx.Sink, 0, name, string(data))
 	case isJinjaName(base) || ctx.Format == artifact.FormatJinja:
+		// Templates come first: a .txt holding a chat template is a program, not a
+		// document, and the sniffer has already decided it is one.
 		jinja.Analyze(ctx.Sink, 0, name, string(data))
 		// The template tier: the shared engine still looks for a reachable secret
 		// or endpoint, but the instruction/pseudo-tag indicator belongs to the
 		// template analyser, which knows it is reading a template.
 		stringscan.EmitKind(ctx.Sink, 0, data, stringscan.KindTemplate)
+	case isDocument(base):
+		// A card and a plain text document are both things a *reader* consumes:
+		// nothing loads a .txt as code. They get the card tier, which keeps the
+		// injection table and the secret values and leaves out the rules about what
+		// a callable would do with the text. burner22/numbat's training_log_tail.txt
+		// produced seven high SC4N-METADATA-CODE findings for "eval(step 1830050)",
+		// a metrics line.
+		cards.ScanText(ctx.Sink, 0, name, string(data))
 	case base == "tokenizer.json":
 		if !truncated {
 			tokenizer.AnalyzeJSON(ctx.Sink, 0, name, data)
@@ -254,7 +262,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		gitAttributes(ctx, name, data)
 		stringscan.Emit(ctx.Sink, 0, data)
 	default:
-		stringscan.Emit(ctx.Sink, 0, data)
+		emitTokenizerDocument(ctx, data)
 	}
 	return nil
 }
@@ -531,6 +539,18 @@ func extOf(base string) string {
 func isMarkdown(base string) bool {
 	switch extOf(base) {
 	case "md", "markdown":
+		return true
+	}
+	return false
+}
+
+// isDocument reports whether the artifact is prose a reader consumes rather than
+// data a loader or a callable acts on. It extends isMarkdown with the plain-text
+// documents a repository carries beside its weights: training logs, notes,
+// captured output.
+func isDocument(base string) bool {
+	switch extOf(base) {
+	case "md", "markdown", "txt", "text", "log":
 		return true
 	}
 	return false

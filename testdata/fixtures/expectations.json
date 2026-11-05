@@ -1521,6 +1521,13 @@
       "expect": null,
       "notes": "An ordinary model card whose usage section contains a Python example with eval(, urllib.request, subprocess, trust_remote_code=True, os.environ[\"GITHUB_TOKEN\"] and a shell line with $HF_TOKEN. All of it is documentation, so no finding of any severity may fire."
     },
+    "benign/card_tool_api/README.md": {
+      "expect": null,
+      "forbid": [
+        "SC4N-CARD-INJECTION"
+      ],
+      "notes": "A card that documents an OpenAI-compatible function-calling loop (`tool_calls = response.choices[0].message.tool_calls`) beside a licence paragraph ('You must not use this model in a manner that infringes...'). Both are what mistralai/Mistral-Large-4-1T-A52B's card holds, and both were reported as model-directed directives until the bare API field names and the bare second person left the directive table."
+    },
     "benign/clean.ipynb": {
       "expect": null,
       "forbid": [
@@ -1848,9 +1855,25 @@
       ],
       "notes": "A training script that calls AutoModel.from_pretrained(model_name) with a variable: loader code, not a claim about where this repository's weights come from. Four sentence-transformers train_script.py files on the benign corpus were reported twice each for this."
     },
+    "benign/training_log/log.txt": {
+      "expect": null,
+      "forbid": [
+        "SC4N-METADATA-CODE",
+        "SC4N-STRING-DECODER"
+      ],
+      "notes": "A training log whose metrics lines read eval(step 1830050). Nothing loads a .txt as code, so the document tier applies: burner22/numbat's training_log_tail.txt produced seven high SC4N-METADATA-CODE findings and seven medium decoders for these lines."
+    },
     "benign/truncated_plain.zip": {
       "expect": null,
       "notes": "A truncated zip (no central directory) whose only member is plain text: the partial-container rule is informational and nothing above it may fire."
+    },
+    "benign/vocab_json/tekken.json": {
+      "expect": null,
+      "forbid": [
+        "SC4N-METADATA-CODE",
+        "SC4N-UNICODE-ANOMALY"
+      ],
+      "notes": "A tokenizer vocabulary in a JSON file that is not named tokenizer.json: the tokens sit in a top-level `vocab` list of {rank, token_str} objects. Mistral's tekken.json holds the token `subprocess`, which was reported as code execution."
     },
     "benign/xgb_model.json": {
       "expect": null,

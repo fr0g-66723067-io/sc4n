@@ -23,6 +23,15 @@ func init() {
 						"does to a reader.",
 				},
 			}, map[string]expectation{
+				"benign/card_tool_api/README.md": {
+					Forbid: []string{"SC4N-CARD-INJECTION"},
+					Notes: "A card that documents an OpenAI-compatible function-calling loop " +
+						"(`tool_calls = response.choices[0].message.tool_calls`) beside a licence " +
+						"paragraph ('You must not use this model in a manner that infringes...'). " +
+						"Both are what mistralai/Mistral-Large-4-1T-A52B's card holds, and both were " +
+						"reported as model-directed directives until the bare API field names and the " +
+						"bare second person left the directive table.",
+				},
 				"benign/card_prose/README.md": {
 					Notes: "An ordinary model card whose usage section contains a Python example with " +
 						"eval(, urllib.request, subprocess, trust_remote_code=True, os.environ[\"GITHUB_TOKEN\"] " +
@@ -64,6 +73,23 @@ func cardFixtures(f *fixtureSet) {
 			"```\n\n"+
 			"## Evaluation\n\n"+
 			"Top-1 accuracy is reported in the paper; see the citation below.\n")
+
+	f.addText("benign/card_tool_api/README.md",
+		"---\n"+
+			"license: apache-2.0\n"+
+			"---\n"+
+			"# Tiny Tool Model\n\n"+
+			"A small model with function calling.\n\n"+
+			"```python\n"+
+			"response = client.chat.completions.create(model=model, messages=messages, tools=tools)\n"+
+			"tool_calls = response.choices[0].message.tool_calls\n"+
+			"for tool_call in tool_calls:\n"+
+			"    function_name = tool_call.function.name\n"+
+			"    function_args = tool_call.function.arguments\n"+
+			"```\n\n"+
+			"## License\n\n"+
+			"You must not use this model in a manner that infringes, misappropriates or otherwise "+
+			"violates any third party's rights, including intellectual property rights.\n")
 
 	f.addText("card_secret/README.md",
 		"---\n"+

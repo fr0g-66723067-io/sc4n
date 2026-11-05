@@ -2,6 +2,7 @@ package pysrc
 
 import (
 	"bytes"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -573,6 +574,24 @@ func hasAnyMarker(src []byte, markers ...string) bool {
 // finish emits the artifact-level rule that pairs a reducing class with a
 // serialiser dump. One finding per artifact: the first hit names the class.
 func (a *analyzer) finish() {
+	// Taint sites first: they are the broadest family, and the reduce-builder
+	// finding below is emitted at the end so it can see the whole body.
+	keys := make([]string, 0, len(a.taintSites))
+	for k := range a.taintSites {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		site := a.taintSites[k]
+		extra := site.extra
+		ev := site.ev
+		if site.count > 1 {
+			extra["sites"] = strconv.Itoa(site.count)
+			ev += " (+" + strconv.Itoa(site.count-1) + " more call sites)"
+		}
+		line, col := a.at(site.off)
+		a.ctx.Sink.EmitAtExtra(site.rule, line, col, ev, extra)
+	}
 	if !a.dumped || len(a.reduceHits) == 0 {
 		return
 	}
@@ -631,7 +650,8 @@ type analyzer struct {
 	cell []int
 	// tainted holds the names assigned from a source since the last function
 	// boundary. It is deliberately coarse: no containers, no attribute paths.
-	tainted map[string]bool
+	tainted    map[string]bool
+	taintSites map[string]*taintSite
 	// netTainted is the subset of tainted assigned from a network/download source,
 	// used by the pickle-load-of-remote-data rule.
 	netTainted map[string]bool
@@ -1051,19 +1071,70 @@ func (a *analyzer) markAssigned(st []Token, network bool) {
 
 // ---- taint rules --------------------------------------------------------------
 
+// taintSite is one sink reached by tainted data. The finding is emitted once per
+// (rule, callee) at the end rather than once per call site: a test client that
+// posts seven times through requests.post is one decision to send data over the
+// network, and sglang's streaming kit produced seven identical
+// SC4N-CODE-TAINT-NETWORK findings for exactly that.
+type taintSite struct {
+	rule  *report.Rule
+	calle string
+	off   int32
+	ev    string
+	extra map[string]string
+	count int
+}
+
 func (a *analyzer) taintRules(st []Token, calls []Call, stmtText string) {
 	for _, c := range calls {
 		r := a.sinkFor(c, stmtText)
-		if r == nil || !a.callArgTainted(st, c) {
+		if r == nil {
+			continue
+		}
+		// getattr/setattr/delattr resolve an attribute *name*: only a tainted name
+		// argument is the hazard the rule describes. Checking every argument
+		// reported getattr(args, "profile_prefill_url", None) — a literal name on
+		// an argparse namespace — thirteen times on the benign corpus.
+		if r == ruleTaintDynamic && !a.nameArgTainted(st, c) {
+			continue
+		}
+		if !a.callArgTainted(st, c) {
 			continue
 		}
 		extra := map[string]string{"call": c.Dotted}
 		if strings.Contains(stmtText, "shell=True") {
 			extra["shell"] = "True"
 		}
-		line, col := a.at(c.Off)
-		a.ctx.Sink.EmitAtExtra(r, line, col, report.TruncateEvidence(callEvidence(a.src, c), 160), extra)
+		key := r.ID + "|" + c.Dotted
+		if a.taintSites == nil {
+			a.taintSites = map[string]*taintSite{}
+		}
+		if site, ok := a.taintSites[key]; ok {
+			site.count++
+			continue
+		}
+		a.taintSites[key] = &taintSite{
+			rule:  r,
+			calle: c.Dotted,
+			off:   c.Off,
+			ev:    report.TruncateEvidence(callEvidence(a.src, c), 160),
+			extra: extra,
+			count: 1,
+		}
 	}
+}
+
+// nameArgTainted reports whether the attribute-name argument of getattr/setattr/
+// delattr is tainted. It is the second positional argument, or the `name=` keyword.
+func (a *analyzer) nameArgTainted(st []Token, c Call) bool {
+	if len(c.Args) > 1 {
+		rg := c.argToks[1]
+		return a.rangeTainted(st, int(rg[0]), int(rg[1]))
+	}
+	if rg, ok := c.kwToks["name"]; ok {
+		return a.rangeTainted(st, int(rg[0]), int(rg[1]))
+	}
+	return false
 }
 
 func (a *analyzer) sinkFor(c Call, stmtText string) *report.Rule {

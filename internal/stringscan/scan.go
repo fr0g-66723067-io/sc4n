@@ -616,7 +616,24 @@ func assignmentValueIsPlaceholder(b []byte, h Hit) bool {
 	case credentialPlaceholders[nv]:
 		return true
 	}
+	// A value that *names* a credential is a reference, not a secret:
+	// api_key=openai_api_key in a card's code block, api_key=args.key in a script,
+	// token=cfg.token. mistralai/Mistral-Large-4-1T-A52B's README produced three
+	// high SC4N-STRING-SECRET-VALUE findings for the first. A bare value such as
+	// password=hunter2 does not name a credential and is still reported.
+	for _, suffix := range credentialNameSuffixes {
+		if len(nv) > len(suffix) && strings.HasSuffix(nv, suffix) {
+			return true
+		}
+	}
 	return false
+}
+
+// credentialNameSuffixes end the names of credentials, so a value carrying one is
+// naming a credential rather than being one.
+var credentialNameSuffixes = []string{
+	"apikey", "apisecret", "secretkey", "accesstoken", "authtoken",
+	"password", "passwd", "passphrase", "credential", "credentials", "token", "secret",
 }
 
 // isCredentialByte reports whether c can appear inside an unquoted credential

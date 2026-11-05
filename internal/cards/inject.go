@@ -20,11 +20,21 @@ import (
 // imperatives and tool/function-call directives rather than the chat pseudo-tags
 // and override phrases stringscan already carries.
 var cardDirectives = []string{
-	"tool_calls", "function_call", "recipient_name", "tool_use",
+	// The chat-format markers only. The bare identifiers `tool_calls`,
+	// `function_call`, `recipient_name` and `tool_use` are the field names of every
+	// tool-calling API example, so a card that documents function calling carried
+	// them: mistralai/Mistral-Large-4-1T-A52B's README produced three medium
+	// SC4N-CARD-INJECTION findings for its `tool_calls = response...` snippet, and
+	// a card that really instructs the model says so in words ("the assistant
+	// must", "always respond"), which the table still carries.
 	"<tool_call>", "<function_call>", "<tool_use>", "<tool_response>",
-	"you must ", "you must not", "you should always", "always respond",
-	"never reveal", "never mention", "do not disclose", "do not reveal this",
-	"do not output", "do not echo", "under no circumstances",
+	// The bare second person ("you must ", "you must not", "under no
+	// circumstances") is the phrasing of licence text: "You must not use this
+	// model in a manner that infringes..." produced two SC4N-CARD-INJECTION
+	// findings on Mistral-Large-4-1T-A52B's card. The directive forms below keep
+	// the second person only where it names the model or its answer.
+	"always respond", "never reveal", "never mention", "do not disclose",
+	"do not reveal this", "do not output", "do not echo",
 	"the assistant must", "the model must", "system prompt is", "hidden instruction",
 	// The above-anaphora family. "Ignore the above" and its variants carry no
 	// noun of their own, which is exactly why they are the phrasing a card that

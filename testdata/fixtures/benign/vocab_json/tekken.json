@@ -1,0 +1,8 @@
+{
+  "config": {"pattern": "[^\\r\\n\\p{L}\\p{N}]"},
+  "vocab": [
+    {"rank": 0, "token_bytes": "c3A="},
+    {"rank": 1, "token_str": "subprocess"},
+    {"rank": 2, "token_str": "b a‬b"}
+  ]
+}
