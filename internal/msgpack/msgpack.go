@@ -94,6 +94,16 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		if errors.Is(verr, errCap) {
 			return nil
 		}
+		// A header slice ends inside a container it was part-way through reading:
+		// that is the slice, not a malformed document, and returning the error
+		// would also make the scan layer add SC4N-PARSE-FAILED. flax_model.msgpack
+		// in the benign corpus is a 2 MiB prefix and produced both.
+		if errors.Is(verr, errTruncated) && ctx.Session != nil && ctx.Session.IsPartial(ctx.Sink.Artifact()) {
+			ctx.Sink.EmitExtra(artifact.RulePartialSlice, 0,
+				"the artifact is a "+strconv.FormatInt(s.Size(), 10)+"-byte slice of a larger MessagePack document, so the walk stopped at the slice boundary",
+				map[string]string{"bytes": strconv.FormatInt(s.Size(), 10)})
+			return nil
+		}
 		ctx.Sink.Emit(RuleStruct, int64(w.idx), verr.Error())
 		return verr
 	}

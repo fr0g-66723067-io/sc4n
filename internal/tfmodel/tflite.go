@@ -19,6 +19,7 @@ package tfmodel
 
 import (
 	"encoding/binary"
+	"strconv"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
@@ -276,6 +277,17 @@ func (tfliteParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	id, _ := s.Bytes(4, 4)
 	if string(id) != "TFL3" {
 		ctx.Sink.Emit(ruleTFLiteStruct, 4, "identifier is not 'TFL3' at offset 4")
+		return nil
+	}
+	// A header slice of a larger flatbuffer cannot be validated: the root table's
+	// vectors point at data that is not in the prefix, so every reference leaving
+	// the file is the slice and not the model. gpt2's 64.tflite in the benign
+	// corpus is a 2 MiB prefix and produced three medium SC4N-TFLITE-STRUCT
+	// findings for exactly that.
+	if ctx.Session != nil && ctx.Session.IsPartial(ctx.Sink.Artifact()) {
+		ctx.Sink.EmitExtra(artifact.RulePartialSlice, 0,
+			"the artifact is a "+strconv.FormatInt(s.Size(), 10)+"-byte slice of a larger TFLite model, so the flatbuffer was not validated",
+			map[string]string{"bytes": strconv.FormatInt(s.Size(), 10)})
 		return nil
 	}
 	w := &tfliteWalk{ctx: ctx, itemsLeft: tfliteMaxItems, scanBytesLeft: tfliteMaxScanBytes}
