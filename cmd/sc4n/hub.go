@@ -221,6 +221,9 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 	}
 
 	ctx := context.Background()
+	// freshScan is the report recomputed from the stage files when the stage that
+	// just ran changed scan.json; nil means "read campaign.json".
+	var freshScan *hubcampaign.CampaignReport
 	switch *stage {
 	case "all":
 		err = hubcampaign.Run(ctx, o)
@@ -231,7 +234,15 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 	case "fetch":
 		_, err = hubcampaign.Fetch(ctx, o)
 	case "scan":
-		_, err = hubcampaign.ScanTree(ctx, o)
+		// The summary below is computed from the stage files, not from whatever
+		// campaign.json a previous -stage report left: re-scanning printed the old
+		// totals under the new ones, so a run whose fixes cut 181 high findings to
+		// 65 reported "1809 findings [28 critical, 181 high]" on the next line.
+		if _, err = hubcampaign.ScanTree(ctx, o); err == nil {
+			if fresh, jerr := hubcampaign.Join(o); jerr == nil {
+				freshScan = fresh
+			}
+		}
 	case "report":
 		var rep *hubcampaign.CampaignReport
 		if rep, err = hubcampaign.Join(o); err == nil {
@@ -243,7 +254,10 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		return exitUnreadable
 	}
 
-	rep, err := hubcampaign.Load(o)
+	rep := freshScan
+	if rep == nil {
+		rep, err = hubcampaign.Load(o)
+	}
 	if err != nil {
 		// A single early stage has not produced campaign.json yet; the stage's own
 		// progress line is the result, so this is not an error.
