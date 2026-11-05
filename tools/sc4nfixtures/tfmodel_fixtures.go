@@ -347,6 +347,12 @@ func tfmodelFixtures(f *fixtureSet) {
 		`{"class_name":"Dense","config":{"name":"d","units":2,"activation":"linear"}}]}}`
 	f.add("benign/h5_model.h5", h5File([]byte("model_config\x00"), []byte(h5BenignJSON)))
 
+	// The shape that produced a false SC4N-HDF5-EXTERNAL-LINK (high) on
+	// openai/clip-vit-base-patch32/tf_model.h5: a printable run out of tensor bytes
+	// that starts with '/' and has two short alphanumeric components. It is not a
+	// name in either component, so it is not a path.
+	f.add("benign/h5_noise_path.h5", h5File([]byte("mean\x00"), []byte("/38j/Ow9\x00")))
+
 	// SavedModel with a PyFunc op and a ReadFile op with an absolute path.
 	savedModelBad := tfSavedModel(tfGraphDef(
 		tfNode("py", "PyFunc", tfAttr("token", "myfunc")),
@@ -493,6 +499,13 @@ func tfmodelExpectations() (map[string]expectation, map[string]expectation) {
 		"benign/h5_model.h5": {
 			Forbid: []string{"SC4N-KERAS-LAMBDA", "SC4N-KERAS-CLASS-UNKNOWN", "SC4N-HDF5-EXTERNAL-LINK", "SC4N-HDF5-STRUCT"},
 			Notes:  "An H5 whose model_config is an ordinary Sequential/Dense model with no external paths.",
+		},
+		"benign/h5_noise_path.h5": {
+			Forbid: []string{"SC4N-HDF5-EXTERNAL-LINK"},
+			Notes: "A printable run from tensor bytes that starts with '/' and has two three-byte " +
+				"alphanumeric components ('/38j/Ow9'). It is the exact shape reported as a " +
+				"high-severity absolute path on clip-vit-base-patch32's tf_model.h5, and neither " +
+				"component is a name, so no external-link finding may fire.",
 		},
 		"benign/tf_savedmodel/saved_model.pb": {
 			Forbid: []string{"SC4N-TF-PYFUNC", "SC4N-TF-FILE-IO", "SC4N-TF-STRUCT"},

@@ -1561,6 +1561,13 @@
       ],
       "notes": "An H5 whose model_config is an ordinary Sequential/Dense model with no external paths."
     },
+    "benign/h5_noise_path.h5": {
+      "expect": null,
+      "forbid": [
+        "SC4N-HDF5-EXTERNAL-LINK"
+      ],
+      "notes": "A printable run from tensor bytes that starts with '/' and has two three-byte alphanumeric components ('/38j/Ow9'). It is the exact shape reported as a high-severity absolute path on clip-vit-base-patch32's tf_model.h5, and neither component is a name, so no external-link finding may fire."
+    },
     "benign/hf_config/config.json": {
       "expect": null,
       "notes": "An ordinary BERT config: a known architecture, no auto_map, no trust_remote_code and no chat_template, so no content rule may fire."

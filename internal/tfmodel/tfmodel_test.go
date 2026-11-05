@@ -514,6 +514,8 @@ func TestPathLike(t *testing.T) {
 	reject := []string{
 		"/;^a(<(=!", "/<.B*<@`", "/d=t", "J:=J.", "/4DRE5KR", `/9cZ.8p\`,
 		"/^y=6H/>", "/<4d#<B]/<JG", "/BS=9?>", "/H~..TVd-",
+		// Measured on the benign corpus: clip-vit-base-patch32's tf_model.h5.
+		"/38j/Ow9",
 	}
 	for _, s := range reject {
 		if pathLike(s) {

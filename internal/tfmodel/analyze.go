@@ -321,27 +321,35 @@ func pathEscapeReason(v string) string {
 	return ""
 }
 
-// pathLike reports whether a printable run has the shape of a path: at least two
-// components, one of them a plausible filename, a majority of filename bytes
-// overall, and at least two letters.
+// pathLike reports whether a printable run has the shape of a path a program
+// would write: at least two components, every component made of filename bytes and
+// long enough to be a name, at least one of them reading as a *name*, a majority of
+// filename bytes overall, and at least two letters.
 //
 // This gate exists because the runs come out of tensor bytes, where anything that
 // starts with '/' and reaches eight characters was reported as an absolute path.
 // Measured on the unsafe corpus, 14 of 15 SC4N-HDF5-EXTERNAL-LINK findings were
 // runs like "/;^a(<(=!", "/<.B*<@`", "/4DRE5KR" and "/^y=6H/>": each has a single
 // component or none that is made of filename characters. The one true positive is
-// "../../../../etc/passwd", which has "etc" and "passwd" as components. A
-// single-component absolute path is deliberately not enough: a loader path of that
-// form is rare, and that shape is exactly what binary noise produces.
+// "../../../../etc/passwd", which has "etc" and "passwd" as components.
+//
+// The substring test alone was still too loose: openai/clip-vit-base-patch32's
+// tf_model.h5 reported "/38j/Ow9" as a high-severity absolute path on the benign
+// corpus, because two three-byte alphanumeric components satisfy "two components,
+// one strong run". A name-like component is what separates a path from base64-ish
+// noise — see componentIsName.
 func pathLike(run string) bool {
-	components, strong := 0, false
+	components := 0
+	named := false
 	for _, seg := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if seg == "" {
 			continue
 		}
+		// A component made only of separators ("~") is not disqualifying: the
+		// majority-bytes test below already refuses a run that is mostly noise.
 		components++
-		if len(seg) >= 3 && isFilenameComponent(seg) {
-			strong = true
+		if componentIsName(seg) {
+			named = true
 		}
 	}
 	filenameBytes, letters := 0, 0
@@ -355,7 +363,66 @@ func pathLike(run string) bool {
 			letters++
 		}
 	}
-	return components >= 2 && strong && filenameBytes*2 >= len(run) && letters >= 2
+	return components >= 2 && named && filenameBytes*2 >= len(run) && letters >= 2
+}
+
+// componentIsName reports whether a path component reads as a name rather than as
+// an alphanumeric run. Three shapes qualify:
+//
+//   - all letters, at least three of them ("etc", "tmp", "Windows") — case is not
+//     significant because a Windows component is capitalised;
+//   - a lower-case identifier of three or more characters: letters, digits after
+//     the first, and underscores ("id_rsa", "data2", "passwd");
+//   - a dotted name with a one-to-four-letter lower-case extension ("a.b",
+//     "x.bin", "model.h5").
+//
+// "38j" starts with a digit and "Ow9" is a mixed-case run with a digit, so neither
+// qualifies, which is what separates "/38j/Ow9" — a tensor byte pattern that was
+// reported as a high-severity absolute path on clip-vit-base-patch32's tf_model.h5
+// — from a path a loader can write.
+func componentIsName(seg string) bool {
+	if i := strings.LastIndexByte(seg, '.'); i > 0 && i < len(seg)-1 {
+		if ext := seg[i+1:]; len(ext) <= 4 && isLowerWord(ext) {
+			return true
+		}
+	}
+	if len(seg) < 3 {
+		return false
+	}
+	letters := 0
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			letters++
+		}
+	}
+	if letters == len(seg) {
+		return true
+	}
+	if seg[0] < 'a' || seg[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(seg); i++ {
+		c := seg[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// isLowerWord reports whether s is one or more lowercase ASCII letters.
+func isLowerWord(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 'a' || s[i] > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // isFilenameComponent reports whether every byte is a filename byte.
@@ -374,7 +441,9 @@ func isFilenameByte(c byte) bool {
 	switch {
 	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
 		return true
-	case c == '/', c == '.', c == '_', c == '-':
+	case c == '/', c == '.', c == '_', c == '-', c == ':':
+		// ':' belongs to a drive letter ("C:\\x") and to a URL scheme
+		// ("https://h/a.b"), both of which are paths a loader can write.
 		return true
 	}
 	return false
