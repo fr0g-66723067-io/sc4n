@@ -256,6 +256,8 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 		i = start + 4 + k + 3
 	}
 
+	var hiddenRuns, hiddenChars, invisibleRuns, invisibleChars int
+	var hiddenAt, invisibleAt int64 = -1, -1
 	for i := 0; i < len(text); {
 		r, size := utf8.DecodeRuneInString(text[i:])
 		if !invisible(r) {
@@ -277,12 +279,32 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 			n++
 		}
 		if reorders {
-			sink.Emit(ruleCardHidden, base+int64(start),
-				fmt.Sprintf("%d invisible or text-order control character(s) in %s; the run reorders text (Trojan Source)", n, what))
+			hiddenRuns++
+			hiddenChars += n
+			if hiddenAt < 0 {
+				hiddenAt = int64(start)
+			}
 			continue
 		}
-		sink.Emit(ruleCardInvisible, base+int64(start),
-			fmt.Sprintf("%d invisible character(s) in %s, which hide text without reordering it", n, what))
+		invisibleRuns++
+		invisibleChars += n
+		if invisibleAt < 0 {
+			invisibleAt = int64(start)
+		}
+	}
+	// One finding per document, not one per run: DavidAU's GGUF card pads its
+	// prose with zero-width spaces and produced 27 medium SC4N-CARD-INVISIBLE
+	// findings for one author's habit, which is one decision ("this card carries
+	// invisible characters") and not 27.
+	if hiddenRuns > 0 {
+		sink.Emit(ruleCardHidden, base+hiddenAt,
+			fmt.Sprintf("%d invisible or text-order control character(s) in %s across %d run(s); at least one reorders text (Trojan Source)",
+				hiddenChars, what, hiddenRuns))
+	}
+	if invisibleRuns > 0 {
+		sink.Emit(ruleCardInvisible, base+invisibleAt,
+			fmt.Sprintf("%d invisible character(s) in %s across %d run(s), which hide text without reordering it",
+				invisibleChars, what, invisibleRuns))
 	}
 }
 

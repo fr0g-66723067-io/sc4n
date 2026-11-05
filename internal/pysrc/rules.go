@@ -1085,6 +1085,24 @@ type taintSite struct {
 	count int
 }
 
+// opaqueLiterals reports whether the string tokens in st assemble something a
+// reader cannot read: at least 64 bytes of content with no spaces, which is the
+// shape of a base64, hex or packed-payload fragment list.
+func opaqueLiterals(st []Token, src []byte) bool {
+	total := 0
+	for i := range st {
+		if st[i].Kind != TokString {
+			continue
+		}
+		v := StringValue(st[i], src, 4096)
+		if strings.ContainsAny(v, " \t") {
+			return false
+		}
+		total += len(v)
+	}
+	return total >= 64
+}
+
 func (a *analyzer) taintRules(st []Token, calls []Call, stmtText string) {
 	for _, c := range calls {
 		r := a.sinkFor(c, stmtText)
@@ -1446,7 +1464,13 @@ func (a *analyzer) obfuscationRules(st []Token, calls []Call) {
 	if chrCount >= 2 {
 		a.emitAt(ruleObfuscation, firstChr, "chr() chain ("+strconv.Itoa(chrCount)+" calls)")
 	}
-	if strings.Contains(stmtTextOf(a.src, st), ".join(") && hasOpenBracket(a.src, st) && countKind(st, TokString) >= 3 {
+	// A join of many literals is an obfuscation signal only when the literals
+	// assemble something opaque. `", ".join(["hi"] * 512)` and
+	// `f"│ {title:<{width - 3}}│"` are ordinary formatting, and they were most of
+	// the 136 medium SC4N-CODE-OBFUSCATION findings sglang's wheel produced: the
+	// payload shape is a long run of space-free fragments (base64, hex, SQL).
+	if strings.Contains(stmtTextOf(a.src, st), ".join(") && hasOpenBracket(a.src, st) &&
+		countKind(st, TokString) >= 8 && opaqueLiterals(st, a.src) {
 		a.emitAt(ruleObfuscation, st[0].Off, "join of many string literals")
 	}
 	for i := range st {
@@ -1457,7 +1481,11 @@ func (a *analyzer) obfuscationRules(st []Token, calls []Call) {
 		if countByteSeq(b, '\\', 'x') >= 16 {
 			a.emitAt(ruleObfuscation, st[i].Off, "long run of \\x escapes")
 		}
-		if IsStringToken(st[i], a.src, 'f') && maxBraceDepth(StringValue(st[i], a.src, 4096)) >= 2 {
+		// A nested replacement field is only worth a finding when the string is
+		// long enough for the nesting to hide content: a 24-byte table row with a
+		// width expression is not obfuscation.
+		if IsStringToken(st[i], a.src, 'f') && len(StringValue(st[i], a.src, 4096)) >= 120 &&
+			maxBraceDepth(StringValue(st[i], a.src, 4096)) >= 2 {
 			a.emitAt(ruleObfuscation, st[i].Off, "nested f-string replacement fields")
 		}
 	}

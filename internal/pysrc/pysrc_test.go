@@ -600,3 +600,25 @@ agent = Agent(name="calc", tools=[BuiltInCodeExecutor])
 		})
 	}
 }
+
+// TestObfuscationNeedsAnOpaquePayload: a join of literals or a nested f-string is
+// ordinary formatting until the assembled text is something a reader cannot read.
+// sglang's wheel produced 136 medium SC4N-CODE-OBFUSCATION findings for
+// `" ".join(["hi"] * 512)` and `f"│ {title:<{width - 3}}│"`.
+func TestObfuscationNeedsAnOpaquePayload(t *testing.T) {
+	benign := []string{
+		`s = " ".join(["hi"] * 512)` + "\n",
+		`prompt = ", ".join(["a", "b", "c", "d", "e", "f", "g", "h"])` + "\n",
+		"print(f\"\u2502 {title:<{width - 3}}\u2502\")\n",
+	}
+	for _, src := range benign {
+		if got := analyzeOK(t, src); got["SC4N-CODE-OBFUSCATION"] {
+			t.Errorf("ordinary formatting reported as obfuscation: %q", src)
+		}
+	}
+	// The payload shape: many space-free fragments assembled by join.
+	payload := "p = \"\".join([\"aGVsbG8gd29ybGQ=\", \"c2Vjb25kIGNodW5r\", \"dGhpcmQgY2h1bms=\", \"Zm91cnRoIGNodW5r\", \"ZmlmdGggY2h1bms=\", \"c2l4dGggY2h1bms=\", \"c2V2ZW50aCBjaHVuaw==\", \"ZWlnaHRoIGNodW5r\"])\n"
+	if got := analyzeOK(t, payload); !got["SC4N-CODE-OBFUSCATION"] {
+		t.Error("an eight-fragment opaque join was not reported")
+	}
+}
