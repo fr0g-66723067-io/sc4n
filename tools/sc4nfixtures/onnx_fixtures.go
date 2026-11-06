@@ -38,6 +38,22 @@ func onnxFixtures(f *fixtureSet) {
 
 	// An absolute location, the same primitive with the classic /etc/shadow
 	// target.
+	// The NUL form: a location whose bytes are present but not printable. A loader
+	// stopping at the NUL reads w.bin; the document says w.bin<...>../../etc/passwd.
+	f.add("onnx_nul_external.onnx", pbCat(
+		pbVar(1, 8), // ir_version
+		pbStr(2, "sc4n-fixture"),
+		pbBytes(8, pbOpset("", 17)),
+		pbBytes(7, pbGraph(
+			pbStr(2, "g"),
+			pbBytes(5, pbTensorExternal("w", []int64{2, 2}, 1,
+				pbEntry("location", "w.bin\x00../../etc/passwd"),
+				pbEntry("offset", "0"),
+				pbEntry("length", "16"),
+			)),
+		)),
+	))
+
 	f.add("onnx_absolute_external.onnx", pbCat(
 		pbVar(1, 8),
 		pbBytes(8, pbOpset("", 17)),
@@ -188,6 +204,19 @@ func onnxExpectations() map[string]expectation {
 			Notes: "external_data location '../../etc/passwd'. The loader resolves it relative to the " +
 				"model directory and returns the file's bytes as tensor content: CVE-2022-25882, with " +
 				"CVE-2024-27318 as the bypass of that fix.",
+		},
+		"onnx_nul_external.onnx": {
+			Expect: []string{"SC4N-ONNX-EXTERNAL-TRAVERSAL", "SC4N-ONNX-STRUCT"},
+			Forbid: []string{
+				"SC4N-ONNX-EXTERNAL-KEY",
+				"SC4N-ONNX-EXTERNAL-BOUNDS",
+				"SC4N-ONNX-EXTERNAL-SYMLINK",
+			},
+			Notes: "external_data location 'w.bin\x00../../etc/passwd': a document that names one " +
+				"file while a C or C++ loader stops at the NUL and opens another. Reported as " +
+				"traversal with the control bytes named, not as a missing key — the distinction " +
+				"came from the validity-oracle lab, where onnx.checker resolves the NUL-truncated " +
+				"path and accepts the model.",
 		},
 		"onnx_absolute_external.onnx": {
 			Expect: []string{"SC4N-ONNX-EXTERNAL-TRAVERSAL"},

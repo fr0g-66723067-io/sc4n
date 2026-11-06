@@ -925,7 +925,7 @@ func (w *walker) walkTensor(r *reader) {
 				return
 			}
 		case 13: // external_data
-			key, val, ok := w.readEntry(r, off, false)
+			key, val, unreadable, ok := w.readEntry(r, off, false)
 			if !ok {
 				return
 			}
@@ -937,6 +937,12 @@ func (w *walker) walkTensor(r *reader) {
 					ext.keys = append(ext.keys, key)
 				}
 				ext.vals[key] = val
+				if unreadable {
+					if ext.bad == nil {
+						ext.bad = map[string]bool{}
+					}
+					ext.bad[key] = true
+				}
 				hasExternal = true
 			}
 		case 14: // data_location
@@ -1284,30 +1290,36 @@ func (w *walker) walkFunction(r *reader) {
 // scans both sides when scan is set. It returns ok=false only when the framing
 // itself is unreadable.
 func (w *walker) walkEntry(r *reader, off int64, scan bool) bool {
-	_, _, ok := w.readEntry(r, off, scan)
+	_, _, _, ok := w.readEntry(r, off, scan)
 	return ok
 }
 
 // readEntry is walkEntry with the values returned, for external_data.
-func (w *walker) readEntry(r *reader, off int64, scan bool) (key, val string, ok bool) {
+//
+// unreadable reports that a value was present on the wire but its bytes were not
+// printable text, so val is empty. The distinction matters for external_data: "no
+// location key" and "a location whose bytes a C loader stops reading at the first
+// NUL" are different facts, and only the second names a path the loader resolves
+// somewhere else.
+func (w *walker) readEntry(r *reader, off int64, scan bool) (key, val string, unreadable, ok bool) {
 	bo, n, ok := r.bytesValue()
 	if !ok {
 		w.badWire(off, "map entry")
-		return "", "", false
+		return "", "", false, false
 	}
 	sub := newReader(w.s, bo, bo+n)
 	for sub.remaining() > 0 {
 		if !w.count() {
-			return "", "", true
+			return "", "", unreadable, true
 		}
 		num, typ, foff, ok := sub.next()
 		if !ok {
 			w.badWire(foff, "StringStringEntryProto")
-			return "", "", false
+			return "", "", false, false
 		}
 		if !w.checkField(entryFields, num, typ, foff, "StringStringEntryProto") {
 			if !sub.skipValue(typ) {
-				return "", "", false
+				return "", "", false, false
 			}
 			continue
 		}
@@ -1316,12 +1328,13 @@ func (w *walker) readEntry(r *reader, off int64, scan bool) (key, val string, ok
 			var v string
 			if scan {
 				if !w.scanStringField(sub, foff, "map entry value") {
-					return "", "", false
+					return "", "", false, false
 				}
 			} else {
-				v, ok = w.readString(sub, foff, "map entry")
-				if !ok {
-					return "", "", false
+				var okv bool
+				v, unreadable, okv = w.readString(sub, foff, "map entry")
+				if !okv {
+					return "", "", unreadable, false
 				}
 			}
 			if num == 1 {
@@ -1331,11 +1344,11 @@ func (w *walker) readEntry(r *reader, off int64, scan bool) (key, val string, ok
 			}
 		default:
 			if !sub.skipValue(typ) {
-				return "", "", false
+				return "", "", false, false
 			}
 		}
 	}
-	return key, val, true
+	return key, val, unreadable, true
 }
 
 // scanStringField reads a length-delimited string field and hands it to the
@@ -1361,7 +1374,7 @@ func (w *walker) scanStringField(r *reader, off int64, what string) bool {
 		return true
 	}
 	if !printableUTF8(b) {
-		w.structAt(off, what+" is not valid UTF-8 text")
+		w.structAt(off, what+" contains control bytes or is not valid UTF-8 text")
 		return true
 	}
 	stringscan.Emit(w.sink, bo, b)
@@ -1370,28 +1383,28 @@ func (w *walker) scanStringField(r *reader, off int64, what string) bool {
 
 // readString reads a length-delimited string field and returns its text, under
 // the MaxStringBlob cap and with the same UTF-8 rule as scanStringField.
-func (w *walker) readString(r *reader, off int64, what string) (string, bool) {
+func (w *walker) readString(r *reader, off int64, what string) (val string, unreadable, ok bool) {
 	bo, n, ok := r.bytesValue()
 	if !ok {
 		w.badWire(off, what)
-		return "", false
+		return "", false, false
 	}
 	if n == 0 {
-		return "", true
+		return "", false, true
 	}
 	if n > w.l.MaxStringBlob {
 		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "onnx "+what)
-		return "", true
+		return "", false, true
 	}
 	b := r.view(bo, n)
 	if b == nil {
-		return "", true
+		return "", false, true
 	}
 	if !printableUTF8(b) {
-		w.structAt(off, what+" is not valid UTF-8 text")
-		return "", true
+		w.structAt(off, what+" contains control bytes or is not valid UTF-8 text")
+		return "", true, true
 	}
-	return string(b), true
+	return string(b), false, true
 }
 
 // checkDomain reads a domain string and notes it (through noteDomain) when it
@@ -1568,6 +1581,8 @@ func hasDotDotSegment(v string) bool {
 type externalRef struct {
 	keys []string
 	vals map[string]string
+	// bad marks a key whose value was present but unreadable (control bytes).
+	bad map[string]bool
 }
 
 func (e *externalRef) get(k string) (string, bool) {
@@ -1583,9 +1598,19 @@ func (w *walker) checkExternalData(off int64, ref externalRef) {
 	loc, hasLoc := ref.get("location")
 	locSafe := false
 	if !hasLoc || loc == "" {
-		w.sink.EmitExtra(ruleExternalTraversal, off,
-			"external_data has no location key",
-			map[string]string{"key": "location", "resolved": "false", "reason": "location is required"})
+		if ref.bad["location"] {
+			// A location whose bytes do not decode as printable text is not a
+			// missing key: it is a path a C or C++ loader stops reading at the
+			// first NUL, which is how a document says one file and the loader
+			// opens another.
+			w.sink.EmitExtra(ruleExternalTraversal, off,
+				"external_data location contains control bytes: a loader that stops at the first NUL reads a different file",
+				map[string]string{"key": "location", "resolved": "false", "reason": "location contains control bytes"})
+		} else {
+			w.sink.EmitExtra(ruleExternalTraversal, off,
+				"external_data has no location key",
+				map[string]string{"key": "location", "resolved": "false", "reason": "location is required"})
+		}
 	} else {
 		locSafe = w.checkExternalPath(off, "location", loc)
 	}
