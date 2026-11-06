@@ -512,6 +512,34 @@
       ],
       "notes": "A class outside the curated Keras safe set. The loader must supply it from host code, which is the surface the safe_mode bypasses live behind."
     },
+    "malicious/pickle_reduce_attr_name.pkl": {
+      "expect": [
+        "SC4N-PICKLE-GLOBAL-CRITICAL"
+      ],
+      "forbid": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "getattr(ultralytics.nn.tasks.Detect, \"forward\") is the reach a weights-only loader refuses and an attribute read, not a payload: the constructed grade must stay silent so the capability finding is not restated as execution."
+    },
+    "malicious/pickle_reduce_dunder_attr.pkl": {
+      "expect": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "getattr(builtins.object, \"__globals__\"): the introspection escape, where the dunder name is the payload."
+    },
+    "malicious/pickle_reduce_eval_payload.pkl": {
+      "expect": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "builtins.eval with a source string that imports os and calls system: for a code sink the string *is* the program, whatever it looks like."
+    },
+    "malicious/pickle_reduce_payload.pkl": {
+      "expect": [
+        "SC4N-MALICE-CONSTRUCTED",
+        "SC4N-PICKLE-GLOBAL-CRITICAL"
+      ],
+      "notes": "posix.system(\"nslookup pickle-rce-test.rce.lc\") at REDUCE: the artifact supplies the command the loader runs. This is the 63-byte file the unsafe corpus ships (0xmoose0xmoose0xmoose/rce-test-pickle-001/pytorch_model.bin)."
+    },
     "memo_routes/joblib_shape.pkl": {
       "expect": null,
       "forbid": [

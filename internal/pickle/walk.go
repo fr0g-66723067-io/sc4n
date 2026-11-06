@@ -14,6 +14,7 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/malice"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
@@ -1067,6 +1068,25 @@ func (w *walker) reportReduce(callableV, args Val, off int) {
 			"REDUCE calls "+g.QualName()+", which is not in the weights-only allowlist (the reference loader raises \"Trying to call reduce for unrecognized function\"); sink: "+g.Gadget.Sink)
 	}
 	w.checkCodeStrings(args, off, "the REDUCE argument", callableName(callableV))
+	w.malicePayload(g, args, off)
+}
+
+// malicePayload emits the constructed grade when the call hands its own payload
+// to a sink that runs it. One finding per stream: the decision is "this artifact
+// runs a payload", not "this opcode runs a payload", and a YOLO checkpoint's
+// data.pkl has thousands of REDUCEs.
+func (w *walker) malicePayload(g *Global, args Val, off int) {
+	if w.silent || w.once["malice-constructed"] {
+		return
+	}
+	claim := payloadOf(g, args)
+	if claim == "" {
+		return
+	}
+	w.once["malice-constructed"] = true
+	malice.Constructed(w.sink, int64(off), malice.FamilyPickleReduce,
+		fmt.Sprintf("REDUCE calls %s with %s, so the artifact supplies the code the loader runs", g.QualName(), claim),
+		map[string]string{"callable": g.QualName(), "payload": claim})
 }
 
 // checkCodeStrings applies the code-string rule to a value's retained contents,
