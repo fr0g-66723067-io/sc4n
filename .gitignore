@@ -5,6 +5,9 @@
 # `go build ./tools/sc4nfixtures` drops the generator here, wherever it is run from.
 /sc4nfixtures
 /tools/sc4nfixtures/sc4nfixtures
+# `make lab` drops the oracle lab the same way.
+/sc4nlab
+/tools/sc4nlab/sc4nlab
 
 # Generated big fixtures are written to $TMPDIR by the -tags=bigfixtures
 # benchmarks and must never enter git. Small, deterministic fixtures under

@@ -25,7 +25,7 @@ BIN ?= sc4n
 # binary reported for every build before this.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker
+.PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker lab oracle-image
 
 all: vet test
 
@@ -71,6 +71,17 @@ bench:
 # the scan is even timed.
 bench-big:
 	$(GO) test -tags=bigfixtures -run TestBigSafetensors -v -timeout 30m ./internal/scan
+
+# The validity-oracle lab: mutates real artifacts, keeps the mutants an external
+# validator accepts and scans them. It is a separate binary because it shells
+# out and runs Python in a container, which the scanner itself never does.
+lab:
+	$(GO) build -trimpath -o sc4nlab ./tools/sc4nlab
+
+# The graphs profile's oracle: onnx.checker and onnxruntime, pinned. Built once;
+# `make lab` does not need it for the containers or native profiles.
+oracle-image:
+	docker build -t sc4n-oracle:1 ./tools/sc4nlab
 
 # Regenerates testdata/fixtures. Deterministic: a second run produces no diff.
 fixtures:
@@ -119,4 +130,4 @@ fmt:
 
 clean:
 	$(GO) clean -testcache
-	rm -f $(BIN)
+	rm -f $(BIN) sc4nlab
