@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/fr0g-66723067-io/sc4n/internal/malice"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/stringscan"
 )
@@ -135,6 +136,7 @@ func Analyze(sink *report.Sink, base int64, name, template string) {
 		sink:         sink,
 		base:         base,
 		name:         name,
+		tmpl:         template,
 		toks:         lex(template),
 		corroborated: corroborated(template),
 	}
@@ -160,6 +162,14 @@ type analyzer struct {
 	base int64
 	name string
 	toks []token
+	// tmpl is the template source the tokens index into. It is kept so a chain
+	// can be quoted from the template rather than rebuilt from tokens, which is
+	// what makes the constructed grade's evidence readable.
+	tmpl string
+	// maliceDone records that the constructed grade was emitted for this
+	// template: the decision is "rendering this template runs a call", not
+	// "this expression runs a call".
+	maliceDone bool
 	// corroborated records whether the template carries a channel that makes an
 	// instruction phrase actionable. It is computed once, over the whole
 	// template, because the phrase and its channel are usually in different
@@ -491,6 +501,7 @@ func (a *analyzer) expressions() {
 					break // the attribute/subscript passes already reported it
 				}
 				a.emit(rulePyObject, t.off, "template reaches the Python name "+t.val)
+				a.calledReach(i, i)
 			}
 			if dangerousGlobals[t.val] && i+1 < len(toks) && toks[i+1].kind == kindOp &&
 				(toks[i+1].val == "." || toks[i+1].val == "[") {
@@ -502,11 +513,13 @@ func (a *analyzer) expressions() {
 			case ".":
 				if i+1 < len(toks) && toks[i+1].kind == kindName && dunderNames[toks[i+1].val] {
 					a.emit(rulePyObject, toks[i+1].off, "attribute access ."+toks[i+1].val)
+					a.calledReach(i+1, i+1)
 				}
 			case "[":
 				if i+2 < len(toks) && toks[i+1].kind == kindString && toks[i+2].kind == kindOp &&
 					toks[i+2].val == "]" && dunderNames[toks[i+1].val] {
 					a.emit(rulePyObject, t.off, "subscript access ["+strconv.Quote(toks[i+1].val)+"]")
+					a.calledReach(i, i+2)
 				}
 			case "|":
 				a.attrFilter(i)
@@ -530,6 +543,9 @@ func (a *analyzer) attrFilter(i int) {
 		switch {
 		case strings.HasPrefix(s, "__"):
 			a.emit(rulePyObject, toks[i+1].off, "attr filter selects "+strconv.Quote(s))
+			if end, ok := skipGroup(toks, i+2, "(", ")"); ok {
+				a.calledReach(i+1, end-1)
+			}
 		case strings.HasPrefix(s, "_"):
 			a.emit(ruleDangerousGlobal, toks[i+1].off, "attr filter selects the private name "+strconv.Quote(s))
 		}
@@ -613,4 +629,83 @@ func phraseIn(s string) (string, int) {
 		}
 	}
 	return "", 0
+}
+
+// calledReach emits the constructed grade when a Python-object reach is invoked.
+//
+// SC4N-JINJA-PY-OBJECT says the template reaches an object; whether rendering it
+// *runs* something is the difference between a template that reads __class__ and
+// one that calls os.popen through __globals__. from is the first token of the
+// reach and last the last, so the chain can be quoted from the template.
+func (a *analyzer) calledReach(from, last int) {
+	if a.maliceDone {
+		return
+	}
+	end, called := a.chainCall(last)
+	if !called {
+		return
+	}
+	a.maliceDone = true
+	chain := a.tmpl[a.toks[from].off:a.toks[end].end]
+	ev := "the template calls " + report.TruncateEvidence(chain, 80) +
+		"; rendering the template executes it"
+	extra := map[string]string{"chain": report.TruncateEvidence(chain, 80)}
+	if a.name != "" {
+		ev += " (in " + a.name + ")"
+		extra["template"] = a.name
+	}
+	malice.Constructed(a.sink, a.base+int64(a.toks[from].off), malice.FamilyTemplateCall, ev, extra)
+}
+
+// chainCall walks the dotted/subscript chain that starts at last+1 and reports
+// the index of the closing token of the first call in it. A chain that is only
+// read, or that ends at a non-call operator, is not a call.
+func (a *analyzer) chainCall(last int) (int, bool) {
+	toks := a.toks
+	k := last + 1
+	for k < len(toks) && toks[k].kind == kindOp {
+		switch toks[k].val {
+		case ".":
+			if k+1 >= len(toks) || toks[k+1].kind != kindName {
+				return k, false
+			}
+			k += 2
+		case "[":
+			next, ok := skipGroup(toks, k, "[", "]")
+			if !ok {
+				return k, false
+			}
+			k = next
+		case "(":
+			next, ok := skipGroup(toks, k, "(", ")")
+			if !ok {
+				return k, true
+			}
+			return next - 1, true
+		default:
+			return k, false
+		}
+	}
+	return k, false
+}
+
+// skipGroup returns the index just past the group that opens at k, and whether
+// the group was terminated.
+func skipGroup(toks []token, k int, open, close string) (int, bool) {
+	depth := 0
+	for i := k; i < len(toks); i++ {
+		if toks[i].kind != kindOp {
+			continue
+		}
+		switch toks[i].val {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i + 1, true
+			}
+		}
+	}
+	return k, false
 }

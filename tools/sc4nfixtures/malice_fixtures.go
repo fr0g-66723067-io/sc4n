@@ -78,6 +78,18 @@ func init() {
 					Notes: "os.system sits under if __name__ == \"__main__\", which the import machinery never " +
 						"enters: a depth-0 filter would grade this as execution.",
 				},
+				// Template call: the reach is invoked, so rendering the template
+				// runs it. The read-only reach stays at the capability critical.
+				"malicious/template_call/tokenizer_config.json": {
+					Expect: []string{"SC4N-JINJA-PY-OBJECT", "SC4N-MALICE-CONSTRUCTED"},
+					Notes: "{{ c.__init__.__globals__.os.popen('id').read() }} - the chain ends in a call, so " +
+						"rendering the chat template executes popen.",
+				},
+				"malicious/template_reach_only/tokenizer_config.json": {
+					Expect: []string{"SC4N-JINJA-PY-OBJECT"},
+					Forbid: []string{"SC4N-MALICE-CONSTRUCTED"},
+					Notes:  "{{ c.__class__ }} reads an attribute and calls nothing: the reach is capability.",
+				},
 			}, map[string]expectation{}
 		},
 	})
@@ -113,6 +125,11 @@ func maliceFixtures(f *fixtureSet) {
 	))
 
 	maliceModuleFixtures(f)
+
+	f.add("malicious/template_call/tokenizer_config.json", []byte(
+		`{"chat_template":"{{ c.__init__.__globals__.os.popen('id').read() }}"}`))
+	f.add("malicious/template_reach_only/tokenizer_config.json", []byte(
+		`{"chat_template":"{{ c.__class__ }}"}`))
 }
 
 // The pickle opcodes these fixtures use, so a reader can check the bytes without

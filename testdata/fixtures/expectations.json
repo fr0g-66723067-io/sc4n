@@ -586,6 +586,22 @@
       ],
       "notes": "posix.system(\"nslookup pickle-rce-test.rce.lc\") at REDUCE: the artifact supplies the command the loader runs. This is the 63-byte file the unsafe corpus ships (0xmoose0xmoose0xmoose/rce-test-pickle-001/pytorch_model.bin)."
     },
+    "malicious/template_call/tokenizer_config.json": {
+      "expect": [
+        "SC4N-JINJA-PY-OBJECT",
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "{{ c.__init__.__globals__.os.popen('id').read() }} - the chain ends in a call, so rendering the chat template executes popen."
+    },
+    "malicious/template_reach_only/tokenizer_config.json": {
+      "expect": [
+        "SC4N-JINJA-PY-OBJECT"
+      ],
+      "forbid": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "{{ c.__class__ }} reads an attribute and calls nothing: the reach is capability."
+    },
     "memo_routes/joblib_shape.pkl": {
       "expect": null,
       "forbid": [
