@@ -357,6 +357,15 @@
       ],
       "notes": "Four aligned, in-declaration-order F32 tensors whose extents (512 bytes) run past the 32-byte data section. One truncation, one fact: the parser reports the first tensor individually and the remaining three as a single aggregate, so this fixture pins the cascade collapse and would catch a regression that emits one finding per tensor (847 per shard over 256 shards in the HF campaign corpus)."
     },
+    "gguf_zero_padding.gguf": {
+      "expect": null,
+      "forbid": [
+        "SC4N-GGUF-TRAILING-DATA",
+        "SC4N-GGUF-POLYGLOT",
+        "SC4N-GGUF-STRUCT"
+      ],
+      "notes": "28 zero bytes after the last tensor. The reference GGUF reader ignores bytes past the tensor region, and zero padding is what a writer's alignment leaves, so the smuggling claim SC4N-GGUF-TRAILING-DATA makes would be false here."
+    },
     "go_template.jinja": {
       "expect": [
         "SC4N-JINJA-DANGEROUS-GLOBAL"
@@ -1772,6 +1781,17 @@
         "SC4N-POLYGLOT-MAGIC-ONLY"
       ],
       "notes": "The same ELF shape importing zlibVersion: a numerical extension's ordinary dependency. It must validate (no POLYGLOT-MAGIC-ONLY) and must not be called a process-control importer."
+    },
+    "benign/pickle_storage_blob.bin": {
+      "expect": null,
+      "forbid": [
+        "SC4N-PICKLE-TRAILING",
+        "SC4N-PICKLE-SEGMENT",
+        "SC4N-PICKLE-STRUCT",
+        "SC4N-PICKLE-PREFIX",
+        "SC4N-PICKLE-GLOBAL-CRITICAL"
+      ],
+      "notes": "128 bytes of float32 storage whose first two bytes are EMPTY_LIST + STOP. torch.save writes one of these per tensor, so a checkpoint carries hundreds; claiming the format made every one of them a candidate for a high SC4N-PICKLE-TRAILING about the rest of the blob."
     },
     "benign/plain.zip": {
       "expect": null,

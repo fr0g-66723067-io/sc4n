@@ -417,6 +417,22 @@ func (w *walker) probePickle(off int) bool {
 		return false
 	}
 	if probe.stream.SawStop {
+		// A handshake-free stream that stops after a couple of opcodes is not
+		// evidence. Measured on a 128-byte torch storage member of float32 values
+		// whose first two bytes are EMPTY_LIST (0x5d) and STOP (0x2e): the walk
+		// completed, the artifact was claimed as pickle, and the parser reported a
+		// high SC4N-PICKLE-TRAILING about the other 126 bytes — twice in one
+		// campaign, on the storage blobs of Bingsu/adetailer's YOLO checkpoints.
+		// A protocol-bearing stream is unaffected (its PROTO is the handshake, and
+		// the four-byte b"\x80\x04N." is still claimed), and so is every real
+		// protocol-0/1 pickle, which decodes far more than minSniffOps opcodes.
+		//
+		// A stream that resolved a name is exempt: the 19-byte protocol-0 gadget
+		// b"cos\nsystem\n(S'id'\ntR." decodes six opcodes and is a real pickle, which
+		// is exactly the case a flat opcode floor would have rejected.
+		if !hasProto && !probe.stream.SawGlobal && probe.stream.Ops < minSniffOps {
+			return false
+		}
 		// A STOP is only evidence when the walk reached it coherently, or when the
 		// stream at least resolved a name: the fixtures that pin SC4N-PICKLE-STRUCT
 		// and the memo-alias rule are real pickles carrying a deliberate violation,

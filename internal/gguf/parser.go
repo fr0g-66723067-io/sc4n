@@ -798,6 +798,16 @@ func (st *state) trailing(off, n int64) {
 		if int64(len(b)) > sample {
 			b = b[:sample]
 		}
+		if int64(len(b)) == n && allZero(b) {
+			// Zero padding at the end of the file is what a writer's alignment
+			// leaves, and the reference reader ignores it: measured on
+			// audio-cpp/audio.cpp-gguf's open-wake-word-alexa-f32.gguf, which ends
+			// 28 zero bytes past its last tensor and was reported high. Zero bytes
+			// cannot carry a second artifact, so the smuggling claim would be false.
+			// A residual too large to sample stays reported: it cannot be proven
+			// all-zero from a sample.
+			return
+		}
 		extra["entropy"] = strconv.FormatFloat(bytescan.Entropy(b), 'f', 3, 64)
 		if kind, i, ok := bytescan.FindNative(b); ok {
 			extra["native"] = kind.String()

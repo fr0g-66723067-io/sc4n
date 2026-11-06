@@ -274,6 +274,19 @@ func init() {
 				trailer: trailer,
 			}))
 
+			// Zero padding after the last tensor: a writer's alignment, not
+			// smuggling. Measured on audio-cpp/audio.cpp-gguf's
+			// open-wake-word-alexa-f32.gguf, which ends 28 zero bytes past its last
+			// tensor and was reported at high.
+			zp, zpLen := layout(32, ggufTensor{name: "token_embd.weight", dims: []uint64{8}, typ: 1})
+			f.add("gguf_zero_padding.gguf", buildGGUF(ggufSpec{
+				version: 3,
+				kvs:     []ggufKV{{key: "general.architecture", valType: 8, val: ggufStr("llama")}},
+				tensors: zp,
+				dataLen: zpLen,
+				trailer: make([]byte, 28),
+			}))
+
 			// A chat template that walks Python object internals: the
 			// unsandboxed-Jinja2 SSTI / RCE shape (CVE-2026-5760, VU#915947).
 			ssti := "{{ ''.__class__.__mro__[1].__subclasses__() }}"
@@ -383,6 +396,12 @@ func init() {
 					Notes: "Well-formed GGUF followed by 512 undeclared bytes that are not an executable. " +
 						"The trailing bytes are invisible to the GGUF reader and are where a second artifact " +
 						"can be smuggled.",
+				},
+				"gguf_zero_padding.gguf": {
+					Forbid: []string{"SC4N-GGUF-TRAILING-DATA", "SC4N-GGUF-POLYGLOT", "SC4N-GGUF-STRUCT"},
+					Notes: "28 zero bytes after the last tensor. The reference GGUF reader ignores bytes past " +
+						"the tensor region, and zero padding is what a writer's alignment leaves, so the " +
+						"smuggling claim SC4N-GGUF-TRAILING-DATA makes would be false here.",
 				},
 				"gguf_ssti.gguf": {
 					Expect: []string{"SC4N-JINJA-PY-OBJECT"},
