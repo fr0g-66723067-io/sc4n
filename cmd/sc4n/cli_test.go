@@ -32,6 +32,8 @@ func TestRunExitCodes(t *testing.T) {
 		{"negative max-depth", []string{"scan", "-max-depth", "-1", dir}, exitUsage},
 		{"bad size", []string{"scan", "-max-ratio", "abc", dir}, exitUsage},
 		{"bad output format", []string{"scan", "-format", "xml", dir}, exitUsage},
+		{"attestation that is not JSON", []string{"scan", "-attestation", filepath.Join(dir, "a.txt"), dir}, exitUsage},
+		{"attestation that is absent", []string{"scan", "-attestation", filepath.Join(dir, "absent.json"), dir}, exitUsage},
 		{"missing path", []string{"scan", filepath.Join(dir, "absent")}, exitUnreadable},
 		{"clean scan", []string{"scan", dir}, exitClean},
 		{"hub without -out", []string{"hub"}, exitUsage},

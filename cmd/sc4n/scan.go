@@ -12,6 +12,7 @@ import (
 
 	"github.com/fr0g-66723067-io/sc4n/internal/hfcache"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/malice"
 	"github.com/fr0g-66723067-io/sc4n/internal/policy"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/scan"
@@ -33,6 +34,7 @@ type scanFlags struct {
 	stdin       bool
 	name        string
 	baseline    string
+	attestation string
 	hfCache     bool
 	hfCacheDir  string
 	symlinks    string
@@ -61,6 +63,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&f.root, "root", "", "containment root for path-shaped values")
 	fs.StringVar(&f.symlinks, "symlinks", "root", "symlink targets: root (must resolve inside the scanned tree) or follow")
 	fs.StringVar(&f.baseline, "baseline", "", "suppress findings already present in a previous JSON report")
+	fs.StringVar(&f.attestation, "attestation", "",
+		"merge a tools/sc4nconfirm attestation: artifacts whose digest appears in it get SC4N-MALICE-DEMONSTRATED")
 	fs.BoolVar(&f.hfCache, "hf-cache", false, "scan a Hugging Face download cache instead of paths")
 	fs.StringVar(&f.hfCacheDir, "hf-cache-dir", "", "cache root for -hf-cache (default $HF_HOME/hub or ~/.cache/huggingface/hub)")
 	fs.BoolVar(&f.stdin, "stdin", false, "scan one artifact from stdin")
@@ -137,6 +141,15 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		}
 		baseline = base
 	}
+	var attestations *malice.Index
+	if f.attestation != "" {
+		ix, err := malice.Load(f.attestation)
+		if err != nil {
+			fmt.Fprintf(stderr, "sc4n: -attestation: %v\n", err)
+			return exitUsage
+		}
+		attestations = ix
+	}
 	var symlinkPolicy scan.SymlinkPolicy
 	switch f.symlinks {
 	case "root":
@@ -148,17 +161,18 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	cfg := scan.Config{
-		Paths:       paths,
-		Partial:     f.partial,
-		Symlinks:    symlinkPolicy,
-		Limits:      l,
-		Jobs:        f.jobs,
-		MemBudget:   budget,
-		Root:        f.root,
-		DeepStats:   f.deepStats,
-		Timeout:     f.timeout,
-		MaxFindings: f.maxFindings,
-		Baseline:    baseline,
+		Paths:        paths,
+		Partial:      f.partial,
+		Symlinks:     symlinkPolicy,
+		Limits:       l,
+		Jobs:         f.jobs,
+		MemBudget:    budget,
+		Root:         f.root,
+		DeepStats:    f.deepStats,
+		Timeout:      f.timeout,
+		MaxFindings:  f.maxFindings,
+		Baseline:     baseline,
+		Attestations: attestations,
 	}
 	switch {
 	case f.stdin:
@@ -226,6 +240,13 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 
 	if res.Cancelled {
 		fmt.Fprintln(stderr, "sc4n: scan deadline reached; results are partial")
+	}
+	if attestations != nil {
+		// Report the match count, not just the findings: an attestation whose
+		// digests match nothing scanned is otherwise indistinguishable from one
+		// that found nothing, and the operator's next step is different.
+		fmt.Fprintf(stderr, "sc4n: attestation %s: %d of %d run(s) matched a scanned artifact\n",
+			f.attestation, attestations.Matched(), attestations.Len())
 	}
 
 	if runErr != nil {

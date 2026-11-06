@@ -32,6 +32,7 @@ import (
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/malice"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
@@ -129,6 +130,12 @@ type Config struct {
 	// cache, a referenced blob that is missing) to report into the same document
 	// as the artifacts it yields.
 	Collector *report.Collector
+	// Attestations, when non-nil, is the effect record tools/sc4nconfirm
+	// produced for artifacts that were loaded in a disposable container. It is
+	// keyed by full digest: the same bytes scanned anywhere carry the same
+	// verdict, and a path key would mis-merge the moment the same artifact is
+	// scanned from a different root.
+	Attestations *malice.Index
 }
 
 // Result is the outcome of a scan.
@@ -246,7 +253,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					if i >= len(entries) {
 						return
 					}
-					sum := scanOne(ctx, sess, entries[i], l, b)
+					sum := scanOne(ctx, sess, entries[i], l, b, cfg.Attestations)
 					mu.Lock()
 					res.Artifacts = append(res.Artifacts, sum)
 					mu.Unlock()
@@ -342,6 +349,9 @@ func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits
 	sum.SHA256, sum.SHA256Scope, derr = digestSource(src, l.MaxHashBytes)
 	if derr != nil {
 		sum.SubFormat = "digest unavailable: " + derr.Error()
+	}
+	if r := cfg.Attestations.For(sum.SHA256Scope, sum.SHA256); r != nil {
+		malice.Merge(sess.Collector, name, r)
 	}
 	f, perr := scanGuarded(sess, src, name, l)
 	sum.Format = f.String()
@@ -451,7 +461,7 @@ func readStdinCapped(ctx context.Context, r io.Reader, capBytes int64, capLimit 
 }
 
 // scanOne opens, hashes and scans one entry, releasing its budget when done.
-func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limits, b *memBudget) report.ArtifactSummary {
+func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limits, b *memBudget, att *malice.Index) report.ArtifactSummary {
 	name := e.Display
 	if name == "" {
 		name = e.Path
@@ -541,6 +551,12 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	sum.SHA256Scope = scope
 	sum.Format = f.String()
 	sum.Revision = e.Revision
+	// The demonstrated grade, if the operator attested these bytes. It is
+	// merged here, after the digest the attestation is keyed by, and it is one
+	// finding at offset 0 per artifact, so the merge is order-independent.
+	if r := att.For(scope, digest); r != nil {
+		malice.Merge(sess.Collector, name, r)
+	}
 	// A row can fail both ways, and each failure is a separate fact about it: the
 	// `else if` meant a parse failure hid the missing digest, which the report
 	// otherwise states rather than leaving an empty digest unexplained.
