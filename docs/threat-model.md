@@ -310,6 +310,7 @@ before it reached the payload, and reported clean.**
 | `SC4N-ARCHIVE-DUPLICATE-NAME`, `-ENCRYPTED`, `-CRC` | duplicate names, encrypted members (which cannot be inspected), CRC mismatches |
 | `SC4N-ARCHIVE-NATIVE-MEMBER`, `-SHEBANG` | a validated native executable or a script inside an archive (high, not critical: loading the model does not run the member) |
 | `SC4N-ARCHIVE-NESTED-COMPRESSION`, `-UNSUPPORTED-COMPRESSION` | a wrapper inside a wrapper, and a wrapper with no stdlib decoder (xz, lzma, lz4, zstd, 7z, rar, joblib-legacy `ZF`) |
+| `SC4N-JOBLIB-UNSCANNED-PAYLOAD` | a `.joblib` in xz, lzma or lz4: `joblib.load` decompresses and unpickles it, so the payload the medium above says was not scanned is one the loader runs (critical, `CWE-502`). zstd is excluded because joblib ships no zstd coder — `SC4N-JOBLIB-WRAPPER-MISMATCH` covers that name |
 | `SC4N-LIMIT-ENTRIES`, `-RATIO`, `-DECOMPRESSED`, `-DEPTH`, `-SPILL` | the bomb defences, each naming the limit and the observed value |
 
 **Residual risk.** A member inside a wrapper sc4n cannot decompress is *not
@@ -357,6 +358,15 @@ format contradicts the extension. `SC4N-GGUF-POLYGLOT` and
 `SC4N-SAFETENSORS-NATIVE-MAGIC` are the format-specific statements of the same
 condition.
 
+`SC4N-NATIVE-EXEC-IMPORTS` (high) is the one statement a symbol-table walk adds to
+the header check: a validated ELF whose dynamic symbol table imports `system`,
+`popen`, an `exec*` variant, `fork`, `dlopen` or `ptrace`. sc4n still does not
+disassemble or run anything — these are the names the dynamic loader binds, and a
+C extension that does arithmetic imports none of them (`libz.so.1` imports none,
+`/bin/sh` imports `execve`, `fork`, `vfork`). It fires for an archive member as
+well as a standalone artifact, because a member reaches the native parser through
+the same content dispatch.
+
 **Residual risk.** The universal layer reads the first and last 1 MiB. A payload
 buried in the middle of a 13 GiB tensor file is not found by a window scan; the
 format parsers' own trailing-data rules (`SC4N-SAFETENSORS-TRAILING-DATA`,
@@ -386,6 +396,12 @@ onnxruntime-optimised model binds every one of its nodes to `com.microsoft`, and
 per-node reporting turned one fact into a hundred findings (measured on the
 corpus: 100 → 5). Every node still counts towards the number in the evidence, so
 nothing is hidden; what changed is how many times the same fact is stated.
+
+A location whose bytes contain control characters is reported as traversal with
+that fact in the evidence, not as a missing key: a C or C++ loader stops reading
+the path at the first NUL, so the document names one file and the loader opens
+another. `onnx.checker` resolves such a path and accepts the model, which is how
+the validity-oracle lab produced the case.
 
 **Residual risk.** Only the whitelisted `external_data` keys are resolved at all;
 a legitimate-but-unusual layout may therefore be reported rather than followed,

@@ -326,6 +326,44 @@ measurements rather than opinions:
 passes under `GOEXPERIMENT=simd` (and under the emulated `GODEBUG=simd=0` pass),
 which is where a future kernel would have to live.
 
+## Validity-oracle lab
+
+`make lab` builds `tools/sc4nlab`, the instrument that measures recall where no
+labelled corpus exists. It mutates real artifacts, keeps only the mutants an
+**independent** validator accepts (`7z t`, `xz -t`, `zstd -t`, `gzip -t`,
+`readelf -h` on the host; `onnx.checker` and `onnxruntime` in the pinned
+`sc4n-oracle:1` image), scans each valid mutant with the real engine in-process,
+and compares the answer against a pre-registered expectation table. A mutant the
+validator rejects is discarded, which is what makes the comparison an oracle
+rather than a generator of artifacts no loader would accept.
+
+Measured 2026-11-05, one seed each:
+
+| profile | rows | expected | gap | extra | invalid | unavailable |
+|---|---|---|---|---|---|---|
+| containers | 8 | 7 | 0 | 0 | 0 | 1 (`lz4`) |
+| native | 3 | 3 | 0 | 0 | 0 | 0 |
+| graphs | 6 | 6 | 0 | 0 | 0 | 0 |
+
+A gap is a mutant a real loader accepts that the scanner does not report. The
+first run of the instrument produced three, and all three were fixed before the
+numbers above:
+
+- xz and lzma `.joblib` files were only the medium "compression cannot be
+  decompressed", although `joblib.load` decompresses and unpickles them — now
+  `SC4N-JOBLIB-UNSCANNED-PAYLOAD` (critical).
+- an ELF member and an ELF artifact were reported identically whether they
+  imported `system`/`execve` or `zlibVersion` — now `SC4N-NATIVE-EXEC-IMPORTS`
+  (high).
+- a model's own metadata carrying `sh -c 'curl -s http://… | sh'` reported the
+  raw-IP URL and **not** the shell payload: the only pipe needle was the literal
+  `curl | sh`, which matches no real spelling. The pipe into an interpreter is now
+  its own indicator, kept when a download command precedes it on the same line and
+  left out of the card tier (a card's install instructions are documentation).
+
+The lab shells out and runs Python in a container; `internal/**` and `cmd/` do
+not, and `TestScanPathDoesNotExec` fails the build if that changes.
+
 ## Calibration against a real corpus
 
 Every calibration claim in this document and in the threat model is meant to be
