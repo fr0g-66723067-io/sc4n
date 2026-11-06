@@ -95,6 +95,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	doc := malice.Attestation{Version: malice.Version}
+	byDigest := map[string]int{}
 	failed := 0
 	for i, a := range o.artifacts {
 		r, err := confirmOne(o, a, i, stderr)
@@ -103,7 +104,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			failed++
 			continue
 		}
-		doc.Runs = append(doc.Runs, *r)
+		addRun(&doc.Runs, byDigest, *r)
 	}
 	sortRuns(doc.Runs)
 	if err := writeAttestation(o.out, doc); err != nil {
@@ -233,6 +234,55 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 		r.Error = ""
 	}
 	return r, nil
+}
+
+// addRun appends a run, or folds it into the run already recorded for the same
+// digest.
+//
+// One digest can legitimately appear at several paths - a malware corpus is full
+// of the same payload pasted into a dozen repositories - and the attestation is
+// keyed by digest, so a second entry for the same bytes is not new evidence. The
+// reader refuses duplicates (an ambiguous attestation is a producer bug), which
+// makes folding them here the producer's job: the effects are unioned and the
+// first path is kept.
+func addRun(runs *[]malice.Run, byDigest map[string]int, r malice.Run) {
+	if r.SHA256 != "" {
+		if idx, seen := byDigest[r.SHA256]; seen {
+			mergeRun(&(*runs)[idx], &r)
+			return
+		}
+		byDigest[r.SHA256] = len(*runs)
+	}
+	*runs = append(*runs, r)
+}
+
+// mergeRun unions b's effects into a. The loads are of identical bytes, so the
+// union is the honest record; the first path is kept because it is where the
+// operator pointed the harness.
+func mergeRun(a, b *malice.Run) {
+	a.Loaded = a.Loaded || b.Loaded
+	a.Exec = union(a.Exec, b.Exec)
+	a.Connect = union(a.Connect, b.Connect)
+	a.OpenedOutside = union(a.OpenedOutside, b.OpenedOutside)
+	a.Wrote = union(a.Wrote, b.Wrote)
+	a.MissingModules = union(a.MissingModules, b.MissingModules)
+	if a.Error == "" {
+		a.Error = b.Error
+	}
+}
+
+func union(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range append(append([]string{}, a...), b...) {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // loaderResult is what image/load.py wrote for this run.
