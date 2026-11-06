@@ -723,6 +723,18 @@
       ],
       "notes": "A ModelProto.functions body: a subgraph supplied by the file. The runtime resolves and executes it, so it is attacker-controlled code that the standard operator schemas do not describe."
     },
+    "onnx_nul_external.onnx": {
+      "expect": [
+        "SC4N-ONNX-EXTERNAL-TRAVERSAL",
+        "SC4N-ONNX-STRUCT"
+      ],
+      "forbid": [
+        "SC4N-ONNX-EXTERNAL-KEY",
+        "SC4N-ONNX-EXTERNAL-BOUNDS",
+        "SC4N-ONNX-EXTERNAL-SYMLINK"
+      ],
+      "notes": "external_data location 'w.bin\u0000../../etc/passwd': a document that names one file while a C or C++ loader stops at the NUL and opens another. Reported as traversal with the control bytes named, not as a missing key — the distinction came from the validity-oracle lab, where onnx.checker resolves the NUL-truncated path and accepts the model."
+    },
     "onnx_producer_name_string.onnx": {
       "expect": null,
       "forbid": [
@@ -1138,6 +1150,13 @@
         "SC4N-REPO-SETUP-HOOK"
       ],
       "notes": "cmdclass install hook runs during pip install"
+    },
+    "shell_pipe_config.json": {
+      "expect": [
+        "SC4N-STRING-SHELL",
+        "SC4N-STRING-RAW-IP-URL"
+      ],
+      "notes": "Four spellings of the same chain in a config value: the canonical install pipe, the `sh -c` wrapper a metadata value carries, a script-pipe, and the minified `curl x|sh`. Before the pipe became a composed indicator all four reported only SC4N-STRING-RAW-IP-URL, or nothing when the URL was a hostname."
     },
     "sitecustomize_bad/sitecustomize.py": {
       "expect": [
@@ -1783,6 +1802,13 @@
         "SC4N-CODE-REDUCE-BUILDER"
       ],
       "notes": "a reducing class returning a plain callable is not a payload builder"
+    },
+    "benign/shell_pipe_card.md": {
+      "expect": null,
+      "forbid": [
+        "SC4N-STRING-SHELL"
+      ],
+      "notes": "The two false-positive classes the check has to keep out, both in a card. A download piped into an installer (`curl -LsSf https://… | bash`) is exactly how mistralai/Mistral-Large-4-1T-A52B documents its CLI, and it made the composed pipe the top25-trending corpus's only new high finding; and a Markdown table with a `sh` column must never be a finding either."
     },
     "benign/text_coverage_json/config.json": {
       "expect": null,

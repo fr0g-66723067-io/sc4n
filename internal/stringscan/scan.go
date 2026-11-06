@@ -42,6 +42,7 @@ func scan(b []byte) []Hit {
 
 func scanInto(b []byte, hits []Hit) []Hit {
 	hits = automaton.scanLiterals(b, hits)
+	hits = dropUncomposedPipes(b, hits)
 	hits = dropUncorroborated(hits)
 	hits = dropPlaceholderAssignments(b, hits)
 	hits = scanRawIPURLs(b, hits)
@@ -49,6 +50,49 @@ func scanInto(b []byte, hits []Hit) []Hit {
 	hits = scanOpaqueLiterals(b, hits)
 	hits = scanUnicodeAnomalies(b, hits)
 	return dedupeRepeatedURLs(dedupe(sortedHits(hits)))
+}
+
+// downloadSources are the tokens that turn "| sh" from a table cell into a
+// download-and-run. Each is a download *command* or a URL scheme, and the check
+// requires it to sit before the pipe in the same buffer: a document that shows a
+// URL in one sentence and a shell column in another does not compose into a
+// payload, and a pipe that follows a download does.
+// The sources are download *commands*, not URLs: the first attempt also accepted
+// a bare http(s):// and turned a voice-name table (`| SH |` beside a model card's
+// links) into ten high findings on the top25-downloads corpus. A URL is a
+// reference; a command piped into an interpreter is a payload.
+var downloadSources = [][]byte{
+	[]byte("curl "), []byte("curl\t"), []byte("curl-"),
+	[]byte("wget "), []byte("wget\t"), []byte("wget-"),
+	[]byte("fetch "), []byte("busybox "), []byte("/dev/tcp/"),
+}
+
+// dropUncomposedPipes removes a pipe-to-interpreter hit whose buffer has no
+// download source before it.
+func dropUncomposedPipes(b []byte, hits []Hit) []Hit {
+	out := hits[:0]
+	for _, h := range hits {
+		if h.Extra["kind"] == "pipe-to-shell" && !hasDownloadSource(b[:h.Off]) {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// hasDownloadSource reports whether a download command precedes the pipe on the
+// same line. The line bound is what keeps a card that shows a curl example in one
+// paragraph and a shell table in another from composing into a payload.
+func hasDownloadSource(prefix []byte) bool {
+	if i := bytes.LastIndexByte(prefix, '\n'); i >= 0 {
+		prefix = prefix[i+1:]
+	}
+	for _, s := range downloadSources {
+		if bytes.Contains(prefix, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // dropUncorroborated removes the hits that are words rather than uses unless the

