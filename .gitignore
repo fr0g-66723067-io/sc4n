@@ -8,6 +8,9 @@
 # `make lab` drops the oracle lab the same way.
 /sc4nlab
 /tools/sc4nlab/sc4nlab
+# `go build ./tools/sc4nconfirm` drops the confirmation harness the same way.
+/sc4nconfirm
+/tools/sc4nconfirm/sc4nconfirm
 
 # Generated big fixtures are written to $TMPDIR by the -tags=bigfixtures
 # benchmarks and must never enter git. Small, deterministic fixtures under

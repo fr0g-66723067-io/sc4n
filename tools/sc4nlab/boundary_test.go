@@ -1,12 +1,10 @@
 package main
 
 import (
-	"go/parser"
-	"go/token"
-	"io/fs"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/fr0g-66723067-io/sc4n/tools/internal/boundary"
 )
 
 // TestScanPathDoesNotExec fails if any file under internal/ or cmd/ imports
@@ -20,28 +18,12 @@ import (
 func TestScanPathDoesNotExec(t *testing.T) {
 	root := filepath.Join("..", "..")
 	for _, dir := range []string{"internal", "cmd"} {
-		base := filepath.Join(root, dir)
-		err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() || !strings.HasSuffix(path, ".go") {
-				return nil
-			}
-			f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-			if err != nil {
-				return err
-			}
-			for _, imp := range f.Imports {
-				if imp.Path.Value == `"os/exec"` {
-					rel, _ := filepath.Rel(root, path)
-					t.Errorf("%s imports os/exec: the scan path must not execute anything", rel)
-				}
-			}
-			return nil
-		})
+		offenders, err := boundary.NoExecUnder(filepath.Join(root, dir))
 		if err != nil {
 			t.Fatalf("%s: %v", dir, err)
+		}
+		for _, f := range offenders {
+			t.Errorf("%s/%s imports os/exec: the scan path must not execute anything", dir, f)
 		}
 	}
 }

@@ -183,6 +183,10 @@ func describe(r *Run) string {
 	switch {
 	case len(r.Exec) > 0:
 		b.WriteString("executed " + listing(r.Exec))
+	case len(r.OpenedOutside) > 0 || len(r.Wrote) > 0 || len(r.Connect) > 0:
+		// The load produced effects before it finished, so "was attempted"
+		// would understate it: something ran.
+		b.WriteString("ran")
 	case r.Loaded:
 		b.WriteString("succeeded")
 	default:

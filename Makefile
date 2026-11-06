@@ -25,7 +25,7 @@ BIN ?= sc4n
 # binary reported for every build before this.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker lab oracle-image
+.PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker lab oracle-image confirm-image confirm
 
 all: vet test
 
@@ -82,6 +82,18 @@ lab:
 # `make lab` does not need it for the containers or native profiles.
 oracle-image:
 	docker build -t sc4n-oracle:1 ./tools/sc4nlab
+
+# The confirmation sandbox: a disposable container with no network, a read-only
+# root and strace, in which an artifact is loaded for real. Executing payloads is
+# a tool's job, never the scanner's (internal/ and cmd/ have no os/exec).
+confirm-image:
+	docker build -t sc4nconfirm:1 ./tools/sc4nconfirm/image
+
+# Attest artifacts, then merge the attestation into a scan:
+#   make confirm ARTIFACTS="model.bin other.joblib" ATTESTATION=/tmp/att.json
+#   sc4n scan -attestation /tmp/att.json <paths>
+confirm:
+	$(GO) run ./tools/sc4nconfirm $(foreach a,$(ARTIFACTS),-artifact $(a)) -out $(ATTESTATION)
 
 # Regenerates testdata/fixtures. Deterministic: a second run produces no diff.
 fixtures:

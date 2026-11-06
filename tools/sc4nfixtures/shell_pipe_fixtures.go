@@ -24,23 +24,23 @@ func init() {
 		fixtures: shellPipeFixtures,
 		expectations: func() (malicious, benign map[string]expectation) {
 			return map[string]expectation{
-					"shell_pipe_config.json": {
-						Expect: []string{"SC4N-STRING-SHELL", "SC4N-STRING-RAW-IP-URL"},
-						Notes: "Four spellings of the same chain in a config value: the canonical install " +
-							"pipe, the `sh -c` wrapper a metadata value carries, a script-pipe, and the " +
-							"minified `curl x|sh`. Before the pipe became a composed indicator all four " +
-							"reported only SC4N-STRING-RAW-IP-URL, or nothing when the URL was a hostname.",
-					},
-				}, map[string]expectation{
-					"benign/shell_pipe_card.md": {
-						Forbid: []string{"SC4N-STRING-SHELL"},
-						Notes: "The two false-positive classes the check has to keep out, both in a card. " +
-							"A download piped into an installer (`curl -LsSf https://… | bash`) is exactly how " +
-							"mistralai/Mistral-Large-4-1T-A52B documents its CLI, and it made the composed " +
-							"pipe the top25-trending corpus's only new high finding; and a Markdown table with " +
-							"a `sh` column must never be a finding either.",
-					},
-				}
+				"shell_pipe_config.json": {
+					Expect: []string{"SC4N-STRING-SHELL", "SC4N-STRING-RAW-IP-URL"},
+					Notes: "Four spellings of the same chain in a config value: the canonical install " +
+						"pipe, the `sh -c` wrapper a metadata value carries, a script-pipe, and the " +
+						"minified `curl x|sh`. Before the pipe became a composed indicator all four " +
+						"reported only SC4N-STRING-RAW-IP-URL, or nothing when the URL was a hostname.",
+				},
+			}, map[string]expectation{
+				"benign/shell_pipe_card.md": {
+					Forbid: []string{"SC4N-STRING-SHELL"},
+					Notes: "The two false-positive classes the check has to keep out, both in a card. " +
+						"A download piped into an installer (`curl -LsSf https://… | bash`) is exactly how " +
+						"mistralai/Mistral-Large-4-1T-A52B documents its CLI, and it made the composed " +
+						"pipe the top25-trending corpus's only new high finding; and a Markdown table with " +
+						"a `sh` column must never be a finding either.",
+				},
+			}
 		},
 	})
 }
