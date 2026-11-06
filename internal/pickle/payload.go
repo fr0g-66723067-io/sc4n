@@ -47,7 +47,7 @@ func payloadOf(g *Global, args Val) string {
 	case processSinks[q] || hasAnyPrefix(q, processSinkPrefix):
 		return fmt.Sprintf("a %d-byte command string", len(texts[0]))
 	case deserialisers[q]:
-		return fmt.Sprintf("a %d-byte serialised blob that %s deserialises in place", len(texts[0]), q)
+		return fmt.Sprintf("a %d-byte serialised blob it deserialises in place", len(texts[0]))
 	}
 	if q == "getattr" || q == "builtins.getattr" {
 		// getattr with a dunder name is the introspection escape: it reaches

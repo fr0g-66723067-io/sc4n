@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -187,8 +188,10 @@ func TestRoundTrip(t *testing.T) {
 	if f.Reason != "" {
 		t.Errorf("reason = %q on a file with findings", f.Reason)
 	}
-	if len(f.Rules) == 0 || !strings.HasPrefix(f.Rules[0], "SC4N-PICKLE") {
-		t.Errorf("rules = %v, want the pickle rules first", f.Rules)
+	// The lead rule is not pinned: a new critical rank reorders the list, and what
+	// this test is about is that the pickle rules are among the reported ones.
+	if !slices.ContainsFunc(f.Rules, func(s string) bool { return strings.HasPrefix(s, "SC4N-PICKLE") }) {
+		t.Errorf("rules = %v, want the pickle rules reported", f.Rules)
 	}
 	if rep.Totals.Repos != 1 || rep.Totals.Files != 1 || rep.Totals.CoveredFull != 1 || rep.Totals.NotCovered != 0 {
 		t.Fatalf("totals = %+v", rep.Totals)

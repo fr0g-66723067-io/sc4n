@@ -147,6 +147,7 @@ anonymously and reports the gated files instead of hiding them.
 | `-out FILE` | write the report to a file instead of stdout |
 | `-fail-on info\|low\|medium\|high\|critical` | severity threshold for exit code 1 (default `high`) |
 | `-baseline FILE` | suppress findings already present in a previous JSON report, and say how many were suppressed |
+| `-attestation FILE` | merge an attestation written by `tools/sc4nconfirm`: an artifact whose full SHA-256 appears in it gets `SC4N-MALICE-DEMONSTRATED` with the effects that were observed |
 | `-j N` | worker count (default: one per CPU) |
 | `-mem-budget BYTES` | total size of artifacts mapped concurrently (default 1 GiB) |
 | `-max-artifact`, `-max-depth`, `-max-decompress`, `-max-ratio` | override the resource caps in `docs/architecture.md` |
@@ -180,6 +181,44 @@ anonymously and reports the gated files instead of hiding them.
 | `-fail-on LEVEL` | exit 1 when a campaign finding is at or above it |
 | `-json` | also print `campaign.json` to stdout |
 | `-api`, `-token-file` | Hub base URL and token file (`$HF_TOKEN`, `$HUGGING_FACE_HUB_TOKEN`, `$HF_HOME/token` otherwise) |
+
+## Grading: capability, constructed, demonstrated
+
+A critical finding says a sink is reachable from the normal load path. It does not
+say the artifact runs anything, and on a corpus of hostile repositories that
+difference is the whole question. Three grades answer it:
+
+| grade | finding | how it is decided |
+|---|---|---|
+| capability | the critical that fired (`SC4N-PICKLE-GLOBAL-CRITICAL`, `SC4N-CONFIG-AUTO-MAP`, `SC4N-JINJA-PY-OBJECT`, …) | from bytes: a sink is reachable |
+| constructed | `SC4N-MALICE-CONSTRUCTED` | from bytes: the load path runs code the artifact supplies, and the finding names the sink and the payload. `getattr(Model, "forward")` stays capability; `posix.system("nslookup …")` does not |
+| demonstrated | `SC4N-MALICE-DEMONSTRATED` | from a sandbox: these exact bytes, loaded in a container with no network, executed this program / dialled this address / read this path |
+
+Absence of a `SC4N-MALICE-*` finding *is* the capability grade; it means the
+reach is structural. The mechanism per family, and what a demonstration can and
+cannot prove, are in `docs/threat-model.md` §13.
+
+### Demonstrating: `tools/sc4nconfirm`
+
+```sh
+make confirm-image                     # once: python + torch + transformers, pinned
+sc4nconfirm -artifact model.bin -out attestation.json
+sc4n scan -attestation attestation.json -format json ./models
+```
+
+`sc4nconfirm` loads the artifact the way a user would (`torch.load`,
+`pickle.load`, `joblib.load`, a model directory's `auto_map` modules with
+`trust_remote_code`, or a chat template rendered by Jinja2) in a disposable
+container: `--network=none`, `--read-only`, tmpfs scratch, canary credentials,
+`--memory`/`--pids-limit`/`--cpus`, and one capability, `SYS_PTRACE`, because
+`strace` is the only effect source a payload cannot blind from native code.
+
+Executing an artifact is this tool's job and never the scanner's: `internal/**`
+and `cmd/**` contain no `os/exec`, and a boundary test fails the build if that
+changes. The attestation is keyed by the full SHA-256, so a prefix digest
+(`-max-hash`) never matches; a run that could not load the artifact because a
+framework is missing records `missingModules` instead of a verdict, so "we could
+not load it" never reads as "it did nothing".
 
 ## Baselines
 
@@ -225,7 +264,7 @@ what you need.
 |---|---|
 | 0 | clean: no finding at or above `-fail-on` |
 | 1 | findings at or above `-fail-on` (default `high`) |
-| 2 | usage error |
+| 2 | usage error (including an unreadable or malformed `-attestation` file) |
 | 3 | a path you named could not be opened, or the scan was cancelled by `-timeout` — the requested scope was not fully scanned |
 
 Exit 3 is deliberately distinct from 1: findings are about the artifact, while 3
@@ -283,8 +322,11 @@ host, not with these flags.
 
 ## What sc4n does not do
 
-- **No dynamic analysis.** Anything that only manifests at load time is inferred
-  from structure, not observed.
+- **No dynamic analysis in the scanner.** Anything that only manifests at load
+  time is inferred from structure, not observed. Observation exists, but it is a
+  separate tool: `tools/sc4nconfirm` loads the artifact in a disposable container
+  and writes an attestation that `sc4n scan -attestation` merges. The scanner
+  itself still runs nothing.
 - **No weight-level backdoor proof.** Neural Cleanse, ABS, STRIP, spectral
   signatures and activation clustering are documented in
   `docs/threat-model.md` as out-of-band techniques with their compute cost and

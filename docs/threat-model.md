@@ -28,6 +28,12 @@ Two consequences follow, and both are load-bearing:
   environment, and the model's *weights*. Where a class of attack cannot be
   decided statically, this document says so and the tool stays quiet rather than
   guessing (§7).
+- **A capability is not a behaviour.** A critical finding says a sink is
+  reachable from the normal load path. Whether the artifact *runs* anything is a
+  separate grade, `SC4N-MALICE-CONSTRUCTED` for one decided from the bytes and
+  `SC4N-MALICE-DEMONSTRATED` for one a sandbox observed (§13). The scanner never
+  takes the second step itself: executing an artifact is `tools/sc4nconfirm`'s
+  job, in a container, and `internal/**` and `cmd/**` still contain no `os/exec`.
 - **A finding is evidence, not a verdict.** Every finding carries a severity, a
   confidence, a CWE and the bytes that triggered it. Severity is calibrated to
   the ecosystem's load path (critical = code execution or credential
@@ -128,6 +134,10 @@ allowlisted name for a different object at load time; `SC4N-PICKLE-MEMO-ALIAS`
 narrows that hole but cannot close it, because sc4n cannot know what a module
 attribute resolves to in the loader's process.
 
+The grade ladder in §13 splits these criticals: a `REDUCE` that hands a string
+to a code or process sink is `SC4N-MALICE-CONSTRUCTED`, and one that reads a
+plain attribute stays capability.
+
 ### 3.2 The `SETITEM` heap-corruption class
 
 `CVE-2026-24747` / `GHSA-63cw-57p8-fm3p`: a crafted stream that applies
@@ -163,6 +173,10 @@ intended.
 file; a config scanned alone reports the reference, not the module's content.
 `SC4N-LOADER-NO-LOCAL-ONLY` and `SC4N-LOADER-NO-REVISION` catch the *caller's*
 mistake only where sc4n is scanning the calling code.
+
+An `auto_map` module's *import-time body* is graded separately (§13): a module
+that calls a sink while it is imported is `SC4N-MALICE-CONSTRUCTED`, and a
+module that only defines classes leaves the capability critical standing.
 
 ### 4.2 Keras: Lambda layers, `safe_mode`, and the `__lambda__` code blob
 
@@ -273,6 +287,10 @@ loader, and review a template change like a code change.
 Jinja2 extension) with different globals is not covered, and a backdoor that is
 ordinary Jinja2 (an `{% if %}` that changes wording) is indistinguishable from a
 legitimate template by any static rule.
+
+A template that *calls* through the reach - `{{ cycler.__init__.__globals__.os.popen('id').read() }}` -
+is `SC4N-MALICE-CONSTRUCTED`; a template that only reads an attribute is not
+(§13).
 
 ## 5. Container, compression and format-confusion smuggling
 
@@ -732,3 +750,57 @@ instead of N, exactly one finding for a duplicate key) cannot be expressed by
 `TestPastEOFCascadeIsAggregated`, `TestCustomDomainIsAggregated` and
 `TestDuplicateTopLevelKeyIsOneFinding` — and are proven by running them against the
 tree at the commit before the fix.
+
+## 13. From capability to behaviour: the grade ladder
+
+Every critical in §3 and §4 is a **capability**: a sink is reachable from the
+normal load path. That is the right thing to report from bytes alone, and it is
+not the question a reviewer has when a corpus hands them 216 of them. This
+section is the second step, and it is deliberately split in two so that neither
+half overstates what it knows.
+
+| grade | rule | decided by | what it asserts |
+|---|---|---|---|
+| capability | the existing criticals | bytes | a sink is reachable; the payload argument, if any, is structural |
+| constructed | `SC4N-MALICE-CONSTRUCTED` | bytes | the loader's own path executes code **the artifact supplies**, and the finding names the sink and the payload |
+| demonstrated | `SC4N-MALICE-DEMONSTRATED` | a sandbox | these exact bytes, loaded, produced these effects |
+
+Absence of a `SC4N-MALICE-*` finding *is* the capability grade. It means the
+reach is structural: `getattr(Detect, "forward")` on a named class (the shape the
+REMOTE-code `torch.load` family uses), an `auto_map` module whose import-time body
+only defines classes, or a chat template that reads `__class__` without calling
+through it.
+
+### 13.1 The constructed predicate, per family
+
+| family | mechanism | constructed when | stays capability when |
+|---|---|---|---|
+| `pickle-reduce` | `REDUCE` invokes a callable the stream named | the callable is a code sink (`eval`, `exec`, `compile`, `__import__`), a process sink (`os/posix.system`, `popen`, `subprocess.*`), a nested deserialiser (`marshal.loads`, `pickle.loads`), or `getattr` with a dunder name - and the argument string is in the artifact | the callable is allowlisted (its argument is data, not a program), or the argument is a plain attribute name |
+| `import-scope` | `trust_remote_code` imports the module an `auto_map` entry names | the module file is in the scanned tree and a sink (`malice.IsLoadSink`) is called by code that runs at import: the module body and the suites of `if`/`try`/`for`/`while`/`with`/`except`/`else`/`finally` | the body only defines classes and functions, or the call sits under `if __name__ == "__main__":` |
+| `template-call` | a chat template reaches a Python object | the reach is invoked - dotted, subscripted or through `\|attr` - because rendering a template evaluates its expressions | the reach is only an attribute or subscript read |
+
+`SC4N-KERAS-LAMBDA` and `SC4N-REPO-PTH` deliberately have no constructed twin:
+their descriptions already state that the load path executes the artifact's own
+contents, so a second finding would restate them.
+
+### 13.2 What a demonstration can and cannot prove
+
+`tools/sc4nconfirm` loads the artifact in a container with `--network=none`, a
+read-only root, tmpfs scratch, canary credentials and one capability
+(`SYS_PTRACE`, for `strace`). It records four effect classes: `exec`, `connect`,
+`openedOutside`, `wrote`. The attestation is keyed by the artifact's full
+SHA-256, and `sc4n scan -attestation` merges it into that artifact only.
+
+- **A dial is recorded as an attempt.** With no network interface the connection
+  cannot succeed, which is the point: the evidence is that the payload tried.
+- **A failed load is not a clean bill.** A stream that imports a framework the
+  image does not ship fails before its payload runs; the attestation records
+  `missingModules` and the run emits nothing. That is why Keras and TensorFlow are
+  not in the image - their grade is already decided statically - and why the
+  missing-module list is in the record rather than silently swallowed.
+- **The image is part of the measurement.** A loader upgrade changes what runs,
+  so the image is version-pinned and its build is reproducible from the tree.
+- **A demonstration is not a scope widening.** It says what these bytes did in
+  this container. It does not say what they would do with a GPU, a network, or a
+  different loader version, and the finding's evidence names the container's
+  conditions so a reader cannot forget them.

@@ -70,6 +70,7 @@ Three invariants hold across the whole graph:
 | `internal/hubapi` | the Hub client the campaign runs on: search/tag/author listing, ranked listings with their metadata (`downloads`, `trendingScore`, `likes`, `lastModified`, `createdAt`), per-repo verdict, sibling sizes, ranged download; token resolution, redirect and retry policy. The ranked sort is an allowlist because it becomes a query parameter, and the two volume signals answer different questions — `downloads` is a 30-day count (`period=week` is accepted and ignored) while `trendingScore` is the recent window |
 | `internal/hubcampaign` | the campaign pipeline as resumable file → file stages (candidates → verdicts → fetch → scan → join → report) over one campaign directory. Four universes: the built-in search/tag/author set, an explicit repo list, a ranked listing (`-rank`/`-top`, with the rows as the Hub returned them in `candidates.json`), and a single repo (`-repo`). A cached `candidates.json` is only reused when the requested universe matches it, so changing `-rank` or `-top` cannot answer with the previous listing. `-baseline` suppresses findings already present in a previous report after paths are relativised — the fingerprint carries the artifact path, so applying it inside the walk would key on absolute paths and match nothing |
 | `internal/trt` | TensorRT serialized engines: the `ftrt` magic is recognised, the section table is not interpreted, and the indicator pass covers the first 4 MiB and last 1 MiB (`SC4N-TRT-UNVERIFIED`) |
+| `internal/malice` | the grade ladder above the capability criticals: the two `SC4N-MALICE-*` rules, the attestation document the confirmation harness writes, and the load-sink table the import-scope analysis uses |
 | `internal/formats` | blank-imports every parser package so a binary states what it contains |
 | `cmd/sc4n` | flag parsing, output selection, exit codes |
 
@@ -368,6 +369,99 @@ numbers above:
 
 The lab shells out and runs Python in a container; `internal/**` and `cmd/` do
 not, and `TestScanPathDoesNotExec` fails the build if that changes.
+
+## Grade: capability, constructed, demonstrated
+
+Every critical sc4n emitted before this round is a **capability**: the artifact
+can reach a sink. That is not the question a reviewer has. Facing 216 criticals
+on the unsafe corpus, the question is "does this one run code, or is it merely
+powerful?" - and answering it by hand is what the grade ladder removes.
+
+Three grades, two of them new rules and one of them what sc4n already said:
+
+| grade | carried by | means |
+|---|---|---|
+| capability | the existing criticals (`SC4N-PICKLE-GLOBAL-CRITICAL`, `SC4N-CONFIG-AUTO-MAP`, `SC4N-JINJA-PY-OBJECT`, …) | a sink is reachable; no payload argument, or one that is structural |
+| constructed | `SC4N-MALICE-CONSTRUCTED` (critical) | the loader's own load path runs code the artifact supplies, and the payload is in the artifact |
+| demonstrated | `SC4N-MALICE-DEMONSTRATED` (critical) | the artifact was loaded in a disposable container and the recorded effects are attributed to its digest |
+
+**Absence of a `SC4N-MALICE-*` finding is the capability grade**, and that is a
+documented outcome rather than a silence: an artifact can reach a sink and still
+only read an attribute, or name a module that defines nothing but classes.
+
+The grade is a finding rather than a field on the artifact row because
+`report.SchemaVersion` is pinned by consumers, and a rule ID already reaches
+every encoder, `expectations.json`, `-fail-on`, SARIF and CycloneDX.
+
+### Where each constructed grade is computed
+
+| family | emitted from | predicate |
+|---|---|---|
+| `pickle-reduce` | `internal/pickle` at `REDUCE` | the callable is a code or process sink and the argument is a string, a dunder `getattr` name, or a nested serialised blob. `getattr(Model, "forward")` - the REMOTE-code `torch.load` shape - is *not* a payload and stays capability |
+| `import-scope` | `internal/content` from `auto_map` | the module file exists in the scanned tree and its import-time body calls a sink. Import-time means the suites of `if`/`try`/`for`/`while`/`with` run and `def`/`class` bodies do not (see `pysrc.ModuleStatements`); an `if __name__ == "__main__":` suite never runs on import |
+| `template-call` | `internal/jinja` | a dunder reach (dotted, subscripted, or `|attr`) is *called*: `{{ c.__class__ }}` is capability, `{{ cycler.__init__.__globals__.os.popen('id').read() }}` is constructed |
+
+`SC4N-KERAS-LAMBDA` and `SC4N-REPO-PTH` get no constructed finding: they already
+state that the load path executes the artifact's own contents, so a second
+finding would restate them.
+
+### Demonstration is a tool's job, never the scanner's
+
+`internal/**` and `cmd/**` keep zero `os/exec` and zero third-party imports;
+`tools/internal/boundary` asserts it from both tools, and `tools/sc4nconfirm`
+fails the build if scanning code imports a `tools/` package at all.
+
+```mermaid
+flowchart LR
+  A[artifact] --> B[sc4nconfirm]
+  B -->|docker run: no network, read-only root, SYS_PTRACE, strace| C[container loader]
+  C --> D[effects: exec, connect,<br/>open outside, write]
+  D --> E[attestation.json<br/>keyed by sha256]
+  E --> F["sc4n scan -attestation"]
+  A --> F
+  F --> G[SC4N-MALICE-DEMONSTRATED]
+```
+
+The container is the boundary: `--network=none` turns a dial into an attempt, and
+the attempt is the evidence; `--read-only` with tmpfs scratch makes writes
+observable; `--memory`, `--pids-limit` and `--cpus` bound a payload that forks or
+allocates; canary credentials under the worker home make a credential harvest a
+read of a known path rather than an inference.
+
+The one capability granted is `SYS_PTRACE`, because `strace` is the only effect
+source a payload cannot blind from native code - a Python audit hook can be
+bypassed by `ctypes`, and a filesystem diff sees writes but never `execve` or a
+`connect` attempt.
+
+The automation is only as good as the image. A stream that imports a framework
+the image does not ship fails to load, and the attestation records
+`missingModules` rather than a verdict: "we could not load it" must never read as
+"it did nothing". Keras and TensorFlow are deliberately absent - their grade is
+already decisive statically.
+
+### Measured 2026-11-05
+
+The three corpora of the release round, scanned before (`f39cb9c`) and after the
+grade ladder, with the same binary flags on the same tree:
+
+| corpus | artifacts | findings | criticals | `MALICE-CONSTRUCTED` |
+|---|---|---|---|---|
+| `unsafe` (M1) | 1729 | 22072 → 22162 | 216 → 306 | 90 (pickle-reduce 81, template-call 6, import-scope 3) |
+| `top25-downloads` (B1, benign) | 1044 | 761 → 761 | 1 → 1 | 0 |
+| `top25-trending` (B2, benign) | 1364 | 1395 → 1395 | 19 → 19 | 0 |
+
+Every severity class other than critical is unchanged on all three corpora: the
+new rules only add criticals, and every added finding names a sink and a payload
+(an added finding with an empty payload or module is a bug, not a finding). The
+benign gate stays at zero - a single `MALICE-*` finding on B1 or B2 would fail
+the round.
+
+The discrimination the ladder buys is visible in the M1 split: of 132
+`SC4N-PICKLE-GLOBAL-CRITICAL` findings, 81 carry a payload the loader would run;
+of 55 `SC4N-JINJA-PY-OBJECT` findings, 6 are calls and the rest are reads.
+
+`-j 1` and `-j 8` produce byte-identical reports over M1 (determinism holds with
+the attestation merge in the path).
 
 ## Calibration against a real corpus
 
