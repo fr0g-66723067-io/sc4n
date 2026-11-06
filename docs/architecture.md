@@ -337,13 +337,18 @@ and compares the answer against a pre-registered expectation table. A mutant the
 validator rejects is discarded, which is what makes the comparison an oracle
 rather than a generator of artifacts no loader would accept.
 
-Measured 2026-11-05, one seed each:
+Measured 2026-11-05:
 
 | profile | rows | expected | gap | extra | invalid | unavailable |
 |---|---|---|---|---|---|---|
 | containers | 8 | 7 | 0 | 0 | 0 | 1 (`lz4`) |
 | native | 3 | 3 | 0 | 0 | 0 | 0 |
-| graphs | 6 | 6 | 0 | 0 | 0 | 0 |
+| graphs | 12 | 12 | 0 | 0 | 0 | 0 |
+
+The graphs profile's twelve rows are six operators over two seeds — the qint8
+arm64 and avx512 exports of `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`,
+the two `.onnx` files in the campaigns that are neither header slices nor
+external-data references to files the fetch did not take.
 
 A gap is a mutant a real loader accepts that the scanner does not report. The
 first run of the instrument produced three, and all three were fixed before the

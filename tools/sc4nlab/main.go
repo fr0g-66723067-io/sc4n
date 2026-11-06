@@ -84,6 +84,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if o.jobs <= 0 {
 		o.jobs = runtime.NumCPU()
 	}
+	switch o.profile {
+	case "containers", "native", "graphs":
+	default:
+		fmt.Fprintf(stderr, "sc4nlab: unknown profile %q (want containers, native or graphs)\n", o.profile)
+		return exitUsage
+	}
 	out, err := filepath.Abs(o.out)
 	if err != nil {
 		fmt.Fprintf(stderr, "sc4nlab: %v\n", err)
@@ -178,10 +184,9 @@ func rows(ctx context.Context, o options, out string, stderr io.Writer) ([]Row, 
 		return runNative(ctx, o, out)
 	case "graphs":
 		return runGraphs(ctx, o, out)
-	default:
-		fmt.Fprintf(stderr, "sc4nlab: unknown profile %q\n", o.profile)
-		return nil, "", true
 	}
+	// Unreachable: run validates the profile before it gets here.
+	return nil, "", true
 }
 
 // runOps builds every operator's mutant, validates it with the operator's own
