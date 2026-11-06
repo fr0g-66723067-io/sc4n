@@ -1,0 +1,1 @@
+{"architectures":["GuardedModel"],"auto_map":{"AutoModel":"modeling_guard.GuardedModel"}}

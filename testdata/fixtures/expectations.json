@@ -512,6 +512,52 @@
       ],
       "notes": "A class outside the curated Keras safe set. The loader must supply it from host code, which is the surface the safe_mode bypasses live behind."
     },
+    "malicious/automap_import_clean/config.json": {
+      "expect": [
+        "SC4N-CONFIG-AUTO-MAP"
+      ],
+      "forbid": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "the imported module only defines a class, so the reach is structural: the capability critical stands and the constructed grade must not."
+    },
+    "malicious/automap_import_clean/modeling_clean.py": {
+      "expect": null,
+      "forbid": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "a module that only defines a class."
+    },
+    "malicious/automap_import_sink/config.json": {
+      "expect": [
+        "SC4N-CONFIG-AUTO-MAP",
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "auto_map names modeling_evil, which calls socket.getaddrinfo inside a top-level try: importing the module runs the callback. This is the shape of 0xmoose0xmoose0xmoose/rce-test-pickle-001 in the unsafe corpus."
+    },
+    "malicious/automap_import_sink/modeling_evil.py": {
+      "expect": null,
+      "forbid": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "the imported module: the constructed grade belongs to the config that imports it, not to the file scanned on its own."
+    },
+    "malicious/automap_main_guard/config.json": {
+      "expect": [
+        "SC4N-CONFIG-AUTO-MAP"
+      ],
+      "forbid": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "os.system sits under if __name__ == \"__main__\", which the import machinery never enters: a depth-0 filter would grade this as execution."
+    },
+    "malicious/automap_main_guard/modeling_guard.py": {
+      "expect": null,
+      "forbid": [
+        "SC4N-MALICE-CONSTRUCTED"
+      ],
+      "notes": "a module whose program is behind a __main__ guard."
+    },
     "malicious/pickle_reduce_attr_name.pkl": {
       "expect": [
         "SC4N-PICKLE-GLOBAL-CRITICAL"

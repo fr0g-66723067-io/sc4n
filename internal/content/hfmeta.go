@@ -98,6 +98,7 @@ func autoMapRule(ctx *artifact.Ctx, name string, data []byte, doc any) {
 			}
 			if p, present := moduleExists(name, mod); present {
 				ev += "; the module file " + p + " exists in the scanned tree"
+				importScopeRule(ctx, name, mod, offsetOf(data, ref))
 			} else {
 				ev += "; the module file " + mod + ".py is not present in the scanned tree"
 			}
