@@ -446,9 +446,15 @@ grade ladder, with the same binary flags on the same tree:
 
 | corpus | artifacts | findings | criticals | `MALICE-CONSTRUCTED` |
 |---|---|---|---|---|
-| `unsafe` (M1) | 1729 | 22072 → 22162 | 216 → 306 | 90 (pickle-reduce 81, template-call 6, import-scope 3) |
-| `top25-downloads` (B1, benign) | 1044 | 761 → 761 | 1 → 1 | 0 |
-| `top25-trending` (B2, benign) | 1364 | 1395 → 1395 | 19 → 19 | 0 |
+| `unsafe` (M1) | 1723 | 8613 → 8703 | 216 → 306 | 90 (pickle-reduce 81, template-call 6, import-scope 3) |
+| `top25-downloads` (B1, benign) | 1038 | 323 → 323 | 1 → 1 | 0 |
+| `top25-trending` (B2, benign) | 1358 | 1203 → 1203 | 19 → 19 | 0 |
+
+The counts are of `repos/` only, with the campaign's `-partial` list (a fetched
+header slice is not a violation), which is the measurement the campaign report
+itself makes. Scanning the campaign *directory* instead counts the report files
+as artifacts, and their evidence text re-triggers the indicator rules - 22162
+findings for the same tree - so a like-for-like number must exclude them.
 
 Every severity class other than critical is unchanged on all three corpora: the
 new rules only add criticals, and every added finding names a sink and a payload
@@ -461,7 +467,19 @@ The discrimination the ladder buys is visible in the M1 split: of 132
 of 55 `SC4N-JINJA-PY-OBJECT` findings, 6 are calls and the rest are reads.
 
 `-j 1` and `-j 8` produce byte-identical reports over M1 (determinism holds with
-the attestation merge in the path).
+the attestation merge in the path), and two `-refresh` campaign scans produce a
+byte-identical `scan.json` (`md5 0f63f8a1fa8a26451b4c3058562ad847`).
+
+The demonstration pass over the same corpus (2026-11-05, `sc4nconfirm:1`): the 84
+constructed artifacts with a loader in the image were loaded in the sandbox; they
+are 62 distinct digests (the corpus copies one payload into several repos), and
+**37 demonstrated effects** - `id`, `hostname`, `cat /etc/passwd`, `curl
+ifconfig.me`, writes to `/tmp/rce_proof.txt`, and dial attempts to
+`150.230.216.13:8080`, `136.243.156.104:27303` and `10.10.10.10:8080`. Merging the
+attestation takes the corpus from 306 to 343 criticals. The 25 runs without
+effects are recorded with their reason (13 artifacts have no loader in the image,
+9 failed inside the loader before the payload, 3 wrote no result), because "not
+demonstrated" must never be read as "inert".
 
 ## Calibration against a real corpus
 
