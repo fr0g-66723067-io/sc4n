@@ -468,7 +468,7 @@ of 55 `SC4N-JINJA-PY-OBJECT` findings, 6 are calls and the rest are reads.
 
 `-j 1` and `-j 8` produce byte-identical reports over M1 (determinism holds with
 the attestation merge in the path), and two `-refresh` campaign scans produce a
-byte-identical `scan.json` (`md5 0f63f8a1fa8a26451b4c3058562ad847`).
+byte-identical `scan.json` (`md5 66dd9b639b96cc98ec88400ba981cd13`, binary `sc4n 3ee9668`).
 
 The demonstration pass over the same corpus (2026-11-05, `sc4nconfirm:1`): the 84
 constructed artifacts with a loader in the image were loaded in the sandbox; they
