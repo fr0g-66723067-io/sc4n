@@ -1,0 +1,86 @@
+name: release
+
+# A tag is the only thing that produces a release. `make release` builds and
+# verifies the same artifacts locally, so a maintainer can prove a tag will work
+# before pushing it.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # The gate the release cannot ship without: the tree at the tag must pass the
+  # same tests a contributor's pull request passes.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test
+      - run: |
+          make fixtures
+          git diff --exit-code testdata/fixtures
+      - run: |
+          make rules-doc
+          git diff --exit-code docs/rules.md
+
+  binaries:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build and verify
+        # VERSION is the tag (git describe reads it), so the binary's report and
+        # the release's name are one value.
+        run: |
+          make release-binaries
+          sh tools/release/verify.sh dist "$(git describe --tags)"
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "sc4n $GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/sc4n_* dist/SHA256SUMS
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: log in to GHCR
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # docker would reject an upper-case repository path; the repository name is
+      # already lower case, which is also how the docs reference it.
+      - name: build, verify and push
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY}"
+          docker build --build-arg VERSION="$GITHUB_REF_NAME" -t "$image:$GITHUB_REF_NAME" .
+          # No dist/ in this job: verify.sh checks the image alone.
+          IMAGE="$image:$GITHUB_REF_NAME" sh tools/release/verify.sh dist "$GITHUB_REF_NAME" --with-image
+
+          docker push "$image:$GITHUB_REF_NAME"
+          # A pre-release tag (v1.1.0-rc1) must not move :latest.
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "pre-release tag: :latest not moved" ;;
+            *) docker tag "$image:$GITHUB_REF_NAME" "$image:latest"
+               docker push "$image:latest" ;;
+          esac

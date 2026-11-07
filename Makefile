@@ -32,6 +32,38 @@ all: vet test
 build:
 	$(GO) build -trimpath -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/sc4n
 
+# The platforms a release is built for. amd64 linux is the reference host; the
+# others exist because a scanner that only runs where it was written is a scanner
+# most users cannot run.
+RELEASE_TARGETS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+DIST ?= dist
+
+# A release is three files and an image: the binaries, one SHA256SUMS covering
+# them, and the version stamped into every report. `make release` builds and then
+# verifies what it built, because a release asset that does not verify is worse
+# than none.
+release: release-binaries release-image verify-release
+
+release-binaries:
+	rm -rf $(DIST)
+	mkdir -p $(DIST)
+	@set -e; for t in $(RELEASE_TARGETS); do \
+	  goos=$${t%/*}; goarch=$${t#*/}; \
+	  out=$(DIST)/$(BIN)_$(VERSION)_$${goos}_$${goarch}; \
+	  [ "$$goos" = windows ] && out=$$out.exe; \
+	  echo "  build $$out"; \
+	  GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 $(GO) build -trimpath \
+	    -ldflags "-s -w -X main.version=$(VERSION)" -o $$out ./cmd/sc4n; \
+	done
+	cd $(DIST) && sha256sum $(BIN)_* | sort -k2 > SHA256SUMS
+	@echo "  $(DIST)/SHA256SUMS"
+
+release-image:
+	docker build --build-arg VERSION=$(VERSION) -t $(BIN):$(VERSION) .
+
+verify-release:
+	sh tools/release/verify.sh $(DIST) $(VERSION) --with-image
+
 # The image is the documented way to scan an untrusted repository: --network=none
 # (the scan path has no dialer), --read-only and a non-root user bound what the
 # binary may read and write, which a path check alone cannot.
@@ -165,3 +197,4 @@ fmt:
 clean:
 	$(GO) clean -testcache
 	rm -f $(BIN) sc4nlab
+	rm -rf $(DIST)
