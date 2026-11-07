@@ -2,7 +2,9 @@
 """Load one artifact the way a user would, and record what happened.
 
 The loader choice is the whole experiment: a `pytorch_model.bin` is loaded by
-`torch.load`, a `.joblib` by `joblib.load`, a model directory with an `auto_map`
+`torch.load`, a `.joblib` by `joblib.load`, a `.npz`/`.npy` by
+`numpy.load(allow_pickle=True)` (a `.npz` member is indexed, because numpy
+unpickles an object array only on access), a model directory with an `auto_map`
 by importing the modules that map names and then `from_pretrained`, and a
 `tokenizer_config.json` by rendering its chat template. Whatever the payload does
 happens for real - inside a container with no network and a read-only root, under
@@ -19,6 +21,11 @@ import sys
 import traceback
 
 RESULT = {"loader": "", "loaded": False, "error": "", "missingModules": []}
+
+# An .npz member above this size is a tensor, not a payload; reading it would
+# cost the container's memory and demonstrate nothing. The bound comes from the
+# zip metadata, so it is checked before the member is decompressed.
+NPZ_MEMBER_CAP = 64 << 20
 
 
 def auto_map_modules(directory):
@@ -86,6 +93,36 @@ def pick(path):
                 return pickle.load(f)
 
         return "pickle.load", _pickle_load
+    if low.endswith(".npz"):
+        import numpy as np
+
+        def _npz_load():
+            # np.load alone unpickles nothing: an NpzFile reads a member only
+            # when that member is indexed, and an object-dtype member is
+            # unpickled at that moment. A loader that stopped at np.load would
+            # demonstrate nothing, so every member small enough to be the
+            # payload is read.
+            with np.load(path, allow_pickle=True) as z:
+                sizes = {}
+                zipfile = getattr(z, "zip", None)
+                if zipfile is not None:
+                    sizes = {i.filename: i.file_size for i in zipfile.infolist()}
+                for name in z.files:
+                    if sizes.get(name, 0) > NPZ_MEMBER_CAP:
+                        # Weights, not a payload: reading it would only cost the
+                        # container's memory.
+                        continue
+                    _ = z[name]
+            return True
+
+        return "numpy.load(allow_pickle=True)", _npz_load
+    if low.endswith(".npy"):
+        import numpy as np
+
+        # A .npy of object dtype is unpickled by the load itself.
+        return "numpy.load(allow_pickle=True)", lambda: np.load(
+            path, allow_pickle=True
+        )
     if low.endswith(".json"):
         tmpl = chat_template(path)
         if tmpl is not None:

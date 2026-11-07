@@ -207,9 +207,9 @@ sc4n scan -attestation attestation.json -format json ./models
 ```
 
 `sc4nconfirm` loads the artifact the way a user would (`torch.load`,
-`pickle.load`, `joblib.load`, a model directory's `auto_map` modules with
-`trust_remote_code`, or a chat template rendered by Jinja2) in a disposable
-container: `--network=none`, `--read-only`, tmpfs scratch, canary credentials,
+`pickle.load`, `joblib.load`, `numpy.load(allow_pickle=True)` for `.npy`/`.npz`,
+a model directory's `auto_map` modules with `trust_remote_code`, or a chat
+template rendered by Jinja2) in a disposable container: `--network=none`, `--read-only`, tmpfs scratch, canary credentials,
 `--memory`/`--pids-limit`/`--cpus`, and one capability, `SYS_PTRACE`, because
 `strace` is the only effect source a payload cannot blind from native code.
 

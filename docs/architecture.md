@@ -473,13 +473,22 @@ byte-identical `scan.json` (`md5 66dd9b639b96cc98ec88400ba981cd13`, binary `sc4n
 The demonstration pass over the same corpus (2026-11-05, `sc4nconfirm:1`): the 84
 constructed artifacts with a loader in the image were loaded in the sandbox; they
 are 62 distinct digests (the corpus copies one payload into several repos), and
-**37 demonstrated effects** - `id`, `hostname`, `cat /etc/passwd`, `curl
-ifconfig.me`, writes to `/tmp/rce_proof.txt`, and dial attempts to
-`150.230.216.13:8080`, `136.243.156.104:27303` and `10.10.10.10:8080`. Merging the
-attestation takes the corpus from 306 to 343 criticals. The 25 runs without
-effects are recorded with their reason (13 artifacts have no loader in the image,
-9 failed inside the loader before the payload, 3 wrote no result), because "not
+**38 demonstrated effects** - `id`, `hostname`, `cat /etc/passwd`, `curl
+ifconfig.me`, `echo 'gluon-nlp pwned'`, writes to `/tmp/rce_proof.txt`, and dial
+attempts to `150.230.216.13:8080`, `136.243.156.104:27303` and `10.10.10.10:8080`.
+Merging the attestation takes the corpus from 306 to 344 criticals. The 24 runs
+without effects are recorded with their reason (11 artifacts have no loader in
+the image, 13 the load failed inside the loader before the payload), because "not
 demonstrated" must never be read as "inert".
+
+The loader matrix is "what a user would run for these bytes": `torch.load`,
+`pickle.load`, `joblib.load`, `numpy.load(allow_pickle=True)` for `.npy` and
+`.npz` (an `.npz` member is indexed, because numpy unpickles an object array only
+on access), a model directory's `auto_map` modules, and a rendered
+`chat_template`. The numpy loaders closed the corpus's last real gap: on
+`Chemichurail/Try_EXploit/malicious.npz` the payload the scanner grades
+`constructed` now executes in the sandbox, which is the difference between "the
+member's pickle would run" and "it ran".
 
 ## Calibration against a real corpus
 

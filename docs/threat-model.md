@@ -800,6 +800,15 @@ SHA-256, and `sc4n scan -attestation` merges it into that artifact only.
   missing-module list is in the record rather than silently swallowed.
 - **The image is part of the measurement.** A loader upgrade changes what runs,
   so the image is version-pinned and its build is reproducible from the tree.
+- **The loader matrix is "what a user would run for these bytes", not every
+  container.** `torch.load`, `pickle.load`, `joblib.load`,
+  `numpy.load(allow_pickle=True)` for `.npy` and `.npz` (a `.npz` member is
+  indexed, because numpy unpickles an object array only on access), a model
+  directory's `auto_map` modules, and a rendered `chat_template`. A plain `.zip`
+  has no Python load path that executes its members, and an `.onnx` file is
+  protobuf graph data that no loader turns into code, so neither gets a loader:
+  an attestation for them would demonstrate nothing. Those runs report
+  `no loader for this artifact type` and are counted as not reached.
 - **A demonstration is not a scope widening.** It says what these bytes did in
   this container. It does not say what they would do with a GPU, a network, or a
   different loader version, and the finding's evidence names the container's
