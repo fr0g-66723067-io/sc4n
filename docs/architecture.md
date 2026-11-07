@@ -226,9 +226,13 @@ Two of them are worth reading as design notes rather than as caps:
 ## Performance
 
 Measured on the reference host (8 cores, 14 GiB RAM, `go1.27.0 linux/amd64`),
-`make bench` for the kernels and `make bench-big` for the end-to-end gate. The
+`make bench` for the kernels and `make bench-big` for the end-to-end run. The
 budget column is what the plan set; the measured column is what the tree does
-today, with the honest gaps marked.
+today, with the honest gaps marked. Every number here is a report from one host:
+no test asserts wall time, because a wall-clock bound fails for the machine's sake
+and a red build that lies about a regression is worse than no build. The one
+asserted budget is memory (anonymous RSS), which does not depend on how fast the
+host is.
 
 | path | budget | measured | note |
 |---|---|---|---|
@@ -242,7 +246,7 @@ today, with the honest gaps marked.
 | — of which: provider-token shapes | — | 103 MB/s clean, 29 MB/s token-dense | `BenchmarkSecretTokenShapes`; one pass over the buffer |
 | validated-native search over random bytes | — | 338 MB/s | header validation, not a byte scan |
 | safetensors header + metadata | ≥ 1 GB/s | 7 µs per header | the file's *body* is not read |
-| end-to-end 13.00 GiB F16 safetensors | ≤ 20 s wall, ≤ 512 MiB RSS | **1.25 s wall (10.4 GiB/s), 7.8 MiB anonymous RSS** | `make bench-big` |
+| end-to-end 13.00 GiB F16 safetensors | ≤ 20 s wall (reported), ≤ 512 MiB RSS (asserted) | **1.25 s wall (10.4 GiB/s), 7.8 MiB anonymous RSS** | `make bench-big` |
 | `-hf-cache` over a synthetic two-revision cache | — | one scan per unique blob | `TestHFCacheScansEachBlobOnce` |
 
 ### The one budget that is not met, and why

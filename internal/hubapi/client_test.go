@@ -492,15 +492,18 @@ func TestDownloadRefusesIgnoredResume(t *testing.T) {
 // Timeout is a stall bound: a slow but flowing transfer longer than Timeout
 // succeeds, and one that stops sending bytes fails with the stall named.
 func TestDownloadTimeoutIsAStallBound(t *testing.T) {
+	// 20 chunks 50 ms apart is 1 s of transfer against a 250 ms timeout: the total
+	// exceeds the bound on purpose, while each gap is 5x under it, so a loaded host
+	// cannot turn a flowing transfer into a stall.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for i := 0; i < 6; i++ {
+		for i := 0; i < 20; i++ {
 			w.Write([]byte("x"))
 			w.(http.Flusher).Flush()
-			time.Sleep(80 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 		}
 	}))
 	defer srv.Close()
-	c, err := New(Config{BaseURL: srv.URL, Timeout: 200 * time.Millisecond})
+	c, err := New(Config{BaseURL: srv.URL, Timeout: 250 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,8 +512,8 @@ func TestDownloadTimeoutIsAStallBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a flowing transfer longer than Timeout failed: %v", err)
 	}
-	if res.Bytes != 6 || buf.Len() != 6 {
-		t.Fatalf("got %d bytes", buf.Len())
+	if res.Bytes != 20 || buf.Len() != 20 {
+		t.Fatalf("got %d bytes, want 20", buf.Len())
 	}
 }
 
@@ -520,7 +523,7 @@ func TestDownloadStalledTransferFails(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("x"))
 		w.(http.Flusher).Flush()
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(1500 * time.Millisecond)
 		w.Write([]byte("y"))
 	}))
 	defer srv.Close()
@@ -543,7 +546,7 @@ func TestDownloadRecoversFromStall(t *testing.T) {
 			w.Header().Set("Content-Length", "100")
 			w.Write(body[:40])
 			w.(http.Flusher).Flush()
-			time.Sleep(400 * time.Millisecond) // longer than Timeout: the transfer stalls
+			time.Sleep(1500 * time.Millisecond) // 10x Timeout: the transfer stalls
 			return
 		}
 		if got := r.Header.Get("Range"); got != "bytes=40-" {

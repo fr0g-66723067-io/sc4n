@@ -91,8 +91,10 @@ test-simd:
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem ./...
 
-# Generates a 13 GiB F16 safetensors, scans it and asserts the wall-time and RSS
-# budget from docs/architecture.md. Never committed.
+# Generates a 13 GiB F16 safetensors, scans it and asserts the RSS budget from
+# docs/architecture.md. Wall time is printed, never asserted: a wall-clock bound
+# fails on a busy machine and hides the regression it was written for. Never
+# committed.
 #
 # Two environment knobs, both of which exist because the defaults are wrong on a
 # small machine: SC4N_BIG_DIR picks where the ~13 GiB fixture is written (it
