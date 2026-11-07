@@ -6,10 +6,10 @@ all of it offline before pointing the scanner at anything you care about.
 
 ## Install
 
-Three ways, in order of convenience. The release URLs and the image are what
-`.github/workflows/release.yml` publishes for the `v1.0.0` tag; if the tag has not
-been pushed in your copy of this repository, `make release` builds and verifies the
-same artifacts locally.
+Three ways, in order of convenience. This repository is private, so the release
+assets and the image need credentials: `gh auth login` for `gh release download`,
+`docker login ghcr.io` before `docker pull`. `make release` builds and verifies the
+same artifacts from the tag if you would rather not download them.
 
 ```sh
 # 1. released binary (linux/amd64 shown; darwin and windows builds are published too)

@@ -66,9 +66,11 @@ verify-release: ok
 Nothing is published from a branch. A tag that fails the test gate publishes
 nothing, because both publishing jobs `needs: test`.
 
-`v1.0.0` is tagged in this repository; the assets exist on the release page and in
-GHCR once that tag is pushed. Before that, `make release` is the way to obtain
-exactly the same artifacts.
+`v1.0.0` is published: the five binaries and `SHA256SUMS` are assets on the
+release, and the image is `ghcr.io/fr0g-66723067-io/sc4n:v1.0.0` and `:latest`.
+Both are private with the repository, so a consumer authenticates first
+(`gh release download`, `docker login ghcr.io`). `make release` produces exactly
+the same artifacts from the tag.
 
 ## Before tagging
 
