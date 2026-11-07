@@ -4,6 +4,7 @@ name: release
 # verifies the same artifacts locally, so a maintainer can prove a tag will work
 # before pushing it.
 on:
+  # Tag pushes only. A branch push never publishes: the tag is the release.
   push:
     tags: ['v*']
 
