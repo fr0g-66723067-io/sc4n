@@ -1,7 +1,10 @@
 name: ci
 
 on:
+  # Branches only: a tag push is the release workflow's job, and running this twice
+  # for one commit (branch + tag) doubles the queue for no result.
   push:
+    branches: ['**']
   pull_request:
 
 permissions:
