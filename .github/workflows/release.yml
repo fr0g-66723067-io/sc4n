@@ -47,14 +47,22 @@ jobs:
           make release-binaries
           sh tools/release/verify.sh dist "$(git describe --tags)"
 
+      # Idempotent on purpose: re-pointing a tag is legitimate (a docs-only fix
+      # should not need a new version), and `gh release create` fails when the
+      # release already exists. Create when absent, upload with --clobber when not,
+      # so a re-run replaces the assets instead of dying halfway.
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "sc4n $GITHUB_REF_NAME" \
-            --generate-notes \
-            dist/sc4n_* dist/SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/sc4n_* dist/SHA256SUMS --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "sc4n $GITHUB_REF_NAME" \
+              --generate-notes \
+              dist/sc4n_* dist/SHA256SUMS
+          fi
 
   image:
     needs: test
