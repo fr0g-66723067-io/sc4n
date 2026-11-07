@@ -62,8 +62,11 @@ go build -o sc4n ./cmd/sc4n
 
 `v1.0.0` is published by `.github/workflows/release.yml`: five static binaries and
 `SHA256SUMS` on the release page, and the image in GHCR. This repository is
-private, so both need authentication (`gh auth login`, then
-`gh release download v1.0.0`; `docker login ghcr.io` before `docker pull`).
+private, so both need authentication: `gh auth login` then
+`gh release download v1.0.0` for the assets, and for the image a token that can
+read packages (`gh auth refresh -s read:packages`, or a classic PAT with
+`read:packages`) piped to `docker login ghcr.io` — the default `gh` token does
+not carry that scope.
 Nothing is published from a branch, and `make release` builds and verifies the
 same artifacts locally. There is no signature: the assets carry checksums only,
 and [`docs/release.md`](docs/release.md) says so explicitly.

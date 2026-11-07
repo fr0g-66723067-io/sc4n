@@ -68,8 +68,10 @@ nothing, because both publishing jobs `needs: test`.
 
 `v1.0.0` is published: the five binaries and `SHA256SUMS` are assets on the
 release, and the image is `ghcr.io/fr0g-66723067-io/sc4n:v1.0.0` and `:latest`.
-Both are private with the repository, so a consumer authenticates first
-(`gh release download`, `docker login ghcr.io`). `make release` produces exactly
+Both are private with the repository, so a consumer authenticates first:
+`gh release download` for the assets, and `docker login ghcr.io` with a token that
+has `read:packages` (the default `gh` token does not; `gh auth refresh -s
+read:packages` adds it). `make release` produces exactly
 the same artifacts from the tag.
 
 ## Before tagging

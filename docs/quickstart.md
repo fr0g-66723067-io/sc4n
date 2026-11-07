@@ -8,7 +8,9 @@ all of it offline before pointing the scanner at anything you care about.
 
 Three ways, in order of convenience. This repository is private, so the release
 assets and the image need credentials: `gh auth login` for `gh release download`,
-`docker login ghcr.io` before `docker pull`. `make release` builds and verifies the
+and for the image a token with the packages scope
+(`gh auth refresh -s read:packages`) piped to `docker login ghcr.io` — a plain
+`gh` token is refused with `denied`, which is what a first attempt looks like. `make release` builds and verifies the
 same artifacts from the tag if you would rather not download them.
 
 ```sh
