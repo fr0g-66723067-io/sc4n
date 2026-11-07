@@ -30,7 +30,8 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 RUN pip install --no-cache-dir \
       transformers==5.22.1 \
       joblib==1.6.0 \
-      jinja2==3.1.6
+      jinja2==3.1.6 \
+      numpy==2.5.4
 
 COPY load.py /opt/sc4nconfirm/load.py
 COPY entrypoint.sh /opt/sc4nconfirm/entrypoint.sh
