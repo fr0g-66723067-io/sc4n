@@ -45,6 +45,21 @@ jobs:
               go build -trimpath -o /dev/null ./cmd/sc4n
           done
 
+  sarif:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The SARIF must satisfy the format's schema, not just the fields GitHub
+      # documents: a consumer that parses it strictly fails on either.
+      - name: sarif schema
+        run: |
+          python3 -m pip install --quiet jsonschema==4.19.2
+          make sarif-check
+
   image:
     runs-on: ubuntu-latest
     steps:

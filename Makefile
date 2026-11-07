@@ -138,6 +138,22 @@ fuzz:
 	$(GO) test ./internal/polyglot   -run '^$$' -fuzz FuzzPolyglot       -fuzztime $(FUZZTIME)
 	$(GO) test ./internal/repo       -run '^$$' -fuzz FuzzRepoFile       -fuzztime $(FUZZTIME)
 
+# Validates the SARIF sc4n writes against the official SARIF 2.1.0 schema, which
+# is what a consumer (GitHub code scanning included) parses. The Go test pins the
+# requirements the consumer documents; this pins the format the schema defines.
+# Skipped loudly when python3 or the jsonschema package is absent, because the
+# reference host has no Python for the scan path and this check must not become a
+# hidden build dependency.
+sarif-check: build
+	@python3 -c 'import jsonschema' 2>/dev/null || { \
+	  echo "sarif-check: skipped, python3 'jsonschema' is not installed"; exit 0; }; \
+	dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; \
+	./$(BIN) scan -format sarif -out $$dir/fixtures.sarif testdata/fixtures > /dev/null || true; \
+	./$(BIN) scan -format sarif -out $$dir/benign.sarif testdata/fixtures/benign > /dev/null || true; \
+	python3 tools/sarifvalidate/validate.py \
+	  testdata/sarif/sarif-2.1.0.schema.json \
+	  $$dir/fixtures.sarif $$dir/benign.sarif
+
 # Optional differential check against fickling/picklescan/modelscan. Skipped
 # loudly when the tools are absent (they are absent on the reference host).
 diffscan:

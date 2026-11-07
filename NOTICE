@@ -29,3 +29,8 @@ sc4n's TensorFlow and Keras name tables (internal/tfmodel/) record operator,
 layer and configuration key names published by the tensorflow and keras
 projects, distributed under the Apache License 2.0. They are used as allowlists
 and denylists of names; no upstream source text is copied.
+
+sc4n's SARIF validation fixture (testdata/sarif/sarif-2.1.0.schema.json) is the
+JSON Schema published with the OASIS Static Analysis Results Format (SARIF)
+Version 2.1.0 specification (oasis-tcs/sarif-spec), distributed under the Apache
+License 2.0. It is unmodified and is used only to validate sc4n's own output.
