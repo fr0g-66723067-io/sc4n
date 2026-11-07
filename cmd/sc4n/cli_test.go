@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -516,5 +518,61 @@ func TestPartialFlagSuppressesSliceFindings(t *testing.T) {
 	marked := scan("-partial", p)
 	if !strings.Contains(marked, `"SC4N-PARTIAL-SLICE"`) {
 		t.Fatalf("-partial did not report the slice: %s", marked)
+	}
+}
+
+// TestHandWrittenAttestationMerges proves the attestation format is a contract
+// with the harness, not with tools/sc4nconfirm: a file written by anything that
+// observed a load produces SC4N-MALICE-DEMONSTRATED on the artifact whose full
+// digest it names. This is the path a team takes when Docker is unavailable and
+// the load happens in a VM or a pod.
+func TestHandWrittenAttestationMerges(t *testing.T) {
+	dir := t.TempDir()
+	art := filepath.Join(dir, "model.pkl")
+	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "pickle_gadget_os_system.pkl"))
+	if err != nil {
+		t.Skipf("fixture not available: %v", err)
+	}
+	if err := os.WriteFile(art, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(b)
+	att := filepath.Join(dir, "attestation.json")
+	body := `{"version":"sc4nconfirm/1","runs":[{"sha256":"` + hex.EncodeToString(sum[:]) +
+		`","loader":"pickle.load","loaded":true,"exec":["/bin/sh -c -- touch /tmp/hand-written"]}]}`
+	if err := os.WriteFile(att, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"scan", "-attestation", att, "-format", "json", art}, &out, &errOut)
+	if code != exitFindings {
+		t.Fatalf("scan exited %d, want %d (stderr: %s)", code, exitFindings, errOut.String())
+	}
+	var doc struct {
+		Findings []struct {
+			RuleID   string `json:"ruleId"`
+			Severity string `json:"severity"`
+			Evidence string `json:"evidence"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v (output: %s)", err, out.String())
+	}
+	found := false
+	for _, f := range doc.Findings {
+		if f.RuleID != "SC4N-MALICE-DEMONSTRATED" {
+			continue
+		}
+		found = true
+		if f.Severity != "critical" {
+			t.Errorf("demonstrated severity = %q, want critical", f.Severity)
+		}
+		if !strings.Contains(f.Evidence, "touch /tmp/hand-written") {
+			t.Errorf("evidence does not name the observed program: %q", f.Evidence)
+		}
+	}
+	if !found {
+		t.Fatalf("no SC4N-MALICE-DEMONSTRATED for the attested artifact: %s", out.String())
 	}
 }
