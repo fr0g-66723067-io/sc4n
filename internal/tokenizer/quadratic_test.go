@@ -74,6 +74,19 @@ func craftedEscapedTokens() []byte {
 	return []byte(b.String())
 }
 
+// bestAnalyze is the fastest of three analyses of doc, the estimator for cost on
+// a host that may be running twenty other test packages at once.
+func bestAnalyze(doc []byte) time.Duration {
+	best := time.Duration(1 << 62)
+	for range 3 {
+		_, d := timeAnalyze(doc)
+		if d < best {
+			best = d
+		}
+	}
+	return best
+}
+
 func timeAnalyze(doc []byte) (int, time.Duration) {
 	c := report.NewCollector(0)
 	start := time.Now()
@@ -115,23 +128,27 @@ func TestCraftedDocumentsAreLinear(t *testing.T) {
 		})
 	}
 
-	// The ratio half: one doubling, measured back to back under whatever load the
-	// host is under, so a busy machine inflates both numbers and cancels.
-	t.Run("doubling-is-not-quadratic", func(t *testing.T) {
-		const small = 25000
-		_, t1 := timeAnalyze(craftedTokens(small, false))
-		_, t2 := timeAnalyze(craftedAddedTokens())
+	// The ratio half: the same shape at two sizes, measured back to back under
+	// whatever load the host is under, so a busy machine inflates both numbers and
+	// cancels. Each size is the fastest of three runs (a single sample carries GC
+	// and scheduler noise: on ubuntu-latest one noisy pair turned a linear pass
+	// into a 10x ratio). Four times the document costs ~4x when linear and ~16x
+	// when quadratic, so a 9x bound has margin on both sides.
+	t.Run("scaling-is-not-quadratic", func(t *testing.T) {
+		const small = 12500
+		t1 := bestAnalyze(craftedTokens(small, false))
+		t2 := bestAnalyze(craftedAddedTokens())
 		if len(craftedTokens(small, false)) == 0 || len(craftedAddedTokens()) == 0 {
 			t.Fatal("empty document")
 		}
-		if t1 < 40*time.Millisecond {
+		if t1 < 5*time.Millisecond {
 			// Too fast to time reliably; the absolute bound above already covers it.
 			t.Skipf("small document took %s, below the measurable floor", t1)
 		}
 		ratio := float64(t2) / float64(t1)
 		t.Logf("%d tokens %s, %d tokens %s, ratio %.2f", small, t1, 50000, t2, ratio)
-		if ratio > 3.0 {
-			t.Errorf("doubling the document multiplied the time by %.2f (%s -> %s); the analysis is meant to be linear", ratio, t1, t2)
+		if ratio > 9 {
+			t.Errorf("4x the document multiplied the time by %.2f (%s -> %s); the analysis is meant to be linear", ratio, t1, t2)
 		}
 	})
 

@@ -8,12 +8,22 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 )
 
-// analyzeTimes runs Analyze over a document and returns how long it took.
+// analyzeTime runs Analyze over a document and returns the fastest of three
+// runs. The minimum is the estimator for cost: a single run on a shared CI runner
+// carries GC pauses and scheduler noise, and one noisy sample at one size is
+// enough to turn a linear implementation into a 10x ratio (measured on
+// ubuntu-latest: 24ms at 100k, 247ms at 400k, min-of-3 3.2x).
 func analyzeTime(doc string) time.Duration {
-	c := report.NewCollector(0)
-	start := time.Now()
-	Analyze(c.For("t.jinja"), 0, "t.jinja", doc)
-	return time.Since(start)
+	best := time.Duration(1 << 62)
+	for range 3 {
+		c := report.NewCollector(0)
+		start := time.Now()
+		Analyze(c.For("t.jinja"), 0, "t.jinja", doc)
+		if d := time.Since(start); d < best {
+			best = d
+		}
+	}
+	return best
 }
 
 // concatChain builds `{{ 'x'+'x'+… }}` with n elements.

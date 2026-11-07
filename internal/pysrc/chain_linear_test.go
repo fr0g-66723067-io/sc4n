@@ -7,12 +7,21 @@ import (
 )
 
 // analyzeTime is one Analyze run, timed.
+// analyzeTime is the fastest of three Analyze runs: the minimum is the estimator
+// for cost, because a single sample on a loaded host carries GC and scheduler
+// noise that the other size does not.
 func analyzeTime(t *testing.T, data []byte) time.Duration {
 	t.Helper()
-	ctx, _ := newTestCtx(t)
-	start := time.Now()
-	Analyze(ctx, data)
-	return time.Since(start)
+	best := time.Duration(1 << 62)
+	for range 3 {
+		ctx, _ := newTestCtx(t)
+		start := time.Now()
+		Analyze(ctx, data)
+		if d := time.Since(start); d < best {
+			best = d
+		}
+	}
+	return best
 }
 
 // TestDottedChainIsLinear guards the single-walk chain scan in Calls and
