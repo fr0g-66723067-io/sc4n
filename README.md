@@ -45,11 +45,29 @@ zero" or "the extent could not be verified". The counts are not repeated here on
 purpose: they are generated from the rule definitions, and prose copies of them
 drifted twice.
 
+## Install
+
+```sh
+# released binary (linux/amd64; arm64, darwin and windows builds are published too)
+curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.0/sc4n_v1.0.0_linux_amd64
+curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.0/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+
+# container, which is the right way to scan bytes you do not trust
+docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.0
+
+# or from source: Go 1.27, no code generation, no third-party tooling
+go build -o sc4n ./cmd/sc4n
+```
+
+Releases are built and verified by `.github/workflows/release.yml` on a `v*` tag
+(five static binaries, `SHA256SUMS`, and the image); `make release` reproduces the
+same artifacts locally. There is no signature: the assets carry checksums only,
+and [`docs/release.md`](docs/release.md) says so explicitly.
+
 ## Quickstart
 
 ```sh
-go build -o sc4n ./cmd/sc4n
-
 # a downloaded model directory
 ./sc4n scan ./models/bert-base-uncased
 
@@ -58,7 +76,16 @@ go build -o sc4n ./cmd/sc4n
 
 # a repository, gated, with SARIF for GitHub code scanning
 ./sc4n scan -format sarif -out sc4n.sarif -fail-on high .
+
+# scan untrusted bytes in the container (scan never dials, so no network needed)
+docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
+  --user "$(id -u):$(id -g)" -v "$PWD:/scan:ro" \
+  ghcr.io/fr0g-66723067-io/sc4n:v1.0.0 scan -fail-on high /scan
 ```
+
+[`docs/quickstart.md`](docs/quickstart.md) is the ten-minute version: install, a
+clean tree and a hostile artifact with their real output, reading a finding as
+data, the baseline loop, and the sandbox demonstration.
 
 ## Campaigns: the Hugging Face unsafe round
 
@@ -213,6 +240,11 @@ template rendered by Jinja2) in a disposable container: `--network=none`, `--rea
 `--memory`/`--pids-limit`/`--cpus`, and one capability, `SYS_PTRACE`, because
 `strace` is the only effect source a payload cannot blind from native code.
 
+The attestation is a plain JSON file, documented field by field in
+[`docs/attestation.md`](docs/attestation.md): a VM, a Kubernetes job or your own
+harness can produce one, and the scanner treats it as evidence only for the full
+SHA-256 it names.
+
 Executing an artifact is this tool's job and never the scanner's: `internal/**`
 and `cmd/**` contain no `os/exec`, and a boundary test fails the build if that
 changes. The attestation is keyed by the full SHA-256, so a prefix digest
@@ -353,10 +385,25 @@ host, not with these flags.
 
 ## Documentation
 
-- `docs/threat-model.md` — threat class → real-world evidence → rule → mitigation
-  → residual risk. This is the review that justifies every rule.
-- `docs/architecture.md` — pipeline, limits, performance budget, how to add a
-  format or a rule.
+- [`docs/quickstart.md`](docs/quickstart.md) — install, first scan, triage, gate.
+- [`docs/triage.md`](docs/triage.md) — what to do with the finding in front of you:
+  severity × confidence, then one section per finding family.
+- [`docs/rules.md`](docs/rules.md) — the full rule catalogue, generated from the
+  registry, each rule linked to its triage section.
+- [`docs/threat-model.md`](docs/threat-model.md) — threat class → real-world
+  evidence → rule → mitigation → residual risk. This is the review that justifies
+  every rule.
+- [`docs/architecture.md`](docs/architecture.md) — pipeline, limits, performance
+  budget, how to add a format or a rule.
+- [`docs/measurements.md`](docs/measurements.md) — what the scanner actually did on
+  real corpora: findings, false-positive differential, recall, demonstration
+  coverage, and the limits of each number.
+- [`docs/attestation.md`](docs/attestation.md) — the demonstration format, and how
+  to produce one from a VM, a pod or your own harness instead of Docker.
+- [`docs/github-code-scanning.md`](docs/github-code-scanning.md) — the SARIF upload
+  workflow, its traps, and the de-duplication contract.
+- [`docs/release.md`](docs/release.md) — how a release is built, verified and
+  published, and what it does not claim.
 
 ## Recommended posture
 
