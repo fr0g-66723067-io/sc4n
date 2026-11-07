@@ -55,12 +55,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A tag containing "-" is a pre-release (v1.0.1-rc1). It must be marked
+          # as one, or the release page advertises an unfinished build as the
+          # current version and the :latest rule it pairs with means nothing.
+          case "$GITHUB_REF_NAME" in
+            *-*) release_flags="--prerelease" ;;
+            *)   release_flags="" ;;
+          esac
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/sc4n_* dist/SHA256SUMS --clobber
           else
+            # shellcheck disable=SC2086
             gh release create "$GITHUB_REF_NAME" \
               --title "sc4n $GITHUB_REF_NAME" \
-              --generate-notes \
+              --generate-notes $release_flags \
               dist/sc4n_* dist/SHA256SUMS
           fi
 
