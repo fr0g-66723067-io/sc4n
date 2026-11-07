@@ -6,7 +6,10 @@ all of it offline before pointing the scanner at anything you care about.
 
 ## Install
 
-Three ways, in order of convenience:
+Three ways, in order of convenience. The release URLs and the image are what
+`.github/workflows/release.yml` publishes for the `v1.0.0` tag; if the tag has not
+been pushed in your copy of this repository, `make release` builds and verifies the
+same artifacts locally.
 
 ```sh
 # 1. released binary (linux/amd64 shown; darwin and windows builds are published too)

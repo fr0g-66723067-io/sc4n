@@ -66,6 +66,10 @@ verify-release: ok
 Nothing is published from a branch. A tag that fails the test gate publishes
 nothing, because both publishing jobs `needs: test`.
 
+`v1.0.0` is tagged in this repository; the assets exist on the release page and in
+GHCR once that tag is pushed. Before that, `make release` is the way to obtain
+exactly the same artifacts.
+
 ## Before tagging
 
 ```sh

@@ -60,10 +60,13 @@ docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.0
 go build -o sc4n ./cmd/sc4n
 ```
 
-Releases are built and verified by `.github/workflows/release.yml` on a `v*` tag
-(five static binaries, `SHA256SUMS`, and the image); `make release` reproduces the
-same artifacts locally. There is no signature: the assets carry checksums only,
-and [`docs/release.md`](docs/release.md) says so explicitly.
+The `v1.0.0` tag is in this repository. Pushing it runs
+`.github/workflows/release.yml`, which attaches these five binaries plus
+`SHA256SUMS` to a GitHub release and pushes the image to GHCR; nothing has been
+published from a branch. Until that tag is pushed, `make release` builds and
+verifies the identical artifacts locally (differing only in the embedded version
+string if the tree is dirty). There is no signature: the assets carry checksums
+only, and [`docs/release.md`](docs/release.md) says so explicitly.
 
 ## Quickstart
 
