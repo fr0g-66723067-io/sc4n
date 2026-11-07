@@ -28,6 +28,14 @@ jobs:
           make fixtures
           git diff --exit-code testdata/fixtures
 
+      # docs/rules.md is generated from the registry, and every rule must carry a
+      # triage bucket (tools/sc4nrules). A diff means the page a reader looks a
+      # finding up in disagrees with the code that emitted it.
+      - name: rule catalogue is generated
+        run: |
+          make rules-doc
+          git diff --exit-code docs/rules.md
+
       # The scan path is stdlib-only by design; these are the other release
       # targets a user may build for.
       - name: cross-build

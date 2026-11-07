@@ -95,6 +95,12 @@ confirm-image:
 confirm:
 	$(GO) run ./tools/sc4nconfirm $(foreach a,$(ARTIFACTS),-artifact $(a)) -out $(ATTESTATION)
 
+# The rule catalogue a reader without a binary can browse. Generated from the
+# registry, and `go test ./tools/sc4nrules` fails when the committed file is
+# stale, so a rule added without running this cannot ship undocumented.
+rules-doc:
+	$(GO) run ./tools/sc4nrules -out docs/rules.md
+
 # Regenerates testdata/fixtures. Deterministic: a second run produces no diff.
 fixtures:
 	$(GO) run ./tools/sc4nfixtures -out testdata/fixtures
