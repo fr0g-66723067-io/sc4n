@@ -27,7 +27,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker lab oracle-image confirm-image confirm
 
-all: vet test
+all: vet test docs-links
 
 build:
 	$(GO) build -trimpath -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/sc4n
@@ -126,6 +126,11 @@ confirm-image:
 #   sc4n scan -attestation /tmp/att.json <paths>
 confirm:
 	$(GO) run ./tools/sc4nconfirm $(foreach a,$(ARTIFACTS),-artifact $(a)) -out $(ATTESTATION)
+
+# Every Markdown link and anchor in README.md and docs/ must resolve. A reader
+# holding a finding follows a chain of links; a dead one is a documentation crash.
+docs-links:
+	$(GO) run ./tools/doclinks .
 
 # The rule catalogue a reader without a binary can browse. Generated from the
 # registry, and `go test ./tools/sc4nrules` fails when the committed file is

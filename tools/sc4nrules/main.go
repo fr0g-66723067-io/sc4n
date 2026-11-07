@@ -159,7 +159,7 @@ func render(rules []*report.Rule) ([]byte, error) {
 			continue
 		}
 		fmt.Fprintf(&b, "## %s\n\n", bk.Title)
-		fmt.Fprintf(&b, "How to act on these: [`docs/triage.md#%s`](../triage.md#%s).\n", bk.Anchor, bk.Anchor)
+		fmt.Fprintf(&b, "How to act on these: [`docs/triage.md#%s`](triage.md#%s).\n", bk.Anchor, bk.Anchor)
 		for _, r := range group {
 			fmt.Fprintf(&b, "\n### %s\n\n", r.ID)
 			fmt.Fprintf(&b, "**%s** · severity `%s` · confidence `%s` · class `%s`",
@@ -168,7 +168,7 @@ func render(rules []*report.Rule) ([]byte, error) {
 				fmt.Fprintf(&b, " · %s", strings.Join(linkCWEs(r.CWE), ", "))
 			}
 			fmt.Fprint(&b, "\n\n")
-			fmt.Fprint(&b, strings.TrimSpace(r.Description))
+			fmt.Fprint(&b, escapeText(strings.TrimSpace(r.Description)))
 			fmt.Fprint(&b, "\n\n")
 			if len(r.Refs) > 0 {
 				fmt.Fprint(&b, "References:\n\n")
@@ -213,6 +213,11 @@ func linkCWEs(cwes []string) []string {
 // cell keeps a title from breaking a table: titles are authored, not input, so a
 // pipe is the only character that can.
 func cell(s string) string { return strings.ReplaceAll(s, "|", "\\|") }
+
+// escapeText stops a rule description from being read as Markdown. The Jinja
+// introspection rule explains a gadget chain as `[i](...)`, which a Markdown
+// renderer turns into a link to nowhere and the doc link checker reports as dead.
+func escapeText(s string) string { return strings.ReplaceAll(s, "](", "]\\(") }
 
 // unused keeps sort imported for the registry guarantee; the registry is already
 // sorted by ID, and this file must not reorder it.

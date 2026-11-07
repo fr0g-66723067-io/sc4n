@@ -224,7 +224,7 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 
 ## The load path runs code
 
-How to act on these: [`docs/triage.md#load-path-code`](../triage.md#load-path-code).
+How to act on these: [`docs/triage.md#load-path-code`](triage.md#load-path-code).
 
 ### SC4N-JOBLIB-UNSCANNED-PAYLOAD
 
@@ -773,7 +773,7 @@ References:
 
 ## Code the repository ships
 
-How to act on these: [`docs/triage.md#shipped-code`](../triage.md#shipped-code).
+How to act on these: [`docs/triage.md#shipped-code`](triage.md#shipped-code).
 
 ### SC4N-ADAPTER-EXTERNAL-BASE
 
@@ -1053,7 +1053,7 @@ References:
 
 **Template reaches a Python object through a dunder attribute or name** · severity `critical` · confidence `high` · class `template` · [CWE-1336](https://cwe.mitre.org/data/definitions/1336.html), [CWE-94](https://cwe.mitre.org/data/definitions/94.html)
 
-A Jinja2 template contains an attribute, subscript or name from the Python introspection set: __class__, __mro__, __subclasses__, __globals__, __builtins__, __import__, __init__, __reduce__, __getattribute__, __dict__, __code__ or __loader__. Jinja2 is not sandboxed, so walking from any value to one of these reaches an arbitrary callable: __class__.__mro__[1].__subclasses__()[i](...) is the standard chain, and the `attr` filter (|attr('__globals__')) reaches the same names through a string. This is the class behind CVE-2026-5760 (SGLang /v1/rerank, CVSS 9.8) and CERT VU#915947. A chat template has no legitimate reason to name any of them.
+A Jinja2 template contains an attribute, subscript or name from the Python introspection set: __class__, __mro__, __subclasses__, __globals__, __builtins__, __import__, __init__, __reduce__, __getattribute__, __dict__, __code__ or __loader__. Jinja2 is not sandboxed, so walking from any value to one of these reaches an arbitrary callable: __class__.__mro__[1].__subclasses__()[i]\(...) is the standard chain, and the `attr` filter (|attr('__globals__')) reaches the same names through a string. This is the class behind CVE-2026-5760 (SGLang /v1/rerank, CVSS 9.8) and CERT VU#915947. A chat template has no legitimate reason to name any of them.
 
 References:
 
@@ -1109,7 +1109,7 @@ References:
 
 ## Containers, members and what stopped the walk
 
-How to act on these: [`docs/triage.md#containers`](../triage.md#containers).
+How to act on these: [`docs/triage.md#containers`](triage.md#containers).
 
 ### SC4N-ARCHIVE-CRC
 
@@ -1365,7 +1365,7 @@ References:
 
 ## Model formats and graph semantics
 
-How to act on these: [`docs/triage.md#model-graphs`](../triage.md#model-graphs).
+How to act on these: [`docs/triage.md#model-graphs`](triage.md#model-graphs).
 
 ### SC4N-COREML-CUSTOM-LAYER
 
@@ -1894,7 +1894,7 @@ References:
 
 ## Content, text and persuasion
 
-How to act on these: [`docs/triage.md#content-persuasion`](../triage.md#content-persuasion).
+How to act on these: [`docs/triage.md#content-persuasion`](triage.md#content-persuasion).
 
 ### SC4N-CARD-COMMENT
 
@@ -2160,7 +2160,7 @@ References:
 
 ## Repository-level supply chain
 
-How to act on these: [`docs/triage.md#repo-supply-chain`](../triage.md#repo-supply-chain).
+How to act on these: [`docs/triage.md#repo-supply-chain`](triage.md#repo-supply-chain).
 
 ### SC4N-GITATTRIBUTES-FILTER
 
@@ -2324,7 +2324,7 @@ References:
 
 ## Coverage limits and dispatch
 
-How to act on these: [`docs/triage.md#coverage-limits`](../triage.md#coverage-limits).
+How to act on these: [`docs/triage.md#coverage-limits`](triage.md#coverage-limits).
 
 ### SC4N-FORMAT-AMBIGUOUS
 
@@ -2473,7 +2473,7 @@ References:
 
 ## Weight statistics
 
-How to act on these: [`docs/triage.md#weights-statistics`](../triage.md#weights-statistics).
+How to act on these: [`docs/triage.md#weights-statistics`](triage.md#weights-statistics).
 
 ### SC4N-WEIGHTS-ALL-ZERO
 
