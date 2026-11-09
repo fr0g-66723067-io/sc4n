@@ -890,6 +890,24 @@
       ],
       "notes": "EXT1 carries no name: the class is whatever the loading process registered for extension code 1, so the file's behaviour is a property of the host, not of the artifact."
     },
+    "pickle_fluke/binary_deep_fluke.bin": {
+      "expect": null,
+      "forbid": [
+        "SC4N-PICKLE-PREFIX",
+        "SC4N-PICKLE-TRAILING",
+        "SC4N-PICKLE-STRUCT"
+      ],
+      "notes": "The same 14 bytes at offset 600 inside a binary with no recognised magic: a candidate found by the prefix scan has to decode more than one scalar before STOP."
+    },
+    "pickle_fluke/webp_proto_fluke.webp": {
+      "expect": null,
+      "forbid": [
+        "SC4N-PICKLE-PREFIX",
+        "SC4N-PICKLE-TRAILING",
+        "SC4N-PICKLE-STRUCT"
+      ],
+      "notes": "A WebP whose body decodes as PROTO+LONG1+STOP. The media magic keeps the pickle sniffer from claiming it, so an image no longer carries two high pickle findings."
+    },
     "pickle_gadget_os_system.pkl": {
       "expect": [
         "SC4N-PICKLE-GLOBAL-CRITICAL",

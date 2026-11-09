@@ -327,6 +327,21 @@ var containerMagics = []struct {
 	{[]byte("\x28\xb5\x2f\xfd"), FormatZstd, 0},
 	{[]byte("7z\xbc\xaf\x27\x1c"), FormatSevenZip, 0},
 	{[]byte("Rar!\x1a\x07"), FormatRar, 0},
+	// Media containers: their bodies are entropy-coded, so a PROTO byte inside the
+	// first 64 bytes is a coincidence, not a payload prefix.
+	{[]byte("RIFF"), FormatUnknown, 0}, // WebP, WAV, AVI
+	{[]byte("\x89PNG\r\n\x1a\n"), FormatUnknown, 0},
+	{[]byte("\xff\xd8\xff"), FormatUnknown, 0}, // JPEG
+	{[]byte("GIF8"), FormatUnknown, 0},
+	{[]byte("BM"), FormatUnknown, 0},      // BMP
+	{[]byte("II*\x00"), FormatUnknown, 0}, // TIFF, little endian
+	{[]byte("MM\x00*"), FormatUnknown, 0}, // TIFF, big endian
+	{[]byte("%PDF-"), FormatUnknown, 0},
+	{[]byte("OggS"), FormatUnknown, 0},
+	{[]byte("fLaC"), FormatUnknown, 0},
+	{[]byte("ID3"), FormatUnknown, 0},  // MP3
+	{[]byte("ftyp"), FormatUnknown, 4}, // MP4/MOV
+	{[]byte("WEBP"), FormatUnknown, 8},
 }
 
 var magicSniffer = []struct {
@@ -481,16 +496,19 @@ func init() {
 	})
 }
 
-// LeadingContainerMagic reports whether b begins with a magic that a container
-// parser unwraps (zip, tar, gzip, zlib, bzip2, xz, lz4, zstd, 7z, rar).
+// LeadingContainerMagic reports whether b begins with a magic that another parser
+// owns: a compression or archive format this tree unwraps (zip, tar, gzip, zlib,
+// bzip2, xz, lz4, zstd, 7z, rar), or a media container whose bytes are compressed
+// by definition (RIFF/WebP, PNG, JPEG, GIF, BMP, TIFF, PDF, Ogg, FLAC, MP3, MP4).
 //
-// It exists for the pickle sniffer's prefix search: a stream that opens with a
-// compression magic and carries a pickle verbatim inside a stored block (zlib's
-// level-0 framing does exactly that) contains a PROTO byte a few bytes in, so a
-// prefix search would claim the file as a pickle and walk compressed bytes as
-// opcodes — reporting the container's own framing as SC4N-PICKLE-PREFIX and
-// SC4N-PICKLE-TRAILING instead of dispatching the file as the container it is. The
-// caller that cares is the one that would otherwise look past the magic.
+// It exists for the pickle sniffer's prefix search: a stream that opens with such
+// a magic and carries a PROTO byte a few bytes in — zlib's level-0 framing does
+// that with a pickle verbatim, and so does any compressed image body by chance —
+// would be claimed as a pickle and walked as opcodes, reporting the container's own
+// bytes as SC4N-PICKLE-PREFIX and SC4N-PICKLE-TRAILING instead of dispatching the
+// file as what it is. Measured on a 196 KB WebP in a real repository: the pickle
+// sniffer claimed it, found a 14-byte accidental stream at offset 129551 and
+// reported two highs about an image.
 func LeadingContainerMagic(b []byte) bool {
 	for _, m := range containerMagics {
 		if len(b) >= m.at+len(m.magic) && bytes.HasPrefix(b[m.at:], m.magic) {

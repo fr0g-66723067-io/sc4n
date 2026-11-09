@@ -905,3 +905,60 @@ func TestSliceExtentsAreInfoNotStruct(t *testing.T) {
 		t.Fatalf("a marked slice must not be reported as malformed; got %v", got)
 	}
 }
+
+// TestSliceCutInsideAStringLengthIsASlice pins the metadata half of the slice
+// contract. A 2 MiB header slice of a multi-gigabyte quant can be cut inside a
+// gguf_string, leaving fewer than eight bytes for its length; the parse then says
+// "truncated string length for tokenizer.ggml.tokens", which is a statement about
+// the slice. Measured on the Qwen 4-claim campaign, where two multi-part GGUFs
+// reported a medium SC4N-GGUF-STRUCT for exactly this. A marked slice reports
+// SC4N-PARTIAL-SLICE, and an unmarked file keeps the structural finding.
+func TestSliceCutInsideAStringLengthIsASlice(t *testing.T) {
+	full := build(spec{
+		version: 3,
+		kvs: []kv{
+			{key: "general.architecture", valType: 8, val: strb("qwen3", binary.LittleEndian)},
+			{key: "tokenizer.ggml.tokens", valType: 9, val: append(append(u32b(8, binary.LittleEndian), u64b(3, binary.LittleEndian)...),
+				append(strb("a", binary.LittleEndian), append(strb("b", binary.LittleEndian), strb("c", binary.LittleEndian)...)...)...)},
+		},
+		tensors: []tensor{{name: "t", dims: []uint64{4}, typ: 0}},
+		dataLen: 16,
+	})
+	// Cut inside the array's first element length: find the array header and cut
+	// four bytes into the length field that follows it.
+	marker := []byte("tokenizer.ggml.tokens")
+	i := bytes.Index(full, marker)
+	if i < 0 {
+		t.Fatal("marker not found")
+	}
+	cut := i + len(marker) + 4 /* type */ + 8 /* array elem type */ + 8 /* count */ + 4
+	b := full[:cut]
+
+	// Unmarked: a short file really is a contradiction, so the structural finding
+	// stays.
+	c := report.NewCollector(0)
+	if _, err := gguf.Parse(source.Mem("m.gguf", b), limits.Default(), c.For("m.gguf")); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !hasRule(c.Findings(), "SC4N-GGUF-STRUCT") {
+		t.Fatalf("an unmarked file cut mid-string must keep the structural finding; got %v", ids(c.Findings()))
+	}
+
+	// Marked slice: the cut is the slice, reported once.
+	c = report.NewCollector(0)
+	l := limits.Default()
+	sess := artifact.NewSession(c, "", l)
+	sess.SetPartial([]string{"m.gguf"})
+	src := source.Mem("m.gguf", b)
+	defer src.Close()
+	if _, err := artifact.Scan(sess.NewCtx("m.gguf", l), src); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	got := ids(c.Findings())
+	if hasRule(c.Findings(), "SC4N-GGUF-STRUCT") {
+		t.Fatalf("a marked slice must not report the cut as malformed; got %v", got)
+	}
+	if !hasRule(c.Findings(), "SC4N-PARTIAL-SLICE") {
+		t.Fatalf("a marked slice must report SC4N-PARTIAL-SLICE; got %v", got)
+	}
+}

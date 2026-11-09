@@ -533,8 +533,15 @@ func (st *state) structf(off int64, format string, args ...any) {
 // bytes ran out rather than that the header contradicts itself. On a header slice
 // the metadata region itself can be cut, so "string X declares 18 bytes but only 6
 // remain" is the slice and not a malformed file.
+//
+// "truncated" is here for the metadata pass: a 2 MiB slice of a multi-gigabyte
+// quant cut in the middle of a gguf_string leaves fewer than 8 bytes for the length
+// and reports "truncated string length for tokenizer.ggml.tokens" — a medium
+// SC4N-GGUF-STRUCT about our own truncation, observed on the Qwen 4-claim campaign
+// on stealth-model/Qwen3.8-Flash-Next__Qwen4-news. The guard only runs when the
+// file is a declared slice, so a malformed file still reports.
 func sliceBoundary(msg string) bool {
-	for _, shape := range []string{"past EOF", "but only", "beyond the end"} {
+	for _, shape := range []string{"past EOF", "but only", "beyond the end", "truncated"} {
 		if strings.Contains(msg, shape) {
 			return true
 		}

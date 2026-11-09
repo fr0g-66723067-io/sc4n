@@ -290,7 +290,7 @@ func (w *walker) run() {
 	size := int64(len(w.data))
 	w.stream.Bytes = size
 	start := 0
-	if !w.probePickle(0) {
+	if !w.probePickle(0, false) {
 		// The window does not open with a clean pickle. If a clean one starts
 		// later, the bytes in front of it are a prefix (the nullifAI shape) and
 		// are reported as such.
@@ -319,7 +319,7 @@ func (w *walker) run() {
 			return
 		}
 		// Decide what the bytes after the STOP are.
-		if w.probePickle(pos) {
+		if w.probePickle(pos, false) {
 			w.emitOnce("segment", ruleSegment, int64(pos),
 				"a second pickle starts at this offset; STOP is not end-of-file and a reader that loops over load() executes every segment")
 			continue
@@ -367,7 +367,7 @@ func (w *walker) locateStreamStart() (int, bool) {
 		if tried > maxCandidates {
 			return 0, false
 		}
-		if w.probePickle(i) {
+		if w.probePickle(i, true) {
 			return i, true
 		}
 	}
@@ -376,7 +376,16 @@ func (w *walker) locateStreamStart() (int, bool) {
 
 // probePickle runs a silent walk from off and reports whether a clean pickle
 // begins there.
-func (w *walker) probePickle(off int) bool {
+//
+// needEvidence applies the "a STOP alone is not a pickle" rule to a
+// protocol-bearing stream. It is set by the prefix scan — a candidate found at a
+// random offset inside another file's bytes — and not by the two callers that
+// already have structural evidence: offset 0, where a protocol byte is the file's
+// own handshake, and a segment boundary after a completed STOP, where the previous
+// stream is the evidence. Measured on a 196 KB WebP: the scan found PROTO 4,
+// LONG1(9 bytes), STOP at offset 129551 and accepted it, so an image carried a
+// high SC4N-PICKLE-PREFIX and SC4N-PICKLE-TRAILING.
+func (w *walker) probePickle(off int, needEvidence bool) bool {
 	if off < 0 || off >= len(w.data) {
 		return false
 	}
@@ -431,7 +440,7 @@ func (w *walker) probePickle(off int) bool {
 		// A stream that resolved a name is exempt: the 19-byte protocol-0 gadget
 		// b"cos\nsystem\n(S'id'\ntR." decodes six opcodes and is a real pickle, which
 		// is exactly the case a flat opcode floor would have rejected.
-		if !hasProto && !probe.stream.SawGlobal && probe.stream.Ops < minSniffOps {
+		if !probe.stream.SawGlobal && probe.stream.Ops < minSniffOps && (needEvidence || !hasProto) {
 			return false
 		}
 		// A STOP is only evidence when the walk reached it coherently, or when the

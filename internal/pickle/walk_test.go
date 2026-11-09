@@ -1208,8 +1208,45 @@ func TestProbeRequiresOpcodeProgress(t *testing.T) {
 	} {
 		w := &walker{silent: true, lim: limits.Default(), data: tc.data, limit: len(tc.data),
 			mm: newMemo(len(tc.data)), globals: map[string]*Global{}, structs: map[string]*structStat{}, once: map[string]bool{}}
-		if got := w.probePickle(0); got != tc.want {
+		if got := w.probePickle(0, false); got != tc.want {
 			t.Errorf("%s: probePickle = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestResyncNeedsEvidence is the regression for a high false positive on a real
+// image: a 196 KB WebP in a live repository carried PROTO 4, LONG1(9 bytes), STOP
+// at offset 129551 inside its entropy-coded body, the prefix scan accepted it as a
+// complete pickle, and the file was reported with SC4N-PICKLE-PREFIX and
+// SC4N-PICKLE-TRAILING at high. A protocol byte plus a scalar plus STOP is not
+// evidence at a random offset; a stream that names a global, or that decodes more
+// than minSniffOps opcodes, still is.
+func TestResyncNeedsEvidence(t *testing.T) {
+	// The exact 14 bytes the scan accepted: PROTO 4, LONG1 carrying 9 bytes, STOP.
+	fluke := []byte{0x80, 0x04, 0x8a, 0x09, 0x22, 0xe3, 0x3c, 0xd2, 0xb1, 0x82, 0x87, 0x5b, 0x8a, 0x2e}
+	filler := func(n int) []byte {
+		out := make([]byte, n)
+		for i := range out {
+			out[i] = byte(0x80 + (i*37)%0x60) // high-entropy, no run of opcodes
+		}
+		return out
+	}
+	// A junk prefix followed by a real gadget: the nullifAI shape, which must stay
+	// claimable because the stream names a global.
+	gadget := append(filler(200), []byte("cposix\nsystem\n(S'id'\ntR.")...)
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{"14-byte fluke behind filler", append(filler(200), fluke...), false},
+		{"junk prefix plus os.system gadget", gadget, true},
+	} {
+		w := &walker{silent: true, lim: limits.Default(), data: tc.data, limit: len(tc.data),
+			mm: newMemo(len(tc.data)), globals: map[string]*Global{}, structs: map[string]*structStat{}, once: map[string]bool{}}
+		if got := w.probePickle(200, true); got != tc.want {
+			t.Errorf("%s: probePickle(200, needEvidence) = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

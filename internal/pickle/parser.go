@@ -95,7 +95,7 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		structs: map[string]*structStat{},
 		once:    map[string]bool{},
 	}
-	if probe.probePickle(0) {
+	if probe.probePickle(0, false) {
 		return artifact.FormatPickle, true
 	}
 	// A payload may precede the pickle stream — the nullifAI shape from the
