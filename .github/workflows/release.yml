@@ -1,10 +1,9 @@
 name: release
 
-# A tag is the only thing that produces a release. `make release` builds and
-# verifies the same artifacts locally, so a maintainer can prove a tag will work
-# before pushing it.
+# A tag is the only thing that produces a release. This file is byte-identical
+# in every public fr0g-66723067-io repo; `make release-gate` and
+# tools/release/{verify,publish}.sh are the per-repo contract.
 on:
-  # Tag pushes only. A branch push never publishes: the tag is the release.
   push:
     tags: ['v*']
 
@@ -12,62 +11,41 @@ permissions:
   contents: read
 
 jobs:
-  # The gate the release cannot ship without: the tree at the tag must pass the
-  # same tests a contributor's pull request passes.
-  test:
+  # A tag mirrored to git.localhost:3000 has no GitHub token and must not fail:
+  # the guard makes both jobs skip there and run normally on github.com.
+  gate:
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: make test
-      - run: |
-          make fixtures
-          git diff --exit-code testdata/fixtures
-      - run: |
-          make rules-doc
-          git diff --exit-code docs/rules.md
+      - name: release gate
+        run: make release-gate
+      - name: the tag has a CHANGELOG section
+        run: sh tools/release/notes.sh "$GITHUB_REF_NAME" > /dev/null
 
-  binaries:
-    needs: test
+  publish:
+    needs: gate
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
-      - name: build and verify
-        # VERSION is the tag (git describe reads it), so the binary's report and
-        # the release's name are one value.
+      - name: build and verify the artifacts
         run: |
-          make release-binaries
-          sh tools/release/verify.sh dist "$(git describe --tags)"
-
-      # Idempotent on purpose: re-pointing a tag is legitimate (a docs-only fix
-      # should not need a new version), and `gh release create` fails when the
-      # release already exists. Create when absent, upload with --clobber when not,
-      # so a re-run replaces the assets instead of dying halfway.
-      - name: release
+          make release-binaries VERSION="$GITHUB_REF_NAME"
+          sh tools/release/verify.sh dist "$GITHUB_REF_NAME"
+      - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          # A tag containing "-" is a pre-release (v1.0.1-rc1). It must be marked
-          # as one, or the release page advertises an unfinished build as the
-          # current version.
-          case "$GITHUB_REF_NAME" in
-            *-*) release_flags="--prerelease" ;;
-            *)   release_flags="" ;;
-          esac
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/sc4n_* dist/SHA256SUMS --clobber
-          else
-            # shellcheck disable=SC2086
-            gh release create "$GITHUB_REF_NAME" \
-              --title "sc4n $GITHUB_REF_NAME" \
-              --generate-notes $release_flags \
-              dist/sc4n_* dist/SHA256SUMS
-          fi
+        run: sh tools/release/publish.sh "$GITHUB_REF_NAME"

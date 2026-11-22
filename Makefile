@@ -24,25 +24,35 @@ BIN ?= sc4n
 # tags or git stamps its commit; no git at all stamps "dev", which is what the
 # binary reported for every build before this.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS ?= -X main.version=$(VERSION)
 
-.PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker lab oracle-image confirm-image confirm
+.PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker lab oracle-image confirm-image confirm release-gate release-binaries verify-release release release-image verify-image
 
 all: vet test docs-links
 
 build:
-	$(GO) build -trimpath -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/sc4n
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/sc4n
 
 # The platforms a release is built for. amd64 linux is the reference host; the
 # others exist because a scanner that only runs where it was written is a scanner
 # most users cannot run.
 RELEASE_TARGETS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 DIST ?= dist
+RELEASE_LDFLAGS ?= -s -w $(LDFLAGS)
 
-# A release is three files and an image: the binaries, one SHA256SUMS covering
-# them, and the version stamped into every report. `make release` builds and then
-# verifies what it built, because a release asset that does not verify is worse
-# than none.
-release: release-binaries release-image verify-release
+# The gate a tag must pass. The release workflow runs this before it builds
+# anything, so a failing gate publishes nothing.
+release-gate: test docs-links
+	$(GO) run ./tools/sc4nfixtures -out testdata/fixtures
+	@git diff --exit-code testdata/fixtures
+	$(GO) run ./tools/sc4nrules -out docs/rules.md
+	@git diff --exit-code docs/rules.md
+
+# A release is five binaries and one SHA256SUMS covering them. `make release`
+# builds and then verifies what it built, because a release asset that does not
+# verify is worse than none. The image is not published; `make release-image`
+# builds and verifies it locally.
+release: release-binaries verify-release
 
 release-binaries:
 	rm -rf $(DIST)
@@ -53,16 +63,18 @@ release-binaries:
 	  [ "$$goos" = windows ] && out=$$out.exe; \
 	  echo "  build $$out"; \
 	  GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 $(GO) build -trimpath \
-	    -ldflags "-s -w -X main.version=$(VERSION)" -o $$out ./cmd/sc4n; \
+	    -ldflags "$(RELEASE_LDFLAGS)" -o $$out ./cmd/sc4n; \
 	done
 	cd $(DIST) && sha256sum $(BIN)_* | sort -k2 > SHA256SUMS
 	@echo "  $(DIST)/SHA256SUMS"
 
-release-image:
-	docker build --build-arg VERSION=$(VERSION) -t $(BIN):$(VERSION) .
+release-image: docker verify-image
+
+verify-image:
+	sh tools/release/image-check.sh $(BIN) $(VERSION)
 
 verify-release:
-	sh tools/release/verify.sh $(DIST) $(VERSION) --with-image
+	sh tools/release/verify.sh $(DIST) $(VERSION)
 
 # The image is the documented way to scan an untrusted repository: --network=none
 # (the scan path has no dialer), --read-only and a non-root user bound what the
