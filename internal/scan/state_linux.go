@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux
 
 package scan
 
@@ -9,7 +9,7 @@ import (
 
 // sameFileState compares the identity fields a rewrite changes. Ctim catches a
 // same-size rewrite whose mtime an attacker restored, which ctime cannot be set
-// from user space on Unix.
+// from user space on Linux.
 func sameFileState(a, b os.FileInfo) bool {
 	if a == nil || b == nil || a.Size() != b.Size() || !a.ModTime().Equal(b.ModTime()) {
 		return false
