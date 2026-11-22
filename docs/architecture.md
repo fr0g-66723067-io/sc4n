@@ -183,10 +183,10 @@ silently missing catalogue entry.
 | `MaxDepth` | 4 | deepest legitimate nest observed: joblib→object pickle, zip→pickle, tar→pickle |
 | `MaxEntries` | 100 000 | far above any real archive, far below a member-count DoS |
 | `MaxArrayElements` | 1<<22 | one metadata array (tokenizer vocab, UBJSON/MessagePack array); above every published vocabulary (Llama-3 is 128 256, Qwen 151 936) and still bounds the walk |
-| `MaxDecompressedBytes` | 8 GiB | per archive; a real model's members sum below this |
+| `MaxDecompressedBytes` | 8 GiB | scan-wide; every archive, compression layer and nested member charges the same budget, so nesting cannot multiply it |
 | `MaxRatio` | 200 | above real model compression (tokenizer JSON reaches ~20:1), below a zip bomb |
 | `MaxStringBlob` | 16 MiB | one metadata value, tokenizer entry or embedded JSON |
-| `MaxSpillBytes` | 4 GiB | one archive member materialised on disk for parsing; above every published single-member shape, below a decompression bomb that fills the temporary filesystem |
+| `MaxSpillBytes` | 4 GiB | scan-wide materialisation budget; one archive member at a time is capped by the remaining budget, above every published single-member shape |
 | `MaxRetainedText` | 64 MiB | total text one artifact's parse keeps alive; per-value caps alone still let a million small values add up |
 | `MaxHashBytes` | 256 MiB | how much of an artifact the scan digests — see the performance section for why a full digest of a 13 GiB checkpoint cannot fit the budget |
 | `MaxFindings` | 100 000 | a crafted artifact must not exhaust memory; a drop is reported |

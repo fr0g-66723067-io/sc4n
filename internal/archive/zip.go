@@ -137,6 +137,14 @@ type zipDirInfo struct {
 	// Trailing is the number of bytes between the end of the
 	// end-of-central-directory record and the end of the file.
 	Trailing int64
+	// DirAmbiguous means the literal and prefix-derived central-directory
+	// offsets both validate at different positions.
+	DirAmbiguous bool
+	DirOffsets   [2]int64
+	// NamesCapped means the retained-name budget stopped the read before every
+	// declared record was listed.
+	NamesCapped bool
+	NameBytes   int64
 }
 
 // readZipDirectory parses the central directory without decompressing anything.
@@ -165,26 +173,60 @@ func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, zipDirInfo,
 	// without the record signature returns an error and changes nothing.
 	z64Pos := int64(-1)
 	if z64EOCD, z64Size, z64Off, z64Entries, zerr := readZip64(s, eocdPos); zerr == nil {
+		// A classic field that is not the sentinel must agree with the zip64
+		// record. Two records that describe different directories are a crafted
+		// ambiguity, not a preference: a loader may use the other one.
+		if entriesTotal != 0xffff && entriesTotal != z64Entries {
+			return nil, zipDirInfo{}, errors.New("archive: zip64 record conflicts with the end-of-central-directory")
+		}
+		if cdSize != 0xffffffff && cdSize != z64Size {
+			return nil, zipDirInfo{}, errors.New("archive: zip64 record conflicts with the end-of-central-directory")
+		}
+		if cdOff != 0xffffffff && cdOff != z64Off {
+			return nil, zipDirInfo{}, errors.New("archive: zip64 record conflicts with the end-of-central-directory")
+		}
 		entriesTotal, cdSize, cdOff = z64Entries, z64Size, z64Off
 		z64Pos = z64EOCD
 	}
 
 	// A zip may be prefixed with arbitrary bytes (a self-extracting stub, or
 	// torch's "prefixed archive"): every directory offset is then relative to a
-	// non-zero base. Two rules, in order: the literal offset wins when it
-	// already holds a central-directory signature; otherwise the base is the
-	// distance from the directory to the record that follows it — the zip64
-	// end-of-central-directory record when present, else the EOCD.
+	// non-zero base. When the file starts with a local header the literal
+	// offset is the one the writer recorded; otherwise the base is derived
+	// from the end record that follows the directory. Both validating at
+	// different positions means two directories exist, and the member list is
+	// not provably the one a loader will use.
+	anchor := eocdPos
+	if z64Pos >= 0 {
+		anchor = z64Pos
+	}
+	derived := anchor - cdSize - cdOff
+	if derived < 0 {
+		derived = 0
+	}
+	literalOK := isCentralAt(s, cdOff)
+	derivedOK := isCentralAt(s, derived+cdOff)
+	if cdSize == 0 && cdOff == 0 && entriesTotal == 0 {
+		// An empty archive has no central record to validate.
+		literalOK, derivedOK, derived = true, true, 0
+	}
 	base := int64(0)
-	if !isCentralAt(s, cdOff) {
-		anchor := eocdPos
-		if z64Pos >= 0 {
-			anchor = z64Pos
+	switch {
+	case startsWithLocalHeader(s):
+		if !literalOK && derivedOK {
+			base = derived
 		}
-		base = anchor - cdSize - cdOff
-		if base < 0 {
-			base = 0
-		}
+	case derivedOK:
+		base = derived
+	case literalOK:
+		return nil, zipDirInfo{}, errors.New("archive: cannot locate the central directory of a prefixed zip")
+	default:
+		// Fall through to the literal offset; the read below reports the
+		// failure with the malformed-directory error.
+	}
+	if literalOK && derivedOK && derived+cdOff != cdOff {
+		info.DirAmbiguous = true
+		info.DirOffsets = [2]int64{cdOff, derived + cdOff}
 	}
 	cdStart := base + cdOff
 	if cdStart < 0 || cdStart+cdSize > s.Size() {
@@ -219,6 +261,11 @@ func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, zipDirInfo,
 
 	entries := make([]zipEntry, 0, min64int(count, 4096))
 	off := cdStart
+	retained := int64(0)
+	nameCap := l.MaxRetainedText
+	if nameCap <= 0 {
+		nameCap = limits.Default().MaxRetainedText
+	}
 	for range count {
 		if off+46 > s.Size() {
 			return nil, zipDirInfo{}, errors.New("archive: central directory truncated")
@@ -243,6 +290,12 @@ func readZipDirectory(s source.Source, l limits.Limits) ([]zipEntry, zipDirInfo,
 		e.localOff = int64(le32(hdr[42:]))
 		off += 46
 
+		retained += nameLen
+		if retained > nameCap {
+			info.NameBytes = retained
+			info.NamesCapped = true
+			break
+		}
 		body, berr := s.Bytes(off, nameLen+extraLen+commentLen)
 		if berr != nil && int64(len(body)) < nameLen+extraLen+commentLen {
 			return nil, zipDirInfo{}, berr
@@ -275,9 +328,17 @@ func readZip64(s source.Source, eocdPos int64) (z64Pos, cdSize, cdOff, entries i
 	if le32(loc) != sigZ64Loc {
 		return 0, 0, 0, 0, errors.New("archive: bad zip64 locator")
 	}
+	// The locator's offset is relative to the same prefix base as every other
+	// zip offset. When the archive has a prefix it points before the real record;
+	// the record itself is immediately before the locator, so a bounded scan
+	// finds it and the record's own size proves the candidate.
 	z64Pos = int64(le64(loc[8:]))
-	if z64Pos <= 0 || z64Pos+56 > s.Size() {
-		return 0, 0, 0, 0, errors.New("archive: bad zip64 end-of-central-directory offset")
+	if !validZip64At(s, z64Pos, locPos) {
+		if found, ok := findZip64Before(s, locPos); ok {
+			z64Pos = found
+		} else {
+			return 0, 0, 0, 0, errors.New("archive: bad zip64 end-of-central-directory offset")
+		}
 	}
 	rec, rerr := s.Bytes(z64Pos, 56)
 	if rerr != nil && len(rec) < 56 {
@@ -298,6 +359,60 @@ func readZip64(s source.Source, eocdPos int64) (z64Pos, cdSize, cdOff, entries i
 		return 0, 0, 0, 0, errors.New("archive: implausible zip64 end-of-central-directory")
 	}
 	return z64Pos, cdSize, cdOff, entries, nil
+}
+
+// maxZip64Record bounds the backward search for a zip64 end-of-central-directory
+// record that follows a prefixed archive's locator.
+const maxZip64Record = 1 << 16
+
+// validZip64At reports whether pos holds a zip64 end-of-central-directory record
+// whose declared record size reaches exactly locPos.
+func validZip64At(s source.Source, pos, locPos int64) bool {
+	if pos < 0 || pos+56 > s.Size() || pos+12 > locPos {
+		return false
+	}
+	rec, err := s.Bytes(pos, 56)
+	if err != nil && len(rec) < 56 {
+		return false
+	}
+	if le32(rec) != sigZ64EOCD {
+		return false
+	}
+	size := int64(le64(rec[4:]))
+	if size < 0 || size > maxZip64Record {
+		return false
+	}
+	return pos+12+size == locPos
+}
+
+// findZip64Before scans back from locPos for a zip64 record ending at the
+// locator. It is the prefix-relative form of the locator value.
+func findZip64Before(s source.Source, locPos int64) (int64, bool) {
+	start := locPos - maxZip64Record
+	if start < 0 {
+		start = 0
+	}
+	b, err := s.Bytes(start, locPos-start)
+	if err != nil && int64(len(b)) < locPos-start {
+		return 0, false
+	}
+	for i := len(b) - 4; i >= 0; i-- {
+		if le32(b[i:]) != sigZ64EOCD {
+			continue
+		}
+		pos := start + int64(i)
+		if validZip64At(s, pos, locPos) {
+			return pos, true
+		}
+	}
+	return 0, false
+}
+
+// startsWithLocalHeader reports whether the source begins with a zip local
+// header, which means its directory offsets already carry any prefix.
+func startsWithLocalHeader(s source.Source) bool {
+	b, err := s.Bytes(0, 4)
+	return (err == nil || len(b) == 4) && len(b) == 4 && le32(b) == sigLocal
 }
 
 // parseZip64Extra fills in the sizes/offset that the plain record marked with
@@ -395,32 +510,33 @@ func resolveLocal(s source.Source, e zipEntry) (bodyOff int64, localName, mismat
 		lcrc := le32(hdr[14:])
 		lcomp := uint64(le32(hdr[18:]))
 		luncomp := uint64(le32(hdr[22:]))
-		compareSizes := true
-		if lcomp == 0xffffffff || luncomp == 0xffffffff {
-			// The 32-bit fields are the zip64 sentinel; the local extra field
-			// holds the real sizes. Without it there is nothing to compare, and
-			// guessing would report a conformant archive.
-			if u, c, ok := localZip64Sizes(s, e.localOff, nameLen, extraLen); ok {
-				if luncomp == 0xffffffff {
+		uncompSentinel := luncomp == 0xffffffff
+		compSentinel := lcomp == 0xffffffff
+		if uncompSentinel || compSentinel {
+			u, c, okU, okC := localZip64Sizes(s, e.localOff, nameLen, extraLen, uncompSentinel, compSentinel)
+			if uncompSentinel {
+				if okU {
 					luncomp = u
+				} else {
+					diffs = append(diffs, "local header carries the zip64 uncompressed-size sentinel but no complete zip64 extra field")
 				}
-				if lcomp == 0xffffffff {
+			}
+			if compSentinel {
+				if okC {
 					lcomp = c
+				} else {
+					diffs = append(diffs, "local header carries the zip64 compressed-size sentinel but no complete zip64 extra field")
 				}
-			} else {
-				compareSizes = false
 			}
 		}
 		if lcrc != e.crc {
 			diffs = append(diffs, "crc32 0x"+strconv.FormatUint(uint64(lcrc), 16)+" vs 0x"+strconv.FormatUint(uint64(e.crc), 16))
 		}
-		if compareSizes {
-			if lcomp != e.comp {
-				diffs = append(diffs, "compressed size "+itoa64(int64(lcomp))+" vs "+itoa64(int64(e.comp)))
-			}
-			if luncomp != e.uncomp {
-				diffs = append(diffs, "uncompressed size "+itoa64(int64(luncomp))+" vs "+itoa64(int64(e.uncomp)))
-			}
+		if lcomp != 0xffffffff && lcomp != e.comp {
+			diffs = append(diffs, "compressed size "+itoa64(int64(lcomp))+" vs "+itoa64(int64(e.comp)))
+		}
+		if luncomp != 0xffffffff && luncomp != e.uncomp {
+			diffs = append(diffs, "uncompressed size "+itoa64(int64(luncomp))+" vs "+itoa64(int64(e.uncomp)))
 		}
 	}
 	if len(diffs) > 0 {
@@ -434,40 +550,51 @@ func resolveLocal(s source.Source, e zipEntry) (bodyOff int64, localName, mismat
 	return bodyOff, localName, mismatch, ""
 }
 
-// localZip64Sizes reads the local file header's zip64 extra field, which holds
-// the real uncompressed and compressed sizes when the 32-bit fields carry the
-// 0xFFFFFFFF sentinel. ok is false when the field is absent or unreadable, in
-// which case the caller must not compare sizes.
-func localZip64Sizes(s source.Source, localOff, nameLen, extraLen int64) (uncomp, comp uint64, ok bool) {
-	if extraLen <= 0 {
-		return 0, 0, false
+// localZip64Sizes reads the local file header's zip64 extra field. Each
+// argument says whether the corresponding 32-bit field carries the 0xFFFFFFFF
+// sentinel; the extra field holds a value only for a saturated field, in spec
+// order, so consuming a fixed pair for a one-sentinel record is how a valid
+// archive was rejected.
+func localZip64Sizes(s source.Source, localOff, nameLen, extraLen int64, wantUncomp, wantComp bool) (uncomp, comp uint64, okUncomp, okComp bool) {
+	if extraLen <= 0 || (!wantUncomp && !wantComp) {
+		return 0, 0, false, false
 	}
 	off := localOff + 30 + nameLen
 	if off+extraLen > s.Size() {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	b, err := s.Bytes(off, extraLen)
 	if err != nil && int64(len(b)) < extraLen {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	for i := 0; i+4 <= len(b); {
 		id := le16(b[i:])
 		sz := int(le16(b[i+2:]))
 		i += 4
 		if i+sz > len(b) {
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 		if id == 0x0001 {
 			p := b[i : i+sz]
-			// The spec fixes the order: uncompressed, compressed, offset, disk.
-			if len(p) < 16 {
-				return 0, 0, false
+			take := func() (uint64, bool) {
+				if len(p) < 8 {
+					return 0, false
+				}
+				v := le64(p)
+				p = p[8:]
+				return v, true
 			}
-			return le64(p), le64(p[8:]), true
+			if wantUncomp {
+				uncomp, okUncomp = take()
+			}
+			if wantComp {
+				comp, okComp = take()
+			}
+			return
 		}
 		i += sz
 	}
-	return 0, 0, false
+	return 0, 0, false, false
 }
 
 // openZipMember returns a reader over one member's decompressed bytes. It
@@ -485,6 +612,12 @@ func openZipMember(s source.Source, l limits.Limits, m Member) (io.ReadCloser, e
 	comp := m.CompressedSize
 	if comp < 0 {
 		comp = 0
+	}
+	// The ratio denominator is the compressed bytes actually present. A central
+	// directory can declare more than the source holds, and using that number
+	// inflated the cap in proportion to the lie.
+	if avail := s.Size() - m.dataOff; avail >= 0 && comp > avail {
+		comp = avail
 	}
 	sec := io.NewSectionReader(s, m.dataOff, comp)
 	var inner io.Reader

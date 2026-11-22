@@ -87,25 +87,34 @@ func (npzParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 			// reported the link.
 			continue
 		}
-		dispatchMember(ctx, s, m, max)
+		if !dispatchMember(ctx, s, m, max) {
+			return nil
+		}
 	}
 	return nil
 }
 
 // dispatchMember reads one npz member (spilling it to a private file when it
 // exceeds MaxStringBlob, so a multi-gigabyte member does not have to fit in
-// memory) and dispatches it through artifact.ScanMember*.
-func dispatchMember(ctx *artifact.Ctx, s source.Source, m archive.Member, max int64) {
-	rc, err := archive.Open(s, ctx.Limits, m)
+// memory) and dispatches it through artifact.ScanMember*. It returns false when
+// the scan-wide decompression budget is spent and the caller must stop.
+func dispatchMember(ctx *artifact.Ctx, s source.Source, m archive.Member, max int64) bool {
+	if ctx.RemainingDecompressed() == 0 {
+		reportNPZDecompressed(ctx)
+		return false
+	}
+	l := ctx.Limits
+	l.MaxDecompressedBytes = ctx.RemainingDecompressed()
+	rc, err := archive.Open(s, l, m)
 	if err != nil {
 		archive.EmitOpenError(ctx, m.Name, err)
-		return
+		return true
 	}
 	probe, rerr := io.ReadAll(io.LimitReader(rc, max+1))
 	if rerr != nil && len(probe) == 0 {
 		rc.Close()
 		archive.EmitOpenError(ctx, m.Name, rerr)
-		return
+		return true
 	}
 	if rerr != nil {
 		// Some bytes arrived but the member did not read to its declared end — a
@@ -120,6 +129,16 @@ func dispatchMember(ctx *artifact.Ctx, s source.Source, m archive.Member, max in
 		if cap <= 0 {
 			cap = limits.Default().MaxSpillBytes
 		}
+		if remaining := ctx.RemainingSpill(); remaining < cap {
+			cap = remaining
+		}
+		if cap <= 0 {
+			ctx.ReportSpillLimit(ctx.ChargeSpill(1), ctx.Limits.MaxSpillBytes)
+			rc.Close()
+			artifact.ScanMemberBytes(ctx, m.Name, probe)
+			ctx.ChargeDecompressed(int64(len(probe)))
+			return ctx.RemainingDecompressed() > 0
+		}
 		src, serr := source.Spill(m.Name, io.MultiReader(bytes.NewReader(probe), rc), cap)
 		rc.Close()
 		if serr != nil {
@@ -129,14 +148,32 @@ func dispatchMember(ctx *artifact.Ctx, s source.Source, m archive.Member, max in
 			} else {
 				ctx.Sink.Emit(RuleStruct, 0, "npz member "+snippet(m.Name)+" cannot be materialised: "+serr.Error())
 			}
-			return
+			// The spill may have failed after writing a bounded prefix; scan what
+			// was already read instead of dropping the payload it may contain.
+			artifact.ScanMemberBytes(ctx, m.Name, probe)
+			ctx.ChargeSpill(cap + 1)
+			ctx.ChargeDecompressed(int64(len(probe)))
+			return ctx.RemainingDecompressed() > 0
 		}
 		artifact.ScanMember(ctx, m.Name, src)
+		n := src.Size()
 		src.Close()
-		return
+		ctx.ChargeSpill(n)
+		ctx.ChargeDecompressed(n)
+		return ctx.RemainingDecompressed() > 0
 	}
 	rc.Close()
 	artifact.ScanMemberBytes(ctx, m.Name, probe)
+	ctx.ChargeDecompressed(int64(len(probe)))
+	return ctx.RemainingDecompressed() > 0
+}
+
+func reportNPZDecompressed(ctx *artifact.Ctx) {
+	cap := ctx.Session.TopLimits.MaxDecompressedBytes
+	if cap <= 0 {
+		cap = limits.Default().MaxDecompressedBytes
+	}
+	ctx.ReportDecompressedLimit(ctx.ChargeDecompressed(0), cap)
 }
 
 // snippet bounds a member name for evidence text.

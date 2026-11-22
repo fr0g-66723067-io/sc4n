@@ -42,11 +42,12 @@ const sigScanWindow = 1 << 20
 
 // recoveredMember is one local file header reached without a central directory.
 type recoveredMember struct {
-	name    string
-	method  uint16
-	flags   uint16
-	dataOff int64
-	dataEnd int64
+	name        string
+	method      uint16
+	flags       uint16
+	dataOff     int64
+	dataEnd     int64
+	sizeInvalid bool
 }
 
 // descriptorLen returns the length of the zip data descriptor that ends at end,
@@ -101,15 +102,16 @@ func descriptorLen(s source.Source, dataOff, end int64) int64 {
 // at the first offset that is not a local header, at the member cap, or when the
 // next header would not fit in the source. capped reports that it stopped at the
 // cap rather than at the data, so the caller can emit the entry limit.
-func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMember, capped bool) {
+func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMember, capped bool, skipped []string) {
 	if s == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	max := l.MaxEntries
 	if max <= 0 {
 		max = limits.Default().MaxEntries
 	}
 	size := s.Size()
+	seen := 0
 	for off := int64(0); off+zipLocalHeaderLen <= size; {
 		h, err := s.Bytes(off, zipLocalHeaderLen)
 		if int64(len(h)) < zipLocalHeaderLen && err != nil {
@@ -118,13 +120,18 @@ func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMembe
 		if len(h) < zipLocalHeaderLen || le32(h) != sigLocal {
 			break
 		}
+		seen++
+		if seen > max {
+			capped = true
+			break
+		}
 		flags := le16(h[6:])
 		method := le16(h[8:])
 		comp := int64(le32(h[18:]))
 		nameLen := int64(le16(h[26:]))
 		extraLen := int64(le16(h[28:]))
 		dataOff := off + zipLocalHeaderLen + nameLen + extraLen
-		if dataOff >= size {
+		if dataOff > size {
 			break
 		}
 		name := ""
@@ -134,11 +141,22 @@ func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMembe
 			}
 		}
 		dataEnd := int64(-1)
+		sizeInvalid := false
 		switch {
 		case comp == 0xFFFFFFFF:
-			// Zip64: the real compressed size is in the local extra field.
-			if _, c, ok := localZip64Sizes(s, off, nameLen, extraLen); ok && c > 0 && dataOff+int64(c) <= size {
-				dataEnd = dataOff + int64(c)
+			// Zip64: the real compressed size is in the local extra field. The
+			// declared value is only usable when it stays inside the source and
+			// ends on container framing; otherwise a truncated record would make
+			// the walk read past its member and hide the next one.
+			if _, c, _, okC := localZip64Sizes(s, off, nameLen, extraLen, false, true); okC && c > 0 && dataOff+int64(c) <= size {
+				claimEnd := dataOff + int64(c)
+				if claimEnd == size || descriptorLen(s, dataOff, claimEnd) > 0 || nextZipSig(s, claimEnd, size) == claimEnd {
+					dataEnd = claimEnd
+				} else {
+					sizeInvalid = true
+				}
+			} else {
+				sizeInvalid = true
 			}
 		case comp > 0:
 			dataEnd = dataOff + comp
@@ -166,19 +184,18 @@ func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMembe
 		}
 		if span <= dataOff {
 			// The descriptor consumed the whole span: a zero-length member.
+			if name != "" {
+				skipped = append(skipped, name)
+			}
 			off = next
 			continue
 		}
-		if len(out) >= max {
-			capped = true
-			break
-		}
-		out = append(out, recoveredMember{name: name, method: method, flags: flags, dataOff: dataOff, dataEnd: span})
+		out = append(out, recoveredMember{name: name, method: method, flags: flags, dataOff: dataOff, dataEnd: span, sizeInvalid: sizeInvalid})
 		// The walk advances past the descriptor to the next header, never to the
 		// trimmed span end.
 		off = next
 	}
-	return out, capped
+	return out, capped, skipped
 }
 
 // nextZipSig returns the offset of the next local-header, central-directory or
@@ -234,34 +251,44 @@ func (t truncatingReader) Read(p []byte) (int, error) {
 // identical. It returns the member count scanned and the bytes charged to the
 // cumulative decompressed budget.
 func scanRecovered(ctx *artifact.Ctx, s source.Source, members []recoveredMember) (scanned int, scannedBytes int64) {
-	var cumulative int64
 	for _, m := range members {
 		if m.name != "" {
 			checkMemberName(ctx, &Member{Name: m.name})
+		}
+		if m.sizeInvalid {
+			ctx.Sink.EmitExtra(ruleArchiveMemberError, 0,
+				"member "+snippet(m.name)+" declares a zip64 size that does not end on container framing",
+				map[string]string{"member": m.name, "error": "zip64 size does not end on framing"})
 		}
 		span := m.dataEnd - m.dataOff
 		if span <= 0 {
 			continue
 		}
+		if ctx.RemainingDecompressed() == 0 {
+			reportDecompressed(ctx)
+			return scanned, scannedBytes
+		}
+		var n int64
 		switch m.method {
 		case 0:
 			rc := io.NewSectionReader(s, m.dataOff, span)
-			cumulative += processReader(ctx, m.name, span, span, rc, nil)
+			n = processReader(ctx, m.name, span, span, rc, nil)
 			scanned++
 		case 8:
 			fr := flate.NewReader(io.NewSectionReader(s, m.dataOff, span))
 			r := capReader(truncatingReader{r: fr}, ctx.Limits, span, "member "+snippet(m.name))
-			cumulative += processReader(ctx, m.name, -1, span, r, nil)
+			n = processReader(ctx, m.name, -1, span, r, nil)
 			_ = fr.Close()
 			scanned++
 		default:
 			EmitOpenError(ctx, m.name, &unsupportedMethodError{method: m.method})
 		}
-		if exceededDecompressed(ctx, cumulative) {
-			return scanned, cumulative
+		scannedBytes += n
+		if chargeDecompressed(ctx, n) {
+			return scanned, scannedBytes
 		}
 	}
-	return scanned, cumulative
+	return scanned, scannedBytes
 }
 
 // recoverTruncatedZip is the fallback a zip with no end-of-central-directory
@@ -269,8 +296,8 @@ func scanRecovered(ctx *artifact.Ctx, s source.Source, members []recoveredMember
 // local headers bound; it reports false when no member was found, in which case
 // the artifact keeps its parse-failure status.
 func recoverTruncatedZip(ctx *artifact.Ctx, s source.Source) bool {
-	members, capped := recoverLocalMembers(s, ctx.Limits)
-	if len(members) == 0 {
+	members, capped, skipped := recoverLocalMembers(s, ctx.Limits)
+	if len(members) == 0 && !capped {
 		return false
 	}
 	if capped {
@@ -278,7 +305,12 @@ func recoverTruncatedZip(ctx *artifact.Ctx, s source.Source) bool {
 		if max <= 0 {
 			max = limits.Default().MaxEntries
 		}
-		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxEntries", int64(len(members)), int64(max), "archive member cap reached")
+		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxEntries", int64(len(members)+1), int64(max), "archive member cap reached")
+	}
+	for _, name := range skipped {
+		ctx.Sink.EmitExtra(ruleArchiveMemberSkipped, 0,
+			"zero-length member "+snippet(name)+" was not dispatched",
+			map[string]string{"member": name, "size": "0"})
 	}
 	scanned, bytes := scanRecovered(ctx, s, members)
 	ctx.Sink.EmitExtra(ruleArchiveTruncated, 0,

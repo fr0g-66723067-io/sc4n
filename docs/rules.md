@@ -2,7 +2,7 @@
 
 # Rule catalogue
 
-Every rule sc4n can emit, generated from the rule registry: 205 rules, 185 of
+Every rule sc4n can emit, generated from the rule registry: 206 rules, 186 of
 them naming a CWE. `sc4n rules` prints the same table with the rationale for
 each rule; this page exists so a reader holding a finding can look it up
 without a binary, and so every rule carries a link to what to do with it.
@@ -16,6 +16,7 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 |---|---|---|---|---|
 | [`SC4N-ADAPTER-EXTERNAL-BASE`](#sc4n-adapter-external-base) | high | medium | CWE-829 | PEFT adapter resolves its base model to another repository |
 | [`SC4N-ARCHIVE-CRC`](#sc4n-archive-crc) | medium | high | CWE-354 | Archive member CRC-32 does not match its content |
+| [`SC4N-ARCHIVE-DIRECTORY-AMBIGUOUS`](#sc4n-archive-directory-ambiguous) | high | high | CWE-436 | Zip has two valid central directories |
 | [`SC4N-ARCHIVE-DUPLICATE-NAME`](#sc4n-archive-duplicate-name) | medium | high | CWE-436 | Archive contains duplicate member names |
 | [`SC4N-ARCHIVE-ENCRYPTED`](#sc4n-archive-encrypted) | medium | high | CWE-693 | Archive member is encrypted and cannot be inspected |
 | [`SC4N-ARCHIVE-LINK`](#sc4n-archive-link) | high | high | CWE-59 | Archive contains a link or device member |
@@ -220,7 +221,7 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 | [`SC4N-XGB-UBJ-STRUCT`](#sc4n-xgb-ubj-struct) | medium | high | CWE-20 | UBJSON stream is structurally invalid or exceeds the walk budget |
 | [`SC4N-XGB-UBJ-TRAILING`](#sc4n-xgb-ubj-trailing) | high | high | CWE-20 | Bytes follow the root UBJSON value |
 
-205 rule(s).
+206 rule(s).
 
 ## The load path runs code
 
@@ -1120,6 +1121,17 @@ The member's bytes do not hash to the CRC-32 recorded in the directory. Either t
 References:
 
 - https://cwe.mitre.org/data/definitions/354.html
+
+
+### SC4N-ARCHIVE-DIRECTORY-AMBIGUOUS
+
+**Zip has two valid central directories** · severity `high` · confidence `high` · class `archive` · [CWE-436](https://cwe.mitre.org/data/definitions/436.html)
+
+The literal directory offset and the offset derived from the prefix both hold a central-directory signature, at different positions. A reader that resolves the prefix one way and a loader that resolves it another read different member sets, so a clean scan of this member list is not a clean statement about what the loader sees.
+
+References:
+
+- https://cwe.mitre.org/data/definitions/436.html
 
 
 ### SC4N-ARCHIVE-DUPLICATE-NAME

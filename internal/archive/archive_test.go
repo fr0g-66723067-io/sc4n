@@ -906,7 +906,7 @@ func TestSpillRefusalChargesCap(t *testing.T) {
 	big := make([]byte, 2<<20)
 	data := buildZip(t, []zspec{
 		{name: "big1.bin", data: big, method: 8},
-		{name: "big2.bin", data: big, method: 8},
+		{name: "big2.bin", data: big, method: 0},
 		{name: "archive/data.pkl", data: gadgetPickle(), method: 8},
 	}, false)
 	l := limits.Default()

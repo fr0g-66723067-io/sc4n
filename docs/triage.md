@@ -105,6 +105,10 @@ a coverage gap stated as a finding, not a clean result.
 `<name>/data.pkl` is the torch save format; a `.zip` with an executable member is
 not something a model loader opens. `SC4N-ARCHIVE-MEMBER-HIDDEN` means a member
 the central directory does not list, which no normal extractor will show you.
+`SC4N-ARCHIVE-DIRECTORY-AMBIGUOUS` means two central directories validate at
+different offsets, so the member list sc4n scanned is not provably the one a
+loader will read; treat the artifact as unscanned until the prefix/base question
+is resolved.
 
 **What to do.** For unscanned compression: extract it yourself in a sandbox and
 scan the payload, or treat the artifact as unscanned. For a member: name it in the
