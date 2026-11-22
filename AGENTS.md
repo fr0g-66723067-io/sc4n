@@ -142,6 +142,7 @@ Behaviour changes land with the document that describes them:
 | attestation or harness | `docs/attestation.md` |
 | SARIF or CI integration | `docs/github-code-scanning.md` |
 | release assets or workflow | `docs/release.md` |
+| disclosure route or reporting scope | `SECURITY.md` |
 
 ## Performance rules
 
@@ -168,9 +169,9 @@ tests: no wall-clock assertions, because a busy machine is not a regression
 archive: a .joblib in xz, lzma or lz4 is a loader escalation, not just an unscanned payload
 ```
 
-- Commit on the branch you are on (`master` is normal). Push only the non-default
-  local Gitea `gitea` remote (`https://git.example.invalid`); github.com and every
-  other remote stay operator-gated.
+- Commit on the branch you are on (`master` is normal). Push only to the
+  operator-designated mirror remote; github.com and every other remote stay
+  operator-gated.
 - Stage explicit paths, never `-A`: generated corpora and binaries are easy to
   sweep in by accident.
 - One logical change per commit; `make test` green before each.

@@ -39,11 +39,11 @@ headers, Python source, chat templates, cards — and never by running anything.
 `sc4n formats` prints the same table with the **analysis depth** of every format,
 including the ones that are deliberately recognised but not parsed. Every rule
 states its severity, confidence and class, and a CWE where one applies. `sc4n
-rules` prints the live catalogue — 201 rules, 184 of them naming a weakness; the
-rest are the ones where there is nothing to name, such as "the weights are all
-zero" or "the extent could not be verified". The counts are not repeated here on
-purpose: they are generated from the rule definitions, and prose copies of them
-drifted twice.
+rules` prints the live catalogue with the rule count and how many name a
+weakness; the rest are the ones where there is nothing to name, such as "the
+weights are all zero" or "the extent could not be verified". Counts are not
+repeated in this document: they are generated from the rule definitions, and
+prose copies of them drifted twice.
 
 ## Install
 
@@ -56,20 +56,20 @@ sha256sum -c SHA256SUMS --ignore-missing
 # container, which is the right way to scan bytes you do not trust
 docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.0
 
-# or from source: Go 1.27, no code generation, no third-party tooling
+# or from source: Go 1.27.3, no code generation, no third-party tooling
 go build -o sc4n ./cmd/sc4n
 ```
 
 `v1.0.0` is published by `.github/workflows/release.yml`: five static binaries and
-`SHA256SUMS` on the release page, and the image in GHCR. This repository is
-private, so both need authentication: `gh auth login` then
-`gh release download v1.0.0` for the assets, and for the image a token that can
-read packages (`gh auth refresh -s read:packages`, or a classic PAT with
-`read:packages`) piped to `docker login ghcr.io` — the default `gh` token does
-not carry that scope.
-Nothing is published from a branch, and `make release` builds and verifies the
-same artifacts locally. There is no signature: the assets carry checksums only,
-and [`docs/release.md`](docs/release.md) says so explicitly.
+`SHA256SUMS` on the release page, and the image in GHCR. Both are public and need
+no authentication. Nothing is published from a branch, and `make release` builds
+and verifies the same artifacts locally.
+
+The provenance posture is checksums only: the assets carry `SHA256SUMS`, and there
+is no signing key and no build attestation. That is a stated position rather than
+an omission — [`docs/release.md`](docs/release.md) §Provenance says what it does
+and does not prove. Verify the checksum, or build from the tag when you need
+provenance.
 
 ## Quickstart
 
@@ -410,6 +410,8 @@ host, not with these flags.
   workflow, its traps, and the de-duplication contract.
 - [`docs/release.md`](docs/release.md) — how a release is built, verified and
   published, and what it does not claim.
+- [`SECURITY.md`](SECURITY.md) — how to report a defect in the scanner, what is
+  in scope, and what is a documented limitation rather than a vulnerability.
 
 ## Recommended posture
 

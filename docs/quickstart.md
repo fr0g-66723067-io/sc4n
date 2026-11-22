@@ -6,12 +6,9 @@ all of it offline before pointing the scanner at anything you care about.
 
 ## Install
 
-Three ways, in order of convenience. This repository is private, so the release
-assets and the image need credentials: `gh auth login` for `gh release download`,
-and for the image a token with the packages scope
-(`gh auth refresh -s read:packages`) piped to `docker login ghcr.io` — a plain
-`gh` token is refused with `denied`, which is what a first attempt looks like. `make release` builds and verifies the
-same artifacts from the tag if you would rather not download them.
+Three ways, in order of convenience. The release assets and the image are public,
+so neither needs credentials; `make release` builds and verifies the same
+artifacts from the tag if you would rather not download them.
 
 ```sh
 # 1. released binary (linux/amd64 shown; darwin and windows builds are published too)
@@ -22,7 +19,7 @@ sha256sum -c SHA256SUMS --ignore-missing && chmod +x sc4n_v1.0.0_linux_amd64
 # 2. container, which is the right way to scan bytes you do not trust
 docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.0
 
-# 3. from source: Go 1.27, no code generation, no third-party tooling
+# 3. from source: Go 1.27.3, no code generation, no third-party tooling
 git clone https://github.com/fr0g-66723067-io/sc4n && cd sc4n
 go build -o sc4n ./cmd/sc4n
 ```
