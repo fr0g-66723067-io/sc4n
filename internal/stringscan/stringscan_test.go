@@ -733,6 +733,7 @@ func TestSecretTokenShapesAreRedacted(t *testing.T) {
 	}{
 		{"github-token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", "ghp_"},
 		{"github-fine-grained", "github_pat_11ABCDEFG0abcdefghijklmnopqrstuv", "github_pat_"},
+		{"hugging-face", "hf_abcdefghijklmnopqrstuvwxyz0123456789", "hf_"},
 		{"openai-key", "sk-proj-EXAMPLE0123456789abcdefghijklmnop", "sk-"},
 		{"aws-access-key-id", "AKIAIOSFODNN7EXAMPLE", "AKIA"},
 		{"aws-session-key", "ASIAIOSFODNN7EXAMPLE", "ASIA"},
@@ -811,6 +812,8 @@ func TestSecretTokenShapesAreRedacted(t *testing.T) {
 		"a risk-based approach to disk-heavy workloads",
 		"the task-force reviewed the Asia Pacific region",
 		"buy sk-apricots at the market",
+		"hf_transfer_enable_model_downloading is a helper, not a token",
+		"hf_hub_download(repo_id, filename)",
 		`{"token":"short"}`,
 		`{"payload":"eyJhIjoxfQ=="}`,
 		"AKIA and ASIA are the AWS access-key prefixes",

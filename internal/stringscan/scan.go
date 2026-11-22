@@ -480,6 +480,10 @@ const (
 	alphaToken
 	// alphaURL is the base64url class a JWT segment is drawn from.
 	alphaURL
+	// alphaAlnum is the Hugging Face class: letters and digits only. The vendor
+	// issues no punctuation, and allowing an underscore would make every
+	// hf_-prefixed Python identifier a candidate.
+	alphaAlnum
 )
 
 func inAlphabet(c byte, a tokenAlphabet) bool {
@@ -525,6 +529,7 @@ var secretTokenShapes = []struct {
 }{
 	{[]byte("ghp_"), "ghp_", alphaToken, 20},
 	{[]byte("github_pat_"), "github_pat_", alphaToken, 20},
+	{[]byte("hf_"), "hf_", alphaAlnum, 30},
 	{[]byte("sk-"), "sk-", alphaToken, 20},
 	{[]byte("AKIA"), "AKIA", alphaUpper, 16},
 	{[]byte("ASIA"), "ASIA", alphaUpper, 16},

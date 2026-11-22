@@ -563,14 +563,15 @@ invisible until it was measured:
   never contains — the classic card/template override went unreported.
 - **A credential value is reported on its shape, and a placeholder is not
   reported at all.** `SC4N-STRING-SECRET-VALUE` matches vendor token shapes
-  (`ghp_`, `github_pat_`, `sk-`, `AKIA`/`ASIA`, `AIza`, `xoxb-`, a JWT) as well as
-  `NAME=value` assignments, and redacts whatever it matched. Because the literal
-  table cannot see the value, the assignment half drops the ones a reader can see
-  are not credentials: `api_key="EMPTY"`, `api_key="none"`, `api_key='your-api-key'`,
-  `${VAR}`, `<your-key>`, `password=password`. Measured on the corpus, every
-  assignment-shaped hit it had was one of those — the local-server example a model
-  card ships — so the filter removed 11 false positives there while the token shapes
-  kept firing wherever a value actually has a credential's shape.
+  (`ghp_`, `github_pat_`, `hf_`, `sk-`, `AKIA`/`ASIA`, `AIza`, `xoxb-`, a JWT)
+  as well as `NAME=value` assignments, and redacts whatever it matched. Because
+  the literal table cannot see the value, the assignment half drops the ones a
+  reader can see are not credentials: `api_key="EMPTY"`, `api_key="none"`,
+  `api_key='your-api-key'`, `${VAR}`, `<your-key>`, `password=password`.
+  Measured on the corpus, every assignment-shaped hit it had was one of those —
+  the local-server example a model card ships — so the filter removed 11 false
+  positives there while the token shapes kept firing wherever a value actually
+  has a credential's shape.
 
 **Mitigation.** Treat card text as untrusted input, never as documentation to be
 obeyed. Datamarking/spotlighting reduces (does not eliminate) injection success.

@@ -63,8 +63,9 @@ var (
 		Description: "A string in the artifact assigns a value to a credential variable " +
 			"(AWS_SECRET_ACCESS_KEY=, GITHUB_TOKEN=, OPENAI_API_KEY=, HF_TOKEN=, password=, " +
 			"api_key=, …), contains a PEM private-key header, or carries a credential that announces " +
-			"its own vendor: a GitHub token (ghp_, github_pat_), an OpenAI key (sk-), an AWS access " +
-			"key id (AKIA, ASIA), a Google API key (AIza), a Slack token (xoxb-) or a JSON Web Token " +
+			"its own vendor: a GitHub token (ghp_, github_pat_), a Hugging Face token (hf_), an " +
+			"OpenAI key (sk-), an AWS access key id (AKIA, ASIA), a Google API key (AIza), a Slack " +
+			"token (xoxb-) or a JSON Web Token " +
 			"(eyJ… with three dot-separated segments). The matched value is masked: the finding " +
 			"records that a secret-shaped string is present and where, without reproducing it into a " +
 			"log, a SARIF upload or a baseline file. Note the direction of the risk this does not " +
