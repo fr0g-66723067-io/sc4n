@@ -52,6 +52,7 @@ prose copies of them drifted twice.
 curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/sc4n_v1.0.1_linux_amd64
 curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
+chmod +x sc4n_v1.0.1_linux_amd64
 
 # container, built locally from this tree: the release page carries binaries only
 VERSION=v1.0.1 make docker
