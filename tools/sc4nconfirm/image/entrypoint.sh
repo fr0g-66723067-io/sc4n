@@ -11,18 +11,22 @@
 # payload cannot write the root-owned /out or the tracer's /tmp/trace.
 set -u
 
-mkdir -p /home/worker/.cache/huggingface /home/worker/.ssh /home/worker/DOCUMENTS \
-         /home/worker/.aws 2>/dev/null || true
+# The image sets HOME=/home/worker; the default keeps the script usable when an
+# operator runs it directly. Tests point HOME at a temporary tree.
+worker=${HOME:-/home/worker}
 
-echo "sc4nconfirm-canary-not-a-real-token" > /home/worker/.cache/huggingface/token
-echo "sc4nconfirm-canary-not-a-real-key"   > /home/worker/.ssh/id_rsa
-echo "sc4nconfirm-canary-not-a-real-key"   > /home/worker/.ssh/id_ed25519
-echo "sc4nconfirm-canary-not-a-real-id"    > /home/worker/DOCUMENTS/id.txt
-echo "sc4nconfirm-canary-not-real-creds"   > /home/worker/.aws/credentials
-echo "machine example.invalid login sc4nconfirm-canary password none" > /home/worker/.netrc
+mkdir -p "$worker/.cache/huggingface" "$worker/.ssh" "$worker/DOCUMENTS" \
+         "$worker/.aws" 2>/dev/null || true
+
+echo "sc4nconfirm-canary-not-a-real-token" > "$worker/.cache/huggingface/token"
+echo "sc4nconfirm-canary-not-a-real-key"   > "$worker/.ssh/id_rsa"
+echo "sc4nconfirm-canary-not-a-real-key"   > "$worker/.ssh/id_ed25519"
+echo "sc4nconfirm-canary-not-a-real-id"    > "$worker/DOCUMENTS/id.txt"
+echo "sc4nconfirm-canary-not-real-creds"   > "$worker/.aws/credentials"
+echo "machine example.invalid login sc4nconfirm-canary password none" > "$worker/.netrc"
 
 # Hand the canaries to the payload identity; root keeps /out.
-chown -R 65534:65534 /home/worker 2>/dev/null || true
+chown -R 65534:65534 "$worker" 2>/dev/null || true
 
 mkdir -p /out /tmp 2>/dev/null || true
 
