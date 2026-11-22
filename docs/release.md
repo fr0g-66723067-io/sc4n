@@ -137,7 +137,35 @@ becomes public:
    and every asset the release page offers was built from it. A commit-address
    typo is left in place for that reason; a secret is not — a leaked credential is
    revoked first and the history decision is made explicitly, with the release
-   notes saying what changed.
+   notes saying what changed. The one rewrite this project has made is recorded
+   below; it is history, not a precedent.
+
+### The 2026-11-22 rewrite
+
+Before the repository became public, its history was rewritten once, by explicit
+owner decision, to remove operator residue. Tag names are unchanged; the commits
+they name are not:
+
+| tag | commit before | commit after |
+|---|---|---|
+| `v1.0.0` | `8c4ce07` | `847a997` |
+| `v1.0.1-rc1` | `54d7970` | `3f51418` |
+
+The tree at both tags differs from the pre-rewrite tree in exactly four paths:
+`internal/xgb/xgb_test.go`, `tools/sc4nlab/main.go` and `docs/measurements.md`
+carry the rewritten path strings, and
+`tools/__pycache__/genopcodes.cpython-314.pyc` was removed — a committed bytecode
+cache that embedded one. None is an input to `go build ./cmd/sc4n`: two are test
+and tool sources, one is documentation, and the cache file is not compiled. The
+published assets therefore still correspond to the source the tag names, although
+the commit hash changed, and `SHA256SUMS` is unchanged.
+
+Across the rest of history the same rewrite replaced an internal mirror URL and
+instance name in `AGENTS.md` and in two commit messages, reworded those two
+subjects, and corrected one committer address typo. Every commit and both tags
+were re-signed with the project key (§Provenance). The four paths above are the
+complete tree diff between the old and new tag commits, taken from the
+pre-rewrite backup before it was pruned.
 
 ## Before tagging
 
