@@ -8,6 +8,7 @@
 set -eu
 
 tag=${1:?usage: notes.sh TAG}
+sh "$(dirname "$0")/tag-check.sh" "$tag"
 version=${tag#v}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 
@@ -21,8 +22,8 @@ else
 fi
 
 section=$(awk -v want="$version" '
-	$0 ~ "^## \\[" want "\\]" { on = 1; next }
-	on && /^## \[/ { exit }
+	index($0, "## [" want "]") == 1 { on = 1; next }
+	on && index($0, "## [") == 1 { exit }
 	on { print }
 ' "$root/CHANGELOG.md")
 [ -n "$section" ] || {

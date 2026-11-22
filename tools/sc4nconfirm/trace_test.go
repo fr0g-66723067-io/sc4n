@@ -117,4 +117,51 @@ func contains(list []string, want string) bool {
 	return false
 }
 
+func TestQuietPathIsBoundaryAware(t *testing.T) {
+	cases := []struct {
+		path    string
+		writing bool
+		want    bool
+	}{
+		{"/tmp/stage", true, false}, // a write is the effect
+		{"/out/trace", true, false}, // the payload cannot write it; if it does, report
+		{"/work", true, false},      // not a harness prefix
+		{"/usr/lib/x.py", false, true},
+		{"/usrlib/x.py", false, false}, // bare HasPrefix would hide this
+		{canaryPaths[0], false, false},
+		{canaryPaths[0] + "/child", false, false},
+	}
+	for _, c := range cases {
+		if got := quietPath(c.path, c.writing); got != c.want {
+			t.Errorf("quietPath(%q, %v) = %v, want %v", c.path, c.writing, got, c.want)
+		}
+	}
+}
+
+func TestHarnessExecMatchIsExact(t *testing.T) {
+	if !harnessExec([]string{"/usr/local/bin/python3", "python3", "/opt/sc4nconfirm/load.py"}) {
+		t.Fatal("the loader exec was not recognised")
+	}
+	for _, parts := range [][]string{
+		{"/bin/sh", "sh", "-c", "/opt/sc4nconfirm/load.py"},
+		{"/usr/bin/python3", "python3"},
+		{"/usr/bin/python3", "python3", "/tmp/load.py"},
+	} {
+		if harnessExec(parts) {
+			t.Errorf("harnessExec(%q) = true, want false", parts)
+		}
+	}
+}
+
+func TestApplyTraceDropsOnlyTheFirstHarnessExec(t *testing.T) {
+	r := &malice.Run{}
+	applyTrace(r, `1 execve("/usr/local/bin/python3", ["python3", "/opt/sc4nconfirm/load.py", "/w/a.pkl", "/tmp/result.json"], 0x0) = 0
+2 execve("/bin/sh", ["/bin/sh", "-c", "id"], 0x0) = 0
+3 execve("/bin/sh", ["/bin/sh", "-c", "/opt/sc4nconfirm/load.py"], 0x0) = 0
+`)
+	if len(r.Exec) != 2 {
+		t.Fatalf("Exec = %v, want the shell and the later loader-named shell", r.Exec)
+	}
+}
+
 func itoa(n int) string { return strconv.Itoa(n) }

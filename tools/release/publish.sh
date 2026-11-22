@@ -5,10 +5,7 @@
 set -eu
 
 tag=${1:?usage: publish.sh TAG}
-case "$tag" in
-v*) : ;;
-*) echo "publish: tag must start with v: $tag" >&2; exit 1 ;;
-esac
+sh "$(dirname "$0")/tag-check.sh" "$tag"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
 slug=${GITHUB_REPOSITORY:-}

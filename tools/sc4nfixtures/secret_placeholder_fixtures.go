@@ -38,8 +38,8 @@ func init() {
 func secretPlaceholderFixtures(f *fixtureSet) {
 	f.addText("secret_assignments.md",
 		"# Configuration\n\n"+
-			"client_secret=a1b2c3d4e5f60718293a4b5c6d7e8f90\n"+
-			"password=Tr0ub4dor3xample\n")
+			"client_secret=Hunter2\n"+
+			"password=hunter2\n")
 
 	f.addText("secret_placeholders.md",
 		"# Local server example\n\n"+

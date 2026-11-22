@@ -12,6 +12,7 @@ set -eu
 
 dist=${1:?usage: verify.sh DIST VERSION}
 version=${2:?usage: verify.sh DIST VERSION}
+sh "$(dirname "$0")/tag-check.sh" "$version"
 fail() { echo "verify-release: $*" >&2; exit 1; }
 root=$(cd "$(dirname "$0")/../.." && pwd)
 

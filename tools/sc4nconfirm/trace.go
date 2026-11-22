@@ -26,10 +26,7 @@ const maxEffectEntries = 64
 // effect. /home/worker is deliberately not here: it holds the canaries.
 var traceQuietPrefixes = []string{
 	"/w", "/usr", "/lib", "/lib64", "/opt/sc4nconfirm", "/proc", "/sys", "/dev",
-	"/tmp", "/etc", "/run", "/var/cache", "/root/.cache/huggingface",
-	// /out holds the harness's own result file and trace: a write there is the
-	// harness talking to itself, not a payload effect.
-	"/out",
+	"/etc", "/run", "/var/cache", "/root/.cache/huggingface",
 }
 
 // the canaries the entrypoint plants. A read of one of these is the strongest
@@ -53,6 +50,7 @@ var homeNoisePrefixes = []string{
 // applyTrace fills the effect lists from a strace log.
 func applyTrace(r *malice.Run, trace string) {
 	seen := map[string]bool{}
+	firstExec := true
 	for _, line := range strings.Split(trace, "\n") {
 		call, rest := splitCall(line)
 		if call == "" {
@@ -60,18 +58,21 @@ func applyTrace(r *malice.Run, trace string) {
 		}
 		switch call {
 		case "execve", "execveat":
-			if argv := execArgv(rest); argv != "" && !harnessExec(argv) {
-				addEffect(&r.Exec, seen, argv)
+			parts := quotedStrings(rest)
+			if !(firstExec && harnessExec(parts)) {
+				if argv := execArgv(rest); argv != "" {
+					addEffect(&r.Exec, seen, argv)
+				}
 			}
+			firstExec = false
 		case "open", "openat", "openat2":
 			path, writing := openTarget(rest)
 			if path == "" {
 				continue
 			}
-			switch {
-			case writing && !quietPath(path):
+			if writing {
 				addEffect(&r.Wrote, seen, path)
-			case !quietPath(path):
+			} else if !quietPath(path, false) {
 				addEffect(&r.OpenedOutside, seen, path)
 			}
 		case "connect":
@@ -193,11 +194,16 @@ func execArgv(body string) string {
 	return prog + " " + strings.Join(rest, " ")
 }
 
-// harnessExec reports whether an exec is the harness loading the artifact rather
-// than something the artifact started. The container's own python3 is the first
-// execve in every trace.
-func harnessExec(argv string) bool {
-	return strings.Contains(argv, "/opt/sc4nconfirm/load.py")
+// harnessExec reports whether the first exec is the harness loading the
+// artifact rather than something the artifact started. Match the executable,
+// the argv[0] and the loader path exactly: `/bin/sh -c "/opt/sc4nconfirm/load.py"`
+// is a payload spawning a shell that mentions the loader, not the harness.
+func harnessExec(parts []string) bool {
+	if len(parts) < 3 {
+		return false
+	}
+	return filepath.Base(parts[0]) == "python3" &&
+		parts[2] == "/opt/sc4nconfirm/load.py"
 }
 
 // openTarget returns the path an open/openat call names and whether the flags
@@ -248,24 +254,30 @@ func connectAddr(body string) string {
 	return ""
 }
 
-// quietPath reports whether an opened path is loader plumbing rather than an
-// effect. Canaries are never quiet, even when they live under a quiet tree.
-func quietPath(p string) bool {
+// quietPath reports whether an open is harness plumbing rather than an effect.
+// A write is never quiet: the payload writing its own scratch file is the
+// observation. A read is quiet only when the path is the prefix itself or a
+// child of it; a bare HasPrefix would hide /tmpfoo behind the /tmp entry, and
+// a payload chooses its own path.
+func quietPath(p string, writing bool) bool {
 	if p == "" {
 		return true
 	}
+	if writing {
+		return false
+	}
 	for _, c := range canaryPaths {
-		if p == c || strings.HasPrefix(p, c) {
+		if p == c || strings.HasPrefix(p, c+"/") {
 			return false
 		}
 	}
 	for _, n := range homeNoisePrefixes {
-		if strings.HasPrefix(p, n) {
+		if p == n || strings.HasPrefix(p, n+"/") {
 			return true
 		}
 	}
 	for _, q := range traceQuietPrefixes {
-		if p == q || strings.HasPrefix(p, q+"/") || strings.HasPrefix(p, q) {
+		if p == q || strings.HasPrefix(p, q+"/") {
 			return true
 		}
 	}

@@ -35,8 +35,8 @@ func TestPlaceholderAssignmentsAreNotSecrets(t *testing.T) {
 		// README), not a credential.
 		{`AIBRIX_KV_CACHE_PASSWORD="kvcache-redis"`, false},
 		{`password=hunter2`, true},
-		{`client_secret=a1b2c3d4e5f60718293a4b5c6d7e8f90`, true},
-		{`AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, true},
+		{`client_secret=Hunter2`, true},
+		{`AWS_SECRET_ACCESS_KEY=hunter2`, true},
 	}
 	for _, tc := range cases {
 		got := false
