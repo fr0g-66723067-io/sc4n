@@ -65,10 +65,9 @@ nothing, because the publishing job `needs: test`. CI does not build or push a
 container image; `make docker` builds one locally from the same tree.
 
 `v1.0.1` is the current release: the five binaries and `SHA256SUMS` are assets on
-the release. `v1.0.0` and `v1.0.1-rc1` remain on the release page. The assets are
-public and need no credentials, and `make release` produces the same binaries
-from the tag. The container image is not published; `make docker` builds it
-locally.
+the release. The assets are public and need no credentials, and `make release`
+produces the same binaries from the tag. The container image is not published;
+`make docker` builds it locally.
 
 ## Provenance
 
