@@ -92,7 +92,7 @@ would otherwise reopen every alert in the file — and appends the 1-based
 occurrence count of that fingerprint inside the artifact, so two findings with
 identical evidence in one file stay two alerts instead of collapsing into one.
 The same key is what `-baseline` uses, so a finding suppressed locally is also
-stable remotely.
+stable remotely. Redacted secret findings are never baseline-suppressed.
 
 ## Limits
 

@@ -188,6 +188,13 @@ silently missing catalogue entry.
 | `MaxStringBlob` | 16 MiB | one metadata value, tokenizer entry or embedded JSON |
 | `MaxSpillBytes` | 4 GiB | scan-wide materialisation budget; one archive member at a time is capped by the remaining budget, above every published single-member shape |
 | `MaxRetainedText` | 64 MiB | total text one artifact's parse keeps alive; per-value caps alone still let a million small values add up |
+| `MaxChatTemplates` | 64 | chat-template values a JSON document is analysed for; GGUF analyses every template and caps only retention |
+| `MaxWalkOps` | 16 Mi | decoded pickle opcodes per stream |
+| `MaxJinjaTokens` | 1 Mi | flat Jinja tokens per template |
+| `MaxJinjaChainTokens` | 8×tokens+1024 | chain/group analysis work per template |
+| `MaxKerasPythonRuns` / `MaxKerasPythonBytes` | 256 / 1 MiB | Keras code values and decoded bytes per document |
+| `MaxDistinctGlobals`, `MaxOnceKeys` | 4096 / 65536 | pickle per-stream metadata and per-site dedupe |
+| `MaxSegmentScan` / `MaxNativeCandidates` | 16 MiB / 64 | PTE segment scan and native-header candidates |
 | `MaxHashBytes` | 256 MiB | how much of an artifact the scan digests — see the performance section for why a full digest of a 13 GiB checkpoint cannot fit the budget |
 | `MaxFindings` | 100 000 | a crafted artifact must not exhaust memory; a drop is reported |
 | `MaxStackDepth` | 1<<20 | a real state_dict builds a stack a few hundred deep |

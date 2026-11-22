@@ -139,11 +139,10 @@ func TestRuleCountsOrdersByCountThenName(t *testing.T) {
 	}
 }
 
-// TestBaselineRedactedFindingUsesOffset: a redacted finding's evidence is a
-// constant mask, so without the offset every redacted finding of one rule in one
-// file shares a fingerprint — baselining a file with two secrets then suppressed a
-// third secret added later, and the baseline reported a clean run.
-func TestBaselineRedactedFindingUsesOffset(t *testing.T) {
+// TestBaselineDoesNotSuppressRedactedFinding: redacted evidence never matches a
+// baseline. A redacted finding's identity is not reproducible enough to suppress
+// safely, and suppressing it hid a new secret behind an old one.
+func TestBaselineDoesNotSuppressRedactedFinding(t *testing.T) {
 	c := report.NewCollector(0)
 	s := c.For("secrets.txt")
 	r := report.DefineRule(report.Rule{
@@ -172,8 +171,8 @@ func TestBaselineRedactedFindingUsesOffset(t *testing.T) {
 		{RuleID: r.ID, Artifact: "secrets.txt", Evidence: "a secret assignment", Offset: 63, EvidenceRedacted: true},
 	}
 	kept, suppressed := Unsuppressed(same, base)
-	if len(kept) != 0 || suppressed != 2 {
-		t.Fatalf("unchanged file: kept %d, suppressed %d; want 0, 2", len(kept), suppressed)
+	if len(kept) != 2 || suppressed != 0 {
+		t.Fatalf("redacted findings: kept %d, suppressed %d; want 2, 0", len(kept), suppressed)
 	}
 
 	// A third secret added after the two baselined ones must not be suppressed by
@@ -181,10 +180,10 @@ func TestBaselineRedactedFindingUsesOffset(t *testing.T) {
 	added := append(append([]report.Finding{}, same...),
 		report.Finding{RuleID: r.ID, Artifact: "secrets.txt", Evidence: "a secret assignment", Offset: 126, EvidenceRedacted: true})
 	kept, suppressed = Unsuppressed(added, base)
-	if len(kept) != 1 || suppressed != 2 {
-		t.Fatalf("third secret: kept %d, suppressed %d; want 1, 2", len(kept), suppressed)
+	if len(kept) != 3 || suppressed != 0 {
+		t.Fatalf("third secret: kept %d, suppressed %d; want 3, 0", len(kept), suppressed)
 	}
-	if kept[0].Offset != 126 {
+	if kept[2].Offset != 126 {
 		t.Fatalf("kept the wrong finding: offset %d", kept[0].Offset)
 	}
 }

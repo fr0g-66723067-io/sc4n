@@ -212,7 +212,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		cfg.Entries = make([]scan.Entry, 0, len(entries))
 		for _, e := range entries {
 			cfg.Entries = append(cfg.Entries, scan.Entry{
-				Path: e.Path, Display: e.Display, Digest: e.Digest, Revision: e.Revision,
+				Path: e.Path, Display: e.Display, Digest: e.Digest, Revision: e.Revision, RootDir: e.RootDir, Rel: e.Rel,
 			})
 		}
 	}

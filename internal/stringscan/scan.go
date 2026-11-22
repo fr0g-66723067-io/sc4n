@@ -47,6 +47,7 @@ func scanInto(b []byte, hits []Hit) []Hit {
 	hits = dropPlaceholderAssignments(b, hits)
 	hits = scanRawIPURLs(b, hits)
 	hits = scanSecretTokens(b, hits)
+	hits = scanJSONSecretProps(b, hits)
 	hits = scanOpaqueLiterals(b, hits)
 	hits = scanUnicodeAnomalies(b, hits)
 	return dedupeRepeatedURLs(dedupe(sortedHits(hits)))
@@ -720,7 +721,7 @@ var credentialNameSuffixes = []string{
 // hyphens ("kvcache-redis", "my-super-secret"). Such a value names a thing; a
 // hard-coded secret carries case, digits or symbols.
 func isLowerHyphenated(s string) bool {
-	if len(s) < 3 || strings.Contains(s, "--") || s[0] == '-' || s[len(s)-1] == '-' {
+	if !strings.Contains(s, "-") || len(s) < 3 || strings.Contains(s, "--") || s[0] == '-' || s[len(s)-1] == '-' {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -887,6 +888,81 @@ const opaqueDecoderWindow = 200
 // positives needed: a card's "com/FlagOpen/FlagEmbedding/tree/master/examples/
 // finetune" was corroborated by the card's own usage snippet, and a dataset id
 // like "mteb/sprintduplicatequestions-pairclassification" is not base64 at all.
+// scanJSONSecretProps reports `"password": "value"` shapes. The assignment
+// automaton matches `password=` but not the quoted-key JSON spelling, so a config
+// object was invisible to the secret-value rule.
+var jsonSecretNames = map[string]bool{
+	"password": true, "passwd": true, "secret": true, "api_key": true,
+	"apikey": true, "client_secret": true, "access_token": true,
+	"auth_token": true, "private_key": true,
+}
+
+func scanJSONSecretProps(b []byte, hits []Hit) []Hit {
+	for i := 0; i < len(b); i++ {
+		if b[i] != '"' {
+			continue
+		}
+		keyEnd := i + 1
+		for keyEnd < len(b) && b[keyEnd] != '"' {
+			if b[keyEnd] == '\\' {
+				keyEnd++
+			}
+			keyEnd++
+		}
+		if keyEnd >= len(b) {
+			break
+		}
+		key := string(b[i+1 : keyEnd])
+		if !jsonSecretNames[key] {
+			i = keyEnd
+			continue
+		}
+		j := keyEnd + 1
+		for j < len(b) && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r') {
+			j++
+		}
+		if j >= len(b) || b[j] != ':' {
+			i = keyEnd
+			continue
+		}
+		j++
+		for j < len(b) && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r') {
+			j++
+		}
+		if j >= len(b) || b[j] != '"' {
+			i = keyEnd
+			continue
+		}
+		valStart := j + 1
+		valEnd := valStart
+		for valEnd < len(b) && b[valEnd] != '"' {
+			if b[valEnd] == '\\' {
+				valEnd++
+			}
+			valEnd++
+		}
+		if valEnd >= len(b) {
+			break
+		}
+		value := string(b[valStart:valEnd])
+		if len(value) < 8 {
+			i = valEnd
+			continue
+		}
+		probe := append(append([]byte(key), '='), value...)
+		if assignmentValueIsPlaceholder(probe, Hit{Off: 0, Match: key + "="}) {
+			i = valEnd
+			continue
+		}
+		hits = append(hits, Hit{
+			Rule: ruleSecretValue, Off: int64(valStart), Redacted: true,
+			Extra: map[string]string{"shape": key + ":", "kind": "secret-json"},
+		})
+		i = valEnd
+	}
+	return hits
+}
+
 func scanOpaqueLiterals(b []byte, hits []Hit) []Hit {
 	var decoders []int64
 	for _, h := range hits {
@@ -905,7 +981,7 @@ func scanOpaqueLiterals(b []byte, hits []Hit) []Hit {
 			hits = append(hits, Hit{
 				Rule:  ruleObfuscation,
 				Off:   int64(start),
-				Match: string(b[start : start+min(run, 96)]),
+				Match: "",
 				Extra: map[string]string{
 					"kind":   kind,
 					"length": strconv.Itoa(run),

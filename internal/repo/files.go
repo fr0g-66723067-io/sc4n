@@ -3,6 +3,7 @@ package repo
 import (
 	"bytes"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
@@ -48,6 +49,9 @@ func universal(ctx *artifact.Ctx, s source.Source, f artifact.Format) {
 	}
 	if n > cap {
 		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", n, cap, "repo file truncated before analysis")
+		ctx.Sink.EmitExtra(ruleRepoTroncated, 0,
+			"repository file is "+strconv.FormatInt(n, 10)+" bytes but only the first "+strconv.FormatInt(cap, 10)+" were analysed",
+			map[string]string{"size": strconv.FormatInt(n, 10), "cap": strconv.FormatInt(cap, 10), "file": baseName(name)})
 		n = cap
 	}
 	if n < 0 {
@@ -99,6 +103,7 @@ func caresAbout(path string) bool {
 // isWorkflow reports whether path is a file under .github/workflows ending in
 // .yml or .yaml.
 func isWorkflow(path string) bool {
+	path = strings.ReplaceAll(path, "\\", "/")
 	if !strings.HasSuffix(path, ".yml") && !strings.HasSuffix(path, ".yaml") {
 		return false
 	}
@@ -111,7 +116,7 @@ func baseName(path string) string {
 	if i := strings.LastIndexByte(path, ':'); i >= 0 {
 		path = path[i+1:]
 	}
-	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+	if i := strings.LastIndexAny(path, "/\\"); i >= 0 {
 		path = path[i+1:]
 	}
 	return path
@@ -229,20 +234,37 @@ func setupHookRule(ctx *artifact.Ctx, data []byte) {
 			}
 		}
 	}
+	type block struct {
+		indent int
+		kind   string
+	}
+	var stack []block
 	for _, ln := range lines(data) {
-		if len(ln.text) == 0 || ln.text[0] == ' ' || ln.text[0] == '\t' {
-			continue // indented: inside a function/class, not module scope
-		}
-		t := strings.TrimLeft(string(ln.text), " \t")
-		if strings.HasPrefix(t, "#") {
+		raw := string(ln.text)
+		t := strings.TrimLeft(raw, " \t")
+		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
-		for _, sink := range []string{
-			"os.system", "os.popen", "subprocess.", "urllib.request", "requests.",
-			"socket.", "shutil.rmtree", "exec(", "eval(", "__import__(", "compile(",
-		} {
-			if strings.HasPrefix(t, sink) {
-				ctx.Sink.Emit(ruleSetupHook, ln.off, "module-scope call runs during install: "+report.TruncateEvidence(t, 120))
+		indent := len(raw) - len(t)
+		for len(stack) > 0 && indent <= stack[len(stack)-1].indent {
+			stack = stack[:len(stack)-1]
+		}
+		moduleScope := len(stack) == 0 || (stack[len(stack)-1].kind != "def" && stack[len(stack)-1].kind != "class")
+		if moduleScope {
+			for _, sink := range []string{
+				"os.system", "os.popen", "subprocess.", "urllib.request", "requests.",
+				"socket.", "shutil.rmtree", "exec(", "eval(", "__import__(", "compile(",
+			} {
+				if strings.HasPrefix(t, sink) {
+					ctx.Sink.Emit(ruleSetupHook, ln.off, "module-scope call runs during install: "+report.TruncateEvidence(t, 120))
+				}
+			}
+		}
+		for _, kw := range []string{"def ", "class ", "if ", "try:", "for ", "while ", "with "} {
+			if strings.HasPrefix(t, kw) {
+				kind := strings.TrimSuffix(strings.TrimSpace(kw), " ")
+				stack = append(stack, block{indent: indent, kind: kind})
+				break
 			}
 		}
 	}
@@ -252,6 +274,11 @@ func setupHookRule(ctx *artifact.Ctx, data []byte) {
 // (there is no TOML dependency in the plan) and reports a value outside the
 // known-good set.
 func buildBackendRule(ctx *artifact.Ctx, data []byte) {
+	if path, poff, ok := buildSystemKey(data, "backend-path"); ok {
+		ctx.Sink.EmitExtra(ruleBackendPath, int64(poff),
+			"backend-path = "+report.TruncateEvidence(path, 120)+" shadows the build backend with repository code",
+			map[string]string{"backend-path": path})
+	}
 	value, off, ok := buildBackendValue(data)
 	if !ok {
 		return
@@ -271,6 +298,27 @@ var allowedBackends = map[string]bool{
 	"poetry.core.masonry.api":          true,
 	"maturin":                          true,
 	"scikit_build_core.build":          true,
+}
+
+// buildSystemKey finds a key under [build-system] and returns its value.
+func buildSystemKey(data []byte, key string) (string, int, bool) {
+	section := ""
+	for _, ln := range lines(data) {
+		t := strings.TrimSpace(string(ln.text))
+		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+			section = t
+			continue
+		}
+		if section != "[build-system]" {
+			continue
+		}
+		k, val, ok := splitTOMLKeyValue(t)
+		if !ok || k != key {
+			continue
+		}
+		return val, int(ln.off) + strings.Index(string(ln.text), val), true
+	}
+	return "", 0, false
 }
 
 // buildBackendValue finds `build-backend` under `[build-system]` and returns its

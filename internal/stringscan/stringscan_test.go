@@ -1017,3 +1017,19 @@ func TestPipeToShellNeedsADownloadSource(t *testing.T) {
 		}
 	}
 }
+
+func TestJSONCredentialPropertyIsReported(t *testing.T) {
+	hits := hitsFor(t, `{"password": "correct-Horse-battery9"}`)
+	var found bool
+	for _, h := range hits {
+		if h.Rule.ID == "SC4N-STRING-SECRET-VALUE" && h.Extra["kind"] == "secret-json" {
+			found = true
+			if !h.Redacted {
+				t.Fatal("JSON secret hit was not redacted")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("JSON credential property was not reported: %+v", hits)
+	}
+}

@@ -41,6 +41,11 @@ import (
 type Entry struct {
 	// Path is where the bytes are read from.
 	Path string
+	// RootDir and Rel, when set, open the file as root.Open(Rel) instead of by
+	// path. os.Root refuses a path that escapes the directory, so a symlink or
+	// directory swap between the walk and the open cannot read a different file.
+	RootDir string
+	Rel     string
 	// Display is the name used in findings. It defaults to Path.
 	Display string
 	// Digest, when set, is a content key: an entry whose digest was already
@@ -184,18 +189,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		maxFindings = l.MaxFindings
 	}
 
-	// With a baseline the scan runs uncapped and the cap is applied after
-	// suppression: a baselined finding must not consume a cap slot, or a new
-	// finding is evicted by an old one and the reported suppressed count is
-	// whatever happened to fit.
-	limit := maxFindings
-	if len(cfg.Baseline) > 0 {
-		limit = 0
-	}
 	collector := cfg.Collector
 	if collector == nil {
-		collector = report.NewCollector(limit)
+		collector = report.NewCollector(maxFindings)
 	}
+	collector.SetSuppress(cfg.Baseline)
 	sess := artifact.NewSession(collector, cfg.Root, l)
 	sess.SetPartial(cfg.Partial)
 	sess.DeepStats = cfg.DeepStats
@@ -219,10 +217,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		if sum.Error != "" {
 			res.Unreadable = 1
 		}
-		if len(cfg.Baseline) > 0 {
-			res.Suppressed = collector.Suppress(cfg.Baseline)
-			collector.Cap(maxFindings)
-		}
+		res.Suppressed = collector.Suppressed()
 		noteFindingsCap(collector, l)
 		res.Timings["total_ms"] = report.Millis(time.Since(start))
 		return res, nil
@@ -270,10 +265,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		res.Cancelled = cancelled.Load()
 	}
-	if len(cfg.Baseline) > 0 {
-		res.Suppressed = collector.Suppress(cfg.Baseline)
-		collector.Cap(maxFindings)
-	}
+	res.Suppressed = collector.Suppressed()
 	noteFindingsCap(collector, l)
 	res.Timings["total_ms"] = report.Millis(time.Since(start))
 	return res, walkErr
@@ -473,8 +465,48 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 		return sum
 	}
 
+	var (
+		root   *os.Root
+		opened *os.File
+		before os.FileInfo
+	)
+	if e.RootDir != "" {
+		var rerr error
+		root, rerr = os.OpenRoot(e.RootDir)
+		if rerr != nil {
+			sum.Error = rerr.Error()
+			return sum
+		}
+		defer root.Close()
+		f, oerr := root.Open(e.Rel)
+		if oerr != nil {
+			sum.Error = oerr.Error()
+			return sum
+		}
+		opened = f
+		fi, serr := f.Stat()
+		if serr != nil {
+			_ = f.Close()
+			sum.Error = serr.Error()
+			return sum
+		}
+		if !fi.Mode().IsRegular() {
+			_ = f.Close()
+			sum.Error = notRegular(e.Path, fi.Mode()).Error()
+			return sum
+		}
+		before = fi
+		sum.Size = fi.Size()
+	}
+
 	fi, err := os.Lstat(e.Path)
+	if opened != nil {
+		fi, err = opened.Stat()
+	}
 	if err != nil {
+		if opened != nil {
+			_ = opened.Close()
+		}
 		sum.Error = err.Error()
 		return sum
 	}
@@ -482,7 +514,7 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	// symlinks); the containment check happens in the hf-cache expander, which
 	// resolves through os.Root before yielding the path.
 	size := fi.Size()
-	if fi.Mode()&os.ModeSymlink != 0 {
+	if opened == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if st, serr := os.Stat(e.Path); serr == nil {
 			size = st.Size()
 			if st.IsDir() {
@@ -503,6 +535,13 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 		}
 	}
 	sum.Size = size
+	if before == nil {
+		before = fi
+	}
+	if opened == nil && fi.Mode()&os.ModeSymlink == 0 && !fi.Mode().IsRegular() {
+		sum.Error = notRegular(e.Path, fi.Mode()).Error()
+		return sum
+	}
 
 	// The large-artifact slot is acquired before the byte budget: a task holding
 	// a large slot and waiting for bytes cannot starve a task that holds bytes,
@@ -520,8 +559,16 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	}
 	defer b.release(size)
 
-	src, err := source.Open(e.Path, l)
+	var src source.Source
+	if opened != nil {
+		src, err = source.OpenFile(opened, e.Path, l)
+	} else {
+		src, err = source.Open(e.Path, l)
+	}
 	if err != nil {
+		if opened != nil {
+			_ = opened.Close()
+		}
 		if errors.Is(err, source.ErrTooLarge) {
 			limits.Emit(sess.Collector.For(name), limits.RuleArtifact, "MaxArtifactBytes", size, l.MaxArtifactBytes, e.Path)
 		}
@@ -546,6 +593,23 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 
 	f, perr := scanGuarded(sess, src, name, l)
 	hashWG.Wait()
+	if before != nil {
+		var after os.FileInfo
+		var aerr error
+		if root != nil {
+			after, aerr = root.Stat(e.Rel)
+		} else {
+			after, aerr = os.Stat(e.Path)
+		}
+		if aerr != nil || !sameFileState(before, after) {
+			detail := "the artifact changed while it was scanned"
+			if aerr != nil {
+				detail += ": " + aerr.Error()
+			}
+			sess.Collector.For(name).Emit(rulePathMutated, 0, detail)
+			sum.Error = detail
+		}
+	}
 
 	sum.SHA256 = digest
 	sum.SHA256Scope = scope
@@ -769,17 +833,41 @@ func expand(cfg Config) ([]Entry, error) {
 	var out []Entry
 	var firstErr error
 	for _, p := range cfg.Paths {
+		display := p
+		lfi, lerr := os.Lstat(p)
+		if lerr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", p, lerr)
+			}
+			out = append(out, Entry{Path: p, Display: p})
+			continue
+		}
+		if lfi.Mode()&os.ModeSymlink != 0 {
+			target, terr := filepath.EvalSymlinks(p)
+			if terr != nil {
+				out = append(out, Entry{Path: p, Display: p, Skip: terr})
+				continue
+			}
+			root := cfg.Root
+			if root == "" {
+				root = filepath.Dir(p)
+			}
+			if cfg.Symlinks == SymlinkRoot && !withinRoot(root, target) {
+				out = append(out, Entry{Path: p, Display: p, Skip: symlinkEscape(p, target)})
+				continue
+			}
+			p = target
+		}
 		fi, err := os.Stat(p)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: %w", p, err)
 			}
-			// Record the path so the report names the one that was unreadable.
-			out = append(out, Entry{Path: p, Display: p})
+			out = append(out, Entry{Path: p, Display: display})
 			continue
 		}
 		if !fi.IsDir() {
-			out = append(out, Entry{Path: p, Display: p})
+			out = append(out, Entry{Path: p, Display: display})
 			continue
 		}
 		// The root a link must stay inside. EvalSymlinks on the named directory so
@@ -791,26 +879,28 @@ func expand(cfg Config) ([]Entry, error) {
 		}
 		walkErr := filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				// An unreadable directory does not abort the walk; it becomes a
-				// recorded entry so the summary counts it.
 				out = append(out, Entry{Path: path, Display: path})
 				return nil
 			}
-			if d.IsDir() {
+			info, ierr := d.Info()
+			if ierr != nil {
+				out = append(out, Entry{Path: path, Display: path, Skip: ierr})
+				return nil
+			}
+			if info.IsDir() {
 				if path != p && skipDirs[d.Name()] {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			// A symlink is followed by scanOne (the hf-cache layout is built out
-			// of them), so it is not skipped here; anything else that is not a
-			// regular file is recorded, never opened: reading a FIFO blocks until
-			// a writer appears, which hangs the scan rather than failing it.
-			if !d.Type().IsRegular() && d.Type()&os.ModeSymlink == 0 {
-				out = append(out, Entry{Path: path, Display: path, Skip: notRegular(path, d.Type())})
+			// d.Info follows the link for a symlink entry on some filesystems,
+			// so the mode is the authority: a symlink to a directory must not be
+			// descended into, and a FIFO must never be opened.
+			if info.Mode()&os.ModeSymlink == 0 && !info.Mode().IsRegular() {
+				out = append(out, Entry{Path: path, Display: path, Skip: notRegular(path, info.Mode())})
 				return nil
 			}
-			if d.Type()&os.ModeSymlink != 0 {
+			if info.Mode()&os.ModeSymlink != 0 {
 				target, lerr := filepath.EvalSymlinks(path)
 				if lerr != nil {
 					out = append(out, Entry{Path: path, Display: path, Skip: lerr})
@@ -837,8 +927,16 @@ func expand(cfg Config) ([]Entry, error) {
 						Skip: symlinkEscape(path, target)})
 					return nil
 				}
+				// Under -symlinks follow, open the resolved target directly: an
+				// os.Root open would still refuse a target outside the root.
+				out = append(out, Entry{Path: target, Display: path})
+				return nil
 			}
-			out = append(out, Entry{Path: path, Display: path})
+			rel, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				rel = filepath.Base(path)
+			}
+			out = append(out, Entry{Path: path, Display: path, RootDir: root, Rel: rel})
 			return nil
 		})
 		if walkErr != nil && firstErr == nil {

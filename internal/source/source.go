@@ -76,32 +76,41 @@ func Open(path string, l limits.Limits) (Source, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	return OpenFile(f, path, l)
+}
 
+// OpenFile is Open for a descriptor the caller already opened, such as one held
+// by an os.Root. It takes ownership of f: the returned Source or the error path
+// closes it. That is what lets scanOne open the file through os.Root and hand the
+// same descriptor to the source layer without a second, racy path resolution.
+func OpenFile(f *os.File, name string, l limits.Limits) (Source, error) {
 	fi, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 
 	if l.MaxArtifactBytes > 0 && fi.Mode().IsRegular() && fi.Size() > l.MaxArtifactBytes {
-		return nil, fmt.Errorf("%w: %s is %d bytes, cap %d", ErrTooLarge, path, fi.Size(), l.MaxArtifactBytes)
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s is %d bytes, cap %d", ErrTooLarge, name, fi.Size(), l.MaxArtifactBytes)
 	}
 
 	if mmapSupported && fi.Mode().IsRegular() && fi.Size() >= l.MmapThreshold {
 		// Mapping can legitimately fail (a 32-bit address space, a filesystem
-		// that refuses MAP_SHARED with PROT_READ, a /proc-like file reporting a
+		// that refuses MAP_PRIVATE with PROT_READ, a /proc-like file reporting a
 		// bogus st_size), so a failure falls through to reading rather than
 		// failing the scan.
-		if src, err := mmapSource(path, f, fi.Size()); err == nil {
+		if src, err := mmapSource(name, f, fi.Size()); err == nil {
 			return src, nil
 		}
 	}
 
-	b, err := readCapped(f, path, l.MaxArtifactBytes)
+	b, err := readCapped(f, name, l.MaxArtifactBytes)
+	_ = f.Close()
 	if err != nil {
 		return nil, err
 	}
-	return Mem(path, b), nil
+	return Mem(name, b), nil
 }
 
 // readCapped reads all of r into memory, refusing to exceed max.

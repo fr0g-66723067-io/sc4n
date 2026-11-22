@@ -256,11 +256,7 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 		ff.Detail = err.Error()
 		return ff
 	}
-	max := int64(0)
-	if !whole {
-		max = need
-	}
-	res, derr := f.o.Client.Download(f.ctx, id, e.path, 0, max, fh)
+	res, derr := f.o.Client.Download(f.ctx, id, e.path, 0, need, fh)
 	if derr == nil {
 		derr = fh.Sync()
 	}
@@ -283,6 +279,11 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 		default:
 			ff.Detail = derr.Error()
 		}
+		return ff
+	}
+	if res.Bytes != need {
+		os.Remove(part)
+		ff.Detail = fmt.Sprintf("the Hub served %d bytes where %d were requested; the partial file was not renamed", res.Bytes, need)
 		return ff
 	}
 	if err := os.Rename(part, target); err != nil {

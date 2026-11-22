@@ -275,12 +275,12 @@ Suppression is by `(rule, artifact, hash of the evidence window)` — the byte
 offset is deliberately *not* part of the key, because inserting an unrelated byte
 shifts every later offset and a baseline that un-suppresses on such an edit is
 worse than none. A *redacted* finding (a secret value, whose evidence is a masking
-string rather than the value) is the exception: its offset is the only identity it
-has, so it is part of the key. Without that, two secrets baselined in one file
-suppressed a third secret added later. The summary line always states how many
-findings were suppressed, so a baseline can never silently turn a new finding into
-a clean run. `-max-findings` is applied *after* suppression for the same reason:
-baselined findings do not consume cap slots and cannot evict a new one. The cap
+string rather than the value) is never suppressed: its identity is not
+reproducible enough to safely hide a later secret behind an earlier one. The
+summary line always states how many findings were suppressed, so a baseline can
+never silently turn a new finding into a clean run. Suppression is checked as each
+finding is added, *before* the finding cap, so baselined findings consume no cap
+slots and cannot evict a new one. The cap
 itself keeps the *most severe* findings, breaking ties by the report's own order,
 so a flood of low-severity findings cannot push a critical one out of the list —
 `exit 0` means nothing at or above `-fail-on` was dropped, not merely that nothing

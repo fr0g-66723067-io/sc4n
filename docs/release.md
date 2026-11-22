@@ -80,6 +80,16 @@ git -c gpg.ssh.allowedSignersFile=$PWD/allowed_signers verify-tag vX.Y.Z
 
 The fingerprint is `SHA256:EgiFpUPNOe0+12duE+sFx+2aV9IPYGHGcAc/BXRX4qQ`.
 
+## Workflow pins and tag grammar
+
+Both workflows pin `actions/checkout` and `actions/setup-go` to reviewed commit
+SHAs, with the tag in a trailing comment, and both checkouts set
+`persist-credentials: false` so the job token is not stored in `.git/config`.
+`tools/release/tag-check.sh` accepts only `vMAJOR.MINOR.PATCH[-PRE]` and runs
+before any release value reaches a shell, a path or `awk`; a tag is otherwise an
+attacker-chosen string in the privileged publish job. `make release-binaries`,
+`notes.sh`, `publish.sh` and `verify.sh` all call it.
+
 ## Before tagging
 
 ```sh

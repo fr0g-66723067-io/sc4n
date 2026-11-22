@@ -144,9 +144,10 @@ sc4n: 1 artifact(s), 0 finding(s); suppressed: 6
 
 Suppression is keyed on `(rule, artifact, evidence)`, not on the byte offset, so
 an unrelated edit does not resurrect every finding — and the count is printed, so a
-baseline can never turn a new finding into a clean run. `-max-findings` is applied
-after suppression, and keeps the *most severe* findings, so a flood of low
-severity findings cannot push a critical out.
+baseline can never turn a new finding into a clean run. A redacted secret finding
+is never suppressed. Suppression happens before the finding cap, which keeps the
+*most severe* findings, so a flood of low-severity findings cannot push a critical
+out.
 
 For GitHub code scanning, [`docs/github-code-scanning.md`](github-code-scanning.md)
 has the upload workflow; the SARIF output is validated against the format's schema

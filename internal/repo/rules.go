@@ -87,6 +87,36 @@ var (
 		Tags: []string{"build-time", "supply-chain"},
 	})
 
+	ruleRepoTroncated = report.DefineRule(report.Rule{
+		ID:         "SC4N-REPO-TRUNCATED",
+		Title:      "Repository file truncated before analysis",
+		Severity:   report.SeverityHigh,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-693"},
+		Class:      "repo",
+		Description: "A repository file larger than the analysis cap was analysed only on its prefix. " +
+			"The tail was not examined, and a .pth, setup.py or workflow sink placed after the cap is " +
+			"therefore invisible; the finding fails a high gate rather than presenting the prefix as the " +
+			"whole file.",
+		Refs: []string{"https://cwe.mitre.org/data/definitions/693.html"},
+		Tags: []string{"supply-chain", "truncation"},
+	})
+
+	ruleBackendPath = report.DefineRule(report.Rule{
+		ID:         "SC4N-REPO-BACKEND-PATH",
+		Title:      "PEP 517 backend-path shadows the allowlisted build backend",
+		Severity:   report.SeverityHigh,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-427"},
+		Class:      "repo",
+		Description: "A pyproject.toml [build-system] sets backend-path. PEP 517 puts those directories " +
+			"ahead of the installed backend on sys.path, so repository code can shadow a module the " +
+			"allowlisted backend imports. The backend name can be known-good while the code that runs is " +
+			"the repository's.",
+		Refs: []string{"https://peps.python.org/pep-0517/#in-tree-build-backends"},
+		Tags: []string{"build-time", "supply-chain"},
+	})
+
 	ruleSiteCustomize = report.DefineRule(report.Rule{
 		ID:         "SC4N-REPO-SITE-CUSTOMIZE",
 		Title:      "sitecustomize/usercustomize module runs at interpreter start",

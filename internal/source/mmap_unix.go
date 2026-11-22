@@ -52,7 +52,7 @@ func mmapSource(name string, f *os.File, size int64) (Source, error) {
 		_ = f.Close()
 		return nil, errors.New("source: file too large to map on this platform")
 	}
-	b, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
+	b, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_PRIVATE)
 	if err != nil {
 		// The caller keeps ownership when this returns an error, but every
 		// current caller closes on error too; closing here as well makes the

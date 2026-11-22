@@ -355,15 +355,19 @@ func TestBaselineGate(t *testing.T) {
 		t.Skip("fixture corpus absent")
 	}
 	base := filepath.Join(t.TempDir(), "base.json")
+	// Redacted findings are deliberately not baseline-suppressible, and the corpus
+	// carries fixture secrets. Use a pickle finding, whose evidence is stable, to
+	// exercise the suppression contract.
+	target := filepath.Join(fixtures, "pickle_b64_exec.pkl")
 
 	var out, errOut bytes.Buffer
-	if code := run([]string{"scan", "-format", "json", "-out", base, fixtures}, &out, &errOut); code != exitFindings {
+	if code := run([]string{"scan", "-format", "json", "-out", base, target}, &out, &errOut); code != exitFindings {
 		t.Fatalf("first run exited %d, want %d (stderr: %s)", code, exitFindings, errOut.String())
 	}
 
 	out.Reset()
 	errOut.Reset()
-	code := run([]string{"scan", "-baseline", base, fixtures}, &out, &errOut)
+	code := run([]string{"scan", "-baseline", base, target}, &out, &errOut)
 	if code != exitClean {
 		t.Fatalf("baseline run exited %d, want %d\nstderr: %s\nstdout: %s", code, exitClean, errOut.String(), out.String())
 	}
@@ -374,7 +378,7 @@ func TestBaselineGate(t *testing.T) {
 	// A baseline that cannot be read is a usage error, not a clean run.
 	out.Reset()
 	errOut.Reset()
-	if code := run([]string{"scan", "-baseline", filepath.Join(base, "nope.json"), fixtures}, &out, &errOut); code != exitUsage {
+	if code := run([]string{"scan", "-baseline", filepath.Join(base, "nope.json"), target}, &out, &errOut); code != exitUsage {
 		t.Fatalf("unreadable baseline exited %d, want %d", code, exitUsage)
 	}
 }

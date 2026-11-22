@@ -145,7 +145,9 @@ trailing segment.
 
 **What to check.** Who reads it. A card is documentation; a chat template is
 *rendered* and its expressions are evaluated by Jinja; a tokenizer JSON is parsed
-as data, never executed.
+as data, never executed. A redacted secret finding is never baseline-suppressed:
+its identity is not reproducible enough to hide a later secret behind an old
+one.
 
 **What to do.** Rotation, if a secret value is named (`SC4N-STRING-SECRET-VALUE`
 masks the value in the report — the finding is the rotation trigger, not the
@@ -166,7 +168,12 @@ missing or mismatched.
 `.gitattributes` filters *only* when the filter is already configured, so a
 filter definition is a threat to the developer who has it in `~/.gitconfig`, not
 to a plain clone. A symlink escape is refused by default (`-symlinks root`) and
-named in the report.
+named in the report. `SC4N-REPO-TRUNCATED` means a repository file was analysed
+only on its prefix; the tail was not read, so treat the file as unscanned.
+`SC4N-REPO-BACKEND-PATH` means repository code is placed ahead of the PEP 517
+backend. `SC4N-HFCACHE-NOT-SCANNED` means a cache entry was omitted, so the
+cache-wide coverage claim is false; `SC4N-GITATTRIBUTES-DIFF-NAME` records a
+built-in diff driver whose local config may still name a `textconv`.
 
 **What to do.** Review the repository before cloning it into a trusted place;
 clone with a scratch `HOME` if you cannot.
