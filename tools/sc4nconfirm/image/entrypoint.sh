@@ -31,7 +31,7 @@ mkdir -p /out /tmp 2>/dev/null || true
 # Do not exec: the shell must survive the tracer to copy the evidence out.
 strace -f -qq -o /tmp/trace -s 512 \
      -e trace=execve,execveat,open,openat,openat2,connect \
-     python3 /opt/sc4nconfirm/load.py "$@" /tmp/result.json
+     python3 /opt/sc4nconfirm/load.py "$@"
 rc=$?
 
 cp /tmp/trace /out/trace 2>/dev/null || true
