@@ -1,9 +1,11 @@
 package polyglot
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
+	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
 // TestFatMachOMagicOnlyIsReported pins the fat (universal) Mach-O magic: the
@@ -32,5 +34,25 @@ func TestThinMachOMagicOnlyIsReported(t *testing.T) {
 	got := ids(run(t, "Thing.dylib", thin, artifact.FormatNative, 0))
 	if !got["SC4N-POLYGLOT-MAGIC-ONLY"] {
 		t.Fatalf("a bare thin Mach-O magic produced no finding; findings=%v", got)
+	}
+}
+
+func TestFatMachOArchCountIsBounded(t *testing.T) {
+	// FAT_MAGIC with a claimed 65 architectures and no table.
+	bad := []byte{0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x41}
+	if _, ok := ValidateNativeHeader(source.Mem("fat", bad), 8, 0); ok {
+		t.Fatal("a fat header with 65 architectures validated")
+	}
+}
+
+func TestMachoLoadCommandSizeIsBounded(t *testing.T) {
+	// Thin 64-bit little-endian Mach header, one command, a size larger than
+	// the bound.
+	bad := make([]byte, 64)
+	copy(bad, []byte{0xcf, 0xfa, 0xed, 0xfe})
+	binary.LittleEndian.PutUint32(bad[16:], 1)
+	binary.LittleEndian.PutUint32(bad[20:], 16<<20+1)
+	if _, ok := ValidateNativeHeader(source.Mem("thin", bad), int64(len(bad)), 0); ok {
+		t.Fatal("a Mach-O load-command table above the bound validated")
 	}
 }

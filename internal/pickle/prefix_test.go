@@ -37,10 +37,11 @@ func TestSniffClaimsFatConstantBehindAPrefix(t *testing.T) {
 	}
 }
 
-// TestSniffBudgetTruncationNeedsProtocol is the control on the same path: a walk
-// that stops at the budget without a declared protocol is still not a pickle, so
-// the acceptance does not rest on "the walk ended early".
-func TestSniffBudgetTruncationNeedsProtocol(t *testing.T) {
+// TestSniffBudgetTruncationIsEvidence pins the widened contract: a protocol-0
+// walk that consumes the probe budget without a structural error is evidence
+// enough to claim the stream. The earlier rule rejected it, which let a padded
+// constant hide a gadget behind the probe on a protocol-less stream.
+func TestSniffBudgetTruncationIsEvidence(t *testing.T) {
 	// A protocol-0 stream of plain opcodes with no STOP, longer than the budget.
 	b := make([]byte, 0, maxProbeBytes+4096)
 	for len(b) < maxProbeBytes+4096 {
@@ -49,8 +50,8 @@ func TestSniffBudgetTruncationNeedsProtocol(t *testing.T) {
 	s := source.Mem("noproto.pkl", b)
 	got, ok := sniff(s, limits.Default())
 	s.Close()
-	if ok {
-		t.Fatalf("a protocol-less stream truncated by the budget was claimed as %s", got)
+	if !ok || got != artifact.FormatPickle {
+		t.Fatalf("a protocol-less stream truncated by the budget was not claimed: %s, %v", got, ok)
 	}
 }
 

@@ -25,8 +25,10 @@
 package polyglot
 
 import (
+	"bytes"
 	"strconv"
 
+	"github.com/fr0g-66723067-io/sc4n/internal/archive"
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
@@ -58,8 +60,10 @@ func Scan(ctx *artifact.Ctx, s source.Source, f artifact.Format) {
 	if f == artifact.FormatNative {
 		// The native parser owns everything about a native artifact. The only
 		// thing this layer adds is the honest distinction between a leading magic
-		// that is a real header and one that only looks like it.
+		// that is a real header and one that only looks like it, plus the zip a
+		// native file can carry after its own bytes.
 		checkLeadingMagicOnly(ctx, s, size)
+		checkAppendedArchive(ctx, s, size)
 		return
 	}
 
@@ -133,6 +137,38 @@ func checkNative(ctx *artifact.Ctx, s source.Source, f artifact.Format, size int
 			emitPolyglotNative(ctx, kind, abs, windowName(base))
 		})
 	}
+}
+
+// checkAppendedArchive scans a zip appended after a native executable. A
+// native file's own parser never opens the trailing container, so a payload
+// stored there was visible only to the head/tail magic window.
+func checkAppendedArchive(ctx *artifact.Ctx, s source.Source, size int64) {
+	if size <= 0 {
+		return
+	}
+	tail := readWindow(s, max64(0, size-(64<<10)), 64<<10)
+	if !bytes.Contains(tail.Data, []byte("PK\x05\x06")) &&
+		!bytes.Contains(tail.Data, []byte("PK\x06\x06")) {
+		return
+	}
+	if _, err := archive.Collect(s, ctx.Limits); err != nil {
+		return
+	}
+	sub, ok := ctx.Member(ctx.Sink.Artifact()+"!zip", artifact.FormatZip)
+	if !ok {
+		return
+	}
+	_ = archive.Scan(sub, s)
+	ctx.Sink.EmitExtra(rulePolyglotContainer, 0,
+		"the file is both native (leading header) and zip (an end-of-central-directory record after it), so two readers open it two different ways",
+		map[string]string{"container": "zip", "second": "native"})
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // checkContainers reports a file that is two container types at once, using only

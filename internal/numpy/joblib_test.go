@@ -445,3 +445,10 @@ func zlibCompress(b []byte) []byte {
 	}
 	return buf.Bytes()
 }
+
+func TestJoblibReadLineCapsLineLength(t *testing.T) {
+	d := &jwalk{data: append(bytes.Repeat([]byte("a"), jMaxLine+1), '\n')}
+	if _, ok := d.readLine(); ok || !d.err {
+		t.Fatalf("readLine accepted a line longer than %d", jMaxLine)
+	}
+}

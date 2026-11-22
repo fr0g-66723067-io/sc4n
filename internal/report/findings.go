@@ -362,6 +362,12 @@ func (s *Sink) Named(member string) *Sink {
 // A duplicate returns before the finding reaches the cap, so the cap's dropped
 // counter is not touched: the first copy was either retained or counted as
 // dropped, and the second is the same fact, not a second one.
+// maxSinkSeen bounds the per-artifact dedupe map. The collector's MaxFindings
+// bounds retained findings, but a crafted stream can emit a million distinct
+// keys that are all dropped; beyond this cap deduplication stops rather than
+// growing the map with them.
+const maxSinkSeen = 1 << 16
+
 func (s *Sink) duplicate(r *Rule, pos uint64, evidence string) bool {
 	if s.seen == nil {
 		s.seen = make(map[[2]uint64]struct{})
@@ -380,6 +386,9 @@ func (s *Sink) duplicate(r *Rule, pos uint64, evidence string) bool {
 	}
 	if _, ok := s.seen[key]; ok {
 		return true
+	}
+	if len(s.seen) >= maxSinkSeen {
+		return false
 	}
 	s.seen[key] = struct{}{}
 	return false

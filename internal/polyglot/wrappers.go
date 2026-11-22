@@ -5,6 +5,7 @@ import (
 	"debug/elf"
 	"debug/macho"
 	"debug/pe"
+	"encoding/binary"
 	"io"
 	"sort"
 	"strings"
@@ -180,12 +181,18 @@ func ValidateNativeHeader(s source.Source, size, off int64) (bytescan.NativeKind
 		// detects the endianness itself. debug/macho reads FAT_MAGIC only, so the
 		// fat variants it rejects never reach here as a validated header.
 		if bytes.HasPrefix(hdr, []byte("\xca\xfe\xba\xbe")) {
+			if !bytescan.FatArchCountPlausible(hdr) || !fatMachHeadersPlausible(s, size, off) {
+				return kind, false
+			}
 			f, err := macho.NewFatFile(sr)
 			if err != nil {
 				return kind, false
 			}
 			_ = f.Close()
 			return kind, true
+		}
+		if !bytescan.MachLoadCommandsPlausible(hdr) {
+			return kind, false
 		}
 		f, err := macho.NewFile(sr)
 		if err != nil {
@@ -195,6 +202,67 @@ func ValidateNativeHeader(s source.Source, size, off int64) (bytescan.NativeKind
 		return kind, true
 	}
 	return kind, false
+}
+
+// fatMachHeadersPlausible validates every arch's inner Mach header before
+// debug/macho can allocate a table from the fat header. The source is read
+// rather than a 64-byte view because the arch headers can be anywhere in the
+// artifact, and at most MaxFatArches entries are touched.
+func fatMachHeadersPlausible(s source.Source, size, off int64) bool {
+	hdr, err := s.Bytes(off, 8)
+	if err != nil && len(hdr) < 8 {
+		return false
+	}
+	if !bytescan.FatArchCountPlausible(hdr) {
+		return false
+	}
+	is64 := bytes.HasPrefix(hdr, []byte("\xca\xfe\xba\xbf")) ||
+		bytes.HasPrefix(hdr, []byte("\xbf\xba\xfe\xca"))
+	big := bytes.HasPrefix(hdr, []byte("\xca\xfe\xba\xbe")) ||
+		bytes.HasPrefix(hdr, []byte("\xca\xfe\xba\xbf"))
+	entry := int64(20)
+	if is64 {
+		entry = 32
+	}
+	count := int64(binary.BigEndian.Uint32(hdr[4:]))
+	if !big {
+		count = int64(binary.LittleEndian.Uint32(hdr[4:]))
+	}
+	if count <= 0 || count > bytescan.MaxFatArches {
+		return false
+	}
+	for i := int64(0); i < count; i++ {
+		at := off + 8 + i*entry
+		if at+entry > off+size {
+			return false
+		}
+		e, err := s.Bytes(at, entry)
+		if err != nil && int64(len(e)) < entry {
+			return false
+		}
+		var archOff uint64
+		switch {
+		case big && is64:
+			archOff = binary.BigEndian.Uint64(e[8:])
+		case big:
+			archOff = uint64(binary.BigEndian.Uint32(e[8:]))
+		case is64:
+			archOff = binary.LittleEndian.Uint64(e[8:])
+		default:
+			archOff = uint64(binary.LittleEndian.Uint32(e[8:]))
+		}
+		if archOff > uint64(size) || int64(archOff)+24 > size {
+			return false
+		}
+		mh, err := s.Bytes(off+int64(archOff), 24)
+		if err != nil && len(mh) < 24 {
+			return false
+		}
+		if !bytescan.MachLoadCommandsPlausible(mh) {
+			return false
+		}
+	}
+	return true
 }
 
 // ExecImportNames returns the dynamic symbols from the ELF header at off that

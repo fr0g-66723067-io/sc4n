@@ -34,6 +34,7 @@ import (
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
@@ -145,7 +146,7 @@ func parseNPY(ctx *artifact.Ctx, s source.Source) error {
 		return structErr(ctx, headerStart, "header is truncated")
 	}
 
-	h, perr := parseNPYHeader(hdrBytes)
+	h, perr := parseNPYHeader(hdrBytes, ctx.Limits, ctx.Sink)
 	if perr != nil {
 		return structErr(ctx, headerStart, "header is not the literal {descr, fortran_order, shape} dict: "+perr.Error())
 	}
@@ -246,8 +247,8 @@ func structErr(ctx *artifact.Ctx, off int64, detail string) error {
 // trailing comma is allowed. Nothing is evaluated, so a header such as
 // `{'descr': __import__('os').system('id')}` parses to an error rather than
 // running.
-func parseNPYHeader(b []byte) (npyHeader, error) {
-	p := &litParser{b: b}
+func parseNPYHeader(b []byte, l limits.Limits, sink *report.Sink) (npyHeader, error) {
+	p := newLitParser(b, l, sink)
 	var h npyHeader
 	p.ws()
 	if !p.eat('{') {
@@ -265,7 +266,7 @@ func parseNPYHeader(b []byte) (npyHeader, error) {
 		}
 		p.ws()
 		if !p.eat(':') {
-			return h, errors.New("expected ':' after key " + strconv.Quote(key))
+			return h, errors.New("expected ':' after key " + headerQuote(key))
 		}
 		p.ws()
 		switch key {
@@ -298,7 +299,7 @@ func parseNPYHeader(b []byte) (npyHeader, error) {
 			h.shape = sh
 		default:
 			if !p.skipScalar() {
-				return h, errors.New("unparseable value for key " + strconv.Quote(key))
+				return h, errors.New("unparseable value for key " + headerQuote(key))
 			}
 			h.unknown = append(h.unknown, key)
 		}
@@ -310,7 +311,7 @@ func parseNPYHeader(b []byte) (npyHeader, error) {
 		if p.eat('}') {
 			break
 		}
-		return h, errors.New("expected ',' or '}' after key " + strconv.Quote(key))
+		return h, errors.New("expected ',' or '}' after key " + headerQuote(key))
 	}
 	if !seen["descr"] {
 		return h, errors.New("no descr key")
@@ -318,14 +319,32 @@ func parseNPYHeader(b []byte) (npyHeader, error) {
 	if !seen["shape"] {
 		return h, errors.New("no shape key")
 	}
+	if p.rankOverflow {
+		return h, errors.New("shape has more than 32 dimensions")
+	}
+	if p.fieldsOverflow {
+		return h, errors.New("descr has more than 1024 fields")
+	}
 	return h, nil
+}
+
+func headerQuote(s string) string {
+	return strconv.Quote(report.TruncateEvidence(s, 64))
 }
 
 // litParser is a position-holding literal reader. It only ever reads; it has no
 // eval path.
 type litParser struct {
-	b []byte
-	i int
+	b    []byte
+	i    int
+	sink *report.Sink
+	// maxString and maxRetained are the per-string and total text budgets.
+	maxString      int64
+	maxRetained    int64
+	retained       int64
+	reported       bool
+	rankOverflow   bool
+	fieldsOverflow bool
 	// depth is the current literal nesting depth. The reader recurses through a
 	// descr written as dtype.descr (a list can hold tuples, which can hold nested
 	// field lists), and Go's 1 GB goroutine stack limit turns an unbounded
@@ -340,6 +359,23 @@ type litParser struct {
 // handful of levels ([('a', [('x', '<i4')])] is three), so 64 is far above
 // anything numpy writes and far below the depth that overflows the stack.
 const maxLitDepth = 64
+
+const (
+	maxNPYRank   = 32
+	maxNPYFields = 1024
+)
+
+func newLitParser(b []byte, l limits.Limits, sink *report.Sink) *litParser {
+	maxString := l.MaxStringBlob
+	if maxString <= 0 {
+		maxString = limits.Default().MaxStringBlob
+	}
+	maxRetained := l.MaxRetainedText
+	if maxRetained <= 0 {
+		maxRetained = limits.Default().MaxRetainedText
+	}
+	return &litParser{b: b, sink: sink, maxString: maxString, maxRetained: maxRetained}
+}
 
 func (p *litParser) ws() {
 	for p.i < len(p.b) {
@@ -361,6 +397,8 @@ func (p *litParser) eat(c byte) bool {
 }
 
 // str reads a single- or double-quoted string, decoding only backslash escapes.
+// A value larger than MaxStringBlob is consumed but retained only to the cap; the
+// total retained text is bounded by MaxRetainedText.
 func (p *litParser) str() (string, bool) {
 	if p.i >= len(p.b) || (p.b[p.i] != '\'' && p.b[p.i] != '"') {
 		return "", false
@@ -368,19 +406,33 @@ func (p *litParser) str() (string, bool) {
 	quote := p.b[p.i]
 	p.i++
 	var sb strings.Builder
+	full := int64(0)
 	for p.i < len(p.b) {
 		c := p.b[p.i]
 		if c == quote {
 			p.i++
-			return sb.String(), true
+			s := sb.String()
+			if full > int64(len(s)) && !p.reported && p.sink != nil {
+				p.reported = true
+				limits.Emit(p.sink, limits.RuleString, "MaxStringBlob", full, p.maxString, ".npy header string")
+			}
+			p.retained += int64(len(s))
+			if p.retained > p.maxRetained {
+				if p.sink != nil {
+					limits.Emit(p.sink, limits.RuleRetained, "MaxRetainedText", p.retained, p.maxRetained, ".npy header")
+				}
+				return "", true
+			}
+			return s, true
 		}
 		if c == '\\' && p.i+1 < len(p.b) {
 			p.i++
-			sb.WriteByte(p.b[p.i])
-			p.i++
-			continue
+			c = p.b[p.i]
 		}
-		sb.WriteByte(c)
+		full++
+		if int64(sb.Len()) < p.maxString {
+			sb.WriteByte(c)
+		}
 		p.i++
 	}
 	return "", false
@@ -424,7 +476,11 @@ func (p *litParser) tuple() ([]int64, bool) {
 		if !ok {
 			return nil, false
 		}
-		out = append(out, n)
+		if len(out) < maxNPYRank {
+			out = append(out, n)
+		} else {
+			p.rankOverflow = true
+		}
 		p.ws()
 		if p.eat(',') {
 			continue
@@ -580,6 +636,10 @@ func (p *litParser) descrFieldsAt() ([]string, bool) {
 		p.ws()
 		if p.eat(']') {
 			return out, true
+		}
+		if len(out) >= maxNPYFields {
+			p.fieldsOverflow = true
+			return nil, false
 		}
 		if p.i >= len(p.b) || p.b[p.i] != '(' {
 			return nil, false

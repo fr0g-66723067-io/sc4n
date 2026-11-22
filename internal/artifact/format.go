@@ -316,16 +316,6 @@ func Sniff(s source.Source, l limits.Limits) (Format, string) {
 				}
 				continue
 			}
-			if bareMagic != "" && sn.name == textFallbackSniffer {
-				// The generic text fallback does not override a bare native magic:
-				// "\x7fELF" followed by bytes that are not a header is still more
-				// like a program than like a document, and reporting an unvalidated
-				// .so as a text file would be a new false positive. Every sniffer
-				// that names a *specific* format — JSON, Jinja, Markdown, pickle, a
-				// container — still wins, which is the case the fall-through exists
-				// for.
-				return FormatNative, bareMagic
-			}
 			return f, sn.name
 		}
 	}

@@ -264,9 +264,16 @@ type bindingRoute struct {
 // globalBindings is the per-name bookkeeping: the distinct memo slots that held
 // the name and the distinct routes that produced it.
 type globalBindings struct {
-	slots  []int
-	routes map[bindingRoute]struct{}
+	slots         []int
+	routes        map[bindingRoute]struct{}
+	slotsOverflow bool
+	routeOverflow bool
 }
+
+const (
+	maxAliasSlots  = 32
+	maxAliasRoutes = 8
+)
 
 // newMemo returns a memo whose dense table is bounded by streamLen, the length of
 // the bytes the walk is looking at. Indices beyond that are held in a map.
@@ -374,9 +381,20 @@ func (m *memo) noteGlobal(g *Global, i int) {
 		}
 	}
 	if !seen {
-		b.slots = append(b.slots, i)
+		if len(b.slots) < maxAliasSlots {
+			b.slots = append(b.slots, i)
+		} else {
+			b.slotsOverflow = true
+		}
 	}
-	b.routes[bindingRoute{srcModule: g.SrcModule, srcName: g.SrcName, stackBuilt: g.StackBuilt}] = struct{}{}
+	r := bindingRoute{srcModule: g.SrcModule, srcName: g.SrcName, stackBuilt: g.StackBuilt}
+	if _, ok := b.routes[r]; !ok {
+		if len(b.routes) < maxAliasRoutes {
+			b.routes[r] = struct{}{}
+		} else {
+			b.routeOverflow = true
+		}
+	}
 }
 
 // next is the index MEMOIZE uses: the number of entries the loader's dict holds,

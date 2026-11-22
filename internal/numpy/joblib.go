@@ -1121,9 +1121,15 @@ func (d *jwalk) readBlob(width int, text bool) {
 	d.push(jval{kind: jStr, s: string(body)})
 }
 
-// readLine reads a newline-terminated text line.
+// readLine reads a newline-terminated text line. The search is capped at
+// jMaxLine: a joblib stream that puts a multi-megabyte region before a newline
+// must not make every line read scan the rest of the artifact.
 func (d *jwalk) readLine() (string, bool) {
-	idx := bytes.IndexByte(d.data[d.i:], '\n')
+	end := d.i + jMaxLine
+	if end > len(d.data) {
+		end = len(d.data)
+	}
+	idx := bytes.IndexByte(d.data[d.i:end], '\n')
 	if idx < 0 {
 		d.err = true
 		return "", false
@@ -1132,6 +1138,8 @@ func (d *jwalk) readLine() (string, bool) {
 	d.i += idx + 1
 	return s, true
 }
+
+const jMaxLine = 4096
 
 // readLineInt reads a newline-terminated decimal integer (PUT/GET).
 func (d *jwalk) readLineInt() (int, bool) {

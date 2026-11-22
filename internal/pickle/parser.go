@@ -77,7 +77,8 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		return artifact.FormatUnknown, false
 	}
 
-	data, err := s.Bytes(0, size)
+	probeSize := min(size, int64(maxProbeBytes+maxStreamStartScan))
+	data, err := s.Bytes(0, probeSize)
 	if err != nil && len(data) == 0 {
 		return artifact.FormatUnknown, false
 	}
