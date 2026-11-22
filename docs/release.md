@@ -58,19 +58,17 @@ verify-release: ok
 `.github/workflows/release.yml` runs the full test gate at the tag, then:
 
 - **binaries** — `make release-binaries`, the same verification, then
-  `gh release create` with the five binaries and `SHA256SUMS` as assets;
-- **image** — builds `ghcr.io/fr0g-66723067-io/sc4n:<tag>`, verifies it (version,
-  benign tree clean, critical fixture exits 1), pushes it, and moves `:latest`
-  unless the tag is a pre-release (`v1.1.0-rc1` does not move `:latest`).
+  `gh release create` with the five binaries and `SHA256SUMS` as assets.
 
 Nothing is published from a branch. A tag that fails the test gate publishes
-nothing, because both publishing jobs `needs: test`.
+nothing, because the publishing job `needs: test`. CI does not build or push a
+container image; `make docker` builds one locally from the same tree.
 
 `v1.0.1` is the current release: the five binaries and `SHA256SUMS` are assets on
-the release, and the image is `ghcr.io/fr0g-66723067-io/sc4n:v1.0.1` and
-`:latest`. `v1.0.0` and `v1.0.1-rc1` remain on the release page. Both the assets
-and the image are public; neither needs credentials, and `make release` produces
-exactly the same artifacts from the tag.
+the release. `v1.0.0` and `v1.0.1-rc1` remain on the release page. The assets are
+public and need no credentials, and `make release` produces the same binaries
+from the tag. The container image is not published; `make docker` builds it
+locally.
 
 ## Provenance
 
@@ -128,13 +126,10 @@ becomes public:
    `candidates.json`, fetched repositories). None of it belongs in a public tree.
 3. Confirm the current instructions are true for a public reader: the README must
    not tell anyone to authenticate to download a public release.
-4. Check the GHCR package's visibility independently of the repository's. A
-   package pushed while the repository was private does not necessarily become
-   public with it; `docker pull` without a login is the test.
-5. Enable private vulnerability reporting (Settings → Code security) so the
+4. Enable private vulnerability reporting (Settings → Code security) so the
    primary channel in [`SECURITY.md`](../SECURITY.md) exists. The email fallback
    is for when that channel is unavailable, not the intended route.
-6. Do not rewrite history after a tag has been published: the tag names a commit,
+5. Do not rewrite history after a tag has been published: the tag names a commit,
    and every asset the release page offers was built from it. A commit-address
    typo is left in place for that reason; a secret is not — a leaked credential is
    revoked first and the history decision is made explicitly, with the release
@@ -175,7 +170,7 @@ make test                         # vet + test + test -race
 make fixtures && git diff --exit-code testdata/fixtures
 make rules-doc && git diff --exit-code docs/rules.md
 make sarif-check                  # skipped loudly without python3 + jsonschema
-VERSION=v1.0.1 make release       # the same artifacts CI will build
+VERSION=v1.0.1 make release       # the binaries CI will build; the image is local-only
 ```
 
 `make release` with `VERSION` overridden is how to prove a tag will work before

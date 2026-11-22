@@ -27,6 +27,10 @@ jobs:
         with:
           lfs: true                     # model weights are often LFS pointers
 
+      # CI publishes no image, so the job builds the one it runs.
+      - name: build the scanner image
+        run: make docker VERSION=local
+
       - name: scan
         run: |
           # Capture the exit code instead of failing here: a failed step skips
@@ -36,7 +40,7 @@ jobs:
           docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work" \
-            ghcr.io/fr0g-66723067-io/sc4n:v1.0.1 \
+            sc4n:local \
             scan -format sarif -out /work/sc4n.sarif -fail-on high /work
           echo "$?" > /tmp/sc4n-status
 

@@ -57,7 +57,7 @@ jobs:
         run: |
           # A tag containing "-" is a pre-release (v1.0.1-rc1). It must be marked
           # as one, or the release page advertises an unfinished build as the
-          # current version and the :latest rule it pairs with means nothing.
+          # current version.
           case "$GITHUB_REF_NAME" in
             *-*) release_flags="--prerelease" ;;
             *)   release_flags="" ;;
@@ -71,33 +71,3 @@ jobs:
               --generate-notes $release_flags \
               dist/sc4n_* dist/SHA256SUMS
           fi
-
-  image:
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: log in to GHCR
-        run: |
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      # docker would reject an upper-case repository path; the repository name is
-      # already lower case, which is also how the docs reference it.
-      - name: build, verify and push
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY}"
-          docker build --build-arg VERSION="$GITHUB_REF_NAME" -t "$image:$GITHUB_REF_NAME" .
-          # No dist/ in this job: verify.sh checks the image alone.
-          IMAGE="$image:$GITHUB_REF_NAME" sh tools/release/verify.sh dist "$GITHUB_REF_NAME" --with-image
-
-          docker push "$image:$GITHUB_REF_NAME"
-          # A pre-release tag (v1.1.0-rc1) must not move :latest.
-          case "$GITHUB_REF_NAME" in
-            *-*) echo "pre-release tag: :latest not moved" ;;
-            *) docker tag "$image:$GITHUB_REF_NAME" "$image:latest"
-               docker push "$image:latest" ;;
-          esac

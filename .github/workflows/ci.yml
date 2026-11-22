@@ -51,6 +51,23 @@ jobs:
               go build -trimpath -o /dev/null ./cmd/sc4n
           done
 
+      # The gates the release gate needs, against the binary a user downloads.
+      # They used to run inside a Docker image; building that image on every push
+      # was work nobody asked for, so the same two scans run on the binary.
+      - name: build the CLI
+        run: go build -trimpath -o sc4n ./cmd/sc4n
+
+      - name: a benign tree scans clean
+        run: ./sc4n scan -fail-on low testdata/fixtures/benign
+
+      - name: a critical finding fails the run
+        run: |
+          set +e
+          ./sc4n scan -fail-on critical testdata/fixtures/joblib_object_array.joblib 2>/dev/null
+          status=$?
+          set -e
+          test "$status" -eq 1
+
   sarif:
     runs-on: ubuntu-latest
     steps:
@@ -66,33 +83,3 @@ jobs:
           python3 -m pip install --quiet jsonschema==4.19.2
           make sarif-check
 
-  image:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: build the release image
-        run: docker build --build-arg VERSION=ci -t sc4n:ci .
-
-      - name: image reports its version
-        run: docker run --rm sc4n:ci version | grep -F 'sc4n ci'
-
-      # The gate the image exists for: the benign tree has no finding above info, so
-      # -fail-on low exits 0, and the critical fixture exits 1.
-      - name: a benign tree scans clean
-        run: |
-          docker run --rm --network=none --read-only --tmpfs /tmp \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD/testdata/fixtures/benign:/scan:ro" \
-            sc4n:ci scan -fail-on low /scan
-
-      - name: a critical finding fails the run
-        run: |
-          set +e
-          docker run --rm --network=none --read-only --tmpfs /tmp \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD/testdata/fixtures:/scan:ro" \
-            sc4n:ci scan -fail-on critical /scan/joblib_object_array.joblib 2>/dev/null
-          status=$?
-          set -e
-          test "$status" -eq 1

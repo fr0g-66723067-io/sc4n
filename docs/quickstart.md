@@ -6,9 +6,10 @@ all of it offline before pointing the scanner at anything you care about.
 
 ## Install
 
-Three ways, in order of convenience. The release assets and the image are public,
-so neither needs credentials; `make release` builds and verifies the same
-artifacts from the tag if you would rather not download them.
+Three ways, in order of convenience. The release assets are public, so they need
+no credentials; the image is built locally because CI publishes no image. `make
+release` builds and verifies the same artifacts from the tag if you would rather
+not download them.
 
 ```sh
 # 1. released binary (linux/amd64 shown; darwin and windows builds are published too)
@@ -16,12 +17,12 @@ curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/sc4n_
 curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing && chmod +x sc4n_v1.0.1_linux_amd64
 
-# 2. container, which is the right way to scan bytes you do not trust
-docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.1
-
-# 3. from source: Go 1.27.3, no code generation, no third-party tooling
+# 2. from source: Go 1.27.3, no code generation, no third-party tooling
 git clone https://github.com/fr0g-66723067-io/sc4n && cd sc4n
 go build -o sc4n ./cmd/sc4n
+
+# 3. container, built locally from the clone (no image is published)
+VERSION=v1.0.1 make docker
 ```
 
 The binary is statically linked (`CGO_ENABLED=0`) and has one dependency,
@@ -174,7 +175,7 @@ For bytes you do not trust, run the container. `--network=none` is safe because
 docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
   --user "$(id -u):$(id -g)" \
   -v "$PWD:/scan:ro" \
-  ghcr.io/fr0g-66723067-io/sc4n:v1.0.1 \
+  sc4n:v1.0.1 \
   scan -format sarif -out /tmp/sc4n.sarif -fail-on high /scan
 ```
 

@@ -53,17 +53,18 @@ curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/sc4n_
 curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
 
-# container, which is the right way to scan bytes you do not trust
-docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.1
+# container, built locally from this tree: the release page carries binaries only
+VERSION=v1.0.1 make docker
 
 # or from source: Go 1.27.3, no code generation, no third-party tooling
 go build -o sc4n ./cmd/sc4n
 ```
 
 `v1.0.1` is published by `.github/workflows/release.yml`: five static binaries and
-`SHA256SUMS` on the release page, and the image in GHCR. Both are public and need
-no authentication. Nothing is published from a branch, and `make release` builds
-and verifies the same artifacts locally.
+`SHA256SUMS` on the release page. The container image is not published — CI builds
+no image — and `make docker` builds it locally from the same tag. Nothing is
+published from a branch, and `make release` builds and verifies the same artifacts
+locally.
 
 The release assets are checksums-only: `SHA256SUMS` and no signature on the
 binaries. The git history and the release tags are signed with the project's SSH
@@ -86,7 +87,7 @@ and states what each check does and does not prove.
 # scan untrusted bytes in the container (scan never dials, so no network needed)
 docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
   --user "$(id -u):$(id -g)" -v "$PWD:/scan:ro" \
-  ghcr.io/fr0g-66723067-io/sc4n:v1.0.1 scan -fail-on high /scan
+  sc4n:v1.0.1 scan -fail-on high /scan
 ```
 
 [`docs/quickstart.md`](docs/quickstart.md) is the ten-minute version: install, a
@@ -348,7 +349,7 @@ the bounded `/tmp` do not already contain. The `--user` is what lets a bind moun
 whose files are not world-readable be read:
 
 ```sh
-VERSION=v0.1.0 make docker
+VERSION=v1.0.1 make docker
 docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
   --user "$(id -u):$(id -g)" \
   -v "$PWD:/scan:ro" -v "$PWD/out:/out" \
