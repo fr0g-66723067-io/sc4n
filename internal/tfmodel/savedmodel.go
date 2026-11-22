@@ -619,7 +619,7 @@ func parseTFJS(ctx *artifact.Ctx, s source.Source) {
 	}
 	if topo, ok := doc["modelTopology"].(map[string]any); ok {
 		if _, isKeras := topo["class_name"]; isKeras {
-			analyzeKerasValue(ctx, 0, "modelTopology", topo, 0)
+			analyzeKerasValue(ctx, 0, "modelTopology", topo, 0, &kerasBudget{})
 		} else {
 			walkTopology(ctx, topo)
 		}

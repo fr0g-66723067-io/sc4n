@@ -1,6 +1,7 @@
 package coreml
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -161,4 +162,76 @@ func FuzzCoreMLWalk(f *testing.F) {
 		defer s.Close()
 		_ = (parser{}).Parse(ctx, s)
 	})
+}
+
+func TestSniffDoesNotClaimOnnxWithProtoShapedProducerName(t *testing.T) {
+	// ONNX ir_version, a producer_name whose bytes happen to parse as a
+	// protobuf message, and a graph field: the ONNX-specific field wins.
+	data := cat(
+		pvar(1, 7),
+		pbytes(2, pstr(1, "pytorch")),
+		pbytes(7, nil),
+	)
+	if f, ok := sniff(source.Mem("o.onnx", data), limits.Default()); ok || f != artifact.FormatUnknown {
+		t.Fatalf("ONNX-shaped bytes sniffed as %v, %v", f, ok)
+	}
+}
+
+func TestPipelineCustomModelIsReported(t *testing.T) {
+	inner := cat(pvar(fieldSpecVersion, 1), pbytes(fieldCustomModel, pstr(customFieldClass, "EvilModel")))
+	model := cat(pvar(fieldSpecVersion, 1), pbytes(fieldPipeline, pbytes(pipelineFieldModels, inner)))
+	fs := parse(t, "p.mlmodel", model)
+	if !hasRule(fs, RuleCustomLayer.ID) {
+		t.Fatalf("pipeline custom model was hidden; findings=%v", ids(fs))
+	}
+}
+
+func TestDeepPipelineNestingIsReported(t *testing.T) {
+	inner := pbytes(fieldCustomModel, pstr(customFieldClass, "EvilModel"))
+	for range maxPipelineDepth + 1 {
+		inner = pbytes(fieldPipeline, pbytes(pipelineFieldModels, inner))
+	}
+	model := cat(pvar(fieldSpecVersion, 1), inner)
+	if fs := parse(t, "deep.mlmodel", model); !hasRule(fs, RuleStruct.ID) {
+		t.Fatalf("deep pipeline nesting was silent; findings=%v", ids(fs))
+	}
+}
+
+func TestGroupWireTypeDoesNotHideACustomLayer(t *testing.T) {
+	group := protowire.AppendTag(nil, 1, protowire.StartGroupType)
+	group = protowire.AppendTag(group, 1, protowire.EndGroupType)
+	layer := cat(group, pbytes(layerFieldCustom, pstr(customFieldClass, "EvilLayer")))
+	model := cat(pvar(fieldSpecVersion, 1), pbytes(fieldNeuralNetwork, pbytes(nnFieldLayers, layer)))
+	if fs := parse(t, "g.mlmodel", model); !hasRule(fs, RuleCustomLayer.ID) {
+		t.Fatalf("a group field hid the custom layer; findings=%v", ids(fs))
+	}
+}
+
+func TestTruncatedLayerRecordIsReported(t *testing.T) {
+	// A length-delimited layer whose declared length runs past the message.
+	bad := protowire.AppendTag(nil, nnFieldLayers, protowire.BytesType)
+	bad = protowire.AppendVarint(bad, 100)
+	bad = append(bad, 1, 2, 3)
+	model := cat(pvar(fieldSpecVersion, 1), pbytes(fieldNeuralNetwork, bad))
+	if fs := parse(t, "trunc.mlmodel", model); !hasRule(fs, RuleStruct.ID) {
+		t.Fatalf("truncated layer was silent; findings=%v", ids(fs))
+	}
+}
+
+func TestOversizedCustomClassNameIsCappedAndReported(t *testing.T) {
+	name := strings.Repeat("A", 100)
+	model := cat(pvar(fieldSpecVersion, 1), pbytes(fieldCustomModel, pstr(customFieldClass, name)))
+	l := limits.Default()
+	l.MaxStringBlob = 16
+	c := report.NewCollector(0)
+	sess := artifact.NewSession(c, "", l)
+	ctx := sess.NewCtx("big.mlmodel", l)
+	s := source.Mem("big.mlmodel", model)
+	defer s.Close()
+	if err := (parser{}).Parse(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	if !hasRule(c.Findings(), "SC4N-LIMIT-STRING") {
+		t.Fatalf("class name cap was silent; findings=%v", ids(c.Findings()))
+	}
 }

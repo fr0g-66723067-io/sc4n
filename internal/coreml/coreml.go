@@ -416,6 +416,7 @@ func (w *walker) eachBytesField(b []byte, want protowire.Number, what string, fn
 		}
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
+			w.bad("Core ML " + what + " field tag is malformed or truncated")
 			return
 		}
 		b = b[n:]
@@ -423,12 +424,14 @@ func (w *walker) eachBytesField(b []byte, want protowire.Number, what string, fn
 		case protowire.VarintType:
 			_, m := protowire.ConsumeVarint(b)
 			if m < 0 {
+				w.bad("Core ML " + what + " varint field is truncated")
 				return
 			}
 			b = b[m:]
 		case protowire.BytesType:
 			v, m := protowire.ConsumeBytes(b)
 			if m < 0 {
+				w.bad("Core ML " + what + " length-delimited field is truncated")
 				return
 			}
 			b = b[m:]
@@ -438,12 +441,14 @@ func (w *walker) eachBytesField(b []byte, want protowire.Number, what string, fn
 		case protowire.Fixed32Type:
 			m := consumeFixed32(b)
 			if m < 0 {
+				w.bad("Core ML " + what + " fixed32 field is truncated")
 				return
 			}
 			b = b[m:]
 		case protowire.Fixed64Type:
 			m := consumeFixed64(b)
 			if m < 0 {
+				w.bad("Core ML " + what + " fixed64 field is truncated")
 				return
 			}
 			b = b[m:]

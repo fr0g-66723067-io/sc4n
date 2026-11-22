@@ -150,11 +150,11 @@ func runStats(ctx *artifact.Ctx, s source.Source, h *header, dataBase, bufferLen
 // means.
 func computeStats(ei elementInfo, b []byte) weightStats {
 	st := weightStats{entropy: bytescan.Entropy(sampleForEntropy(b))}
-	seen := make(map[uint64]struct{}, len(b)/ei.size)
 	n := len(b) / ei.size
 	if n > statsElementCap {
 		n = statsElementCap
 	}
+	seen := make(map[uint64]struct{}, n)
 	var sumAbs float64
 	for i := range n {
 		el := b[i*ei.size : (i+1)*ei.size]

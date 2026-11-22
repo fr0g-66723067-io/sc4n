@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/malice"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/stringscan"
@@ -132,13 +133,20 @@ func Analyze(sink *report.Sink, base int64, name, template string) {
 	if template == "" {
 		return
 	}
+	toks, truncatedAt := lex(template)
 	a := &analyzer{
 		sink:         sink,
 		base:         base,
 		name:         name,
 		tmpl:         template,
-		toks:         lex(template),
+		toks:         toks,
 		corroborated: corroborated(template),
+		chainBudget:  8*len(toks) + 1024,
+		aliasValue:   map[string]string{},
+		aliasGlobal:  map[string]string{},
+	}
+	if truncatedAt > 0 {
+		limits.Emit(sink, limits.RuleEntries, "MaxJinjaTokens", int64(len(toks)+1), maxJinjaTokens, "template token stream")
 	}
 	a.structure()
 	a.expressions()
@@ -182,6 +190,16 @@ type analyzer struct {
 	// pending holds the model-directed phrases until the rest of the template has
 	// been analysed.
 	pending []pendingInjection
+	// chainBudget bounds the group/chain walk. It is linear in the token count
+	// with a fixed allowance, so a template made of bracket soup cannot turn the
+	// analyzer into quadratic work.
+	chainBudget int
+	chainLimit  bool
+	// aliasValue and aliasGlobal remember a strict {% set NAME = ... %} binding.
+	// They are how `{% set g = '__g' %}{{ g + 'lobals__' }}` and a computed
+	// subscript stay visible without building a general interpreter.
+	aliasValue  map[string]string
+	aliasGlobal map[string]string
 }
 
 // pendingInjection is one phrase awaiting its severity decision.
@@ -360,6 +378,17 @@ func (a *analyzer) analyzeSet(inner []token) {
 		return
 	}
 	rhs := inner[eq+1:]
+	// A strict simple binding is useful later in the template even when it is
+	// benign on its own: `{% set g = '__g' %}` followed by a computed subscript
+	// is the alias case. Last assignment wins.
+	if len(inner) > 1 && inner[1].kind == kindName {
+		name := inner[1].val
+		if len(rhs) == 1 && rhs[0].kind == kindString {
+			a.aliasValue[name] = rhs[0].val
+		} else if len(rhs) == 1 && rhs[0].kind == kindName {
+			a.aliasGlobal[name] = rhs[0].val
+		}
+	}
 	if simpleRHS(rhs) || !buildsAName(rhs) {
 		return
 	}
@@ -481,6 +510,9 @@ func (a *analyzer) expressions() {
 		t := toks[i]
 		switch t.kind {
 		case kindString:
+			if t.opaque {
+				a.emit(ruleDynamicName, t.off, "a \\N{...} escape names a character sc4n cannot decode")
+			}
 			if !raiseArg[i] {
 				if p, _ := phraseIn(t.val); p != "" {
 					a.emitInjection(t.off, "a template string contains the instruction "+strconv.Quote(p), p)
@@ -503,7 +535,11 @@ func (a *analyzer) expressions() {
 				a.emit(rulePyObject, t.off, "template reaches the Python name "+t.val)
 				a.calledReach(i, i)
 			}
-			if dangerousGlobals[t.val] && i+1 < len(toks) && toks[i+1].kind == kindOp &&
+			recv := t.val
+			if v, ok := a.aliasGlobal[recv]; ok {
+				recv = v
+			}
+			if dangerousGlobals[recv] && i+1 < len(toks) && toks[i+1].kind == kindOp &&
 				(toks[i+1].val == "." || toks[i+1].val == "[") {
 				a.emit(ruleDangerousGlobal, t.off, t.val+" is used as the receiver of attribute/subscript access")
 			}
@@ -520,9 +556,12 @@ func (a *analyzer) expressions() {
 					toks[i+2].val == "]" && dunderNames[toks[i+1].val] {
 					a.emit(rulePyObject, t.off, "subscript access ["+strconv.Quote(toks[i+1].val)+"]")
 					a.calledReach(i, i+2)
+				} else if i+2 < len(toks) && toks[i+1].kind == kindName && toks[i+2].kind == kindOp && toks[i+2].val == "]" {
+					a.checkComputedIndex(i, toks[i+1])
 				}
 			case "|":
 				a.attrFilter(i)
+				a.attrPathFilters(i)
 			}
 		}
 	}
@@ -538,16 +577,21 @@ func (a *analyzer) attrFilter(i int) {
 		toks[i+2].kind != kindOp || toks[i+2].val != "(" {
 		return
 	}
-	if i+3 < len(toks) && toks[i+3].kind == kindString {
+	if i+3 < len(toks) && (toks[i+3].kind == kindString || toks[i+3].kind == kindName) {
 		s := toks[i+3].val
+		if v, ok := a.aliasValue[s]; ok {
+			s = v
+		}
 		switch {
 		case strings.HasPrefix(s, "__"):
 			a.emit(rulePyObject, toks[i+1].off, "attr filter selects "+strconv.Quote(s))
-			if end, ok := skipGroup(toks, i+2, "(", ")"); ok {
+			if end, ok := a.skipGroup(i+2, "(", ")"); ok {
 				a.calledReach(i+1, end-1)
 			}
 		case strings.HasPrefix(s, "_"):
 			a.emit(ruleDangerousGlobal, toks[i+1].off, "attr filter selects the private name "+strconv.Quote(s))
+		case toks[i+3].kind == kindName:
+			a.emit(ruleDynamicName, toks[i+1].off, "attr filter is applied to a computed name")
 		}
 		return
 	}
@@ -664,6 +708,9 @@ func (a *analyzer) chainCall(last int) (int, bool) {
 	toks := a.toks
 	k := last + 1
 	for k < len(toks) && toks[k].kind == kindOp {
+		if !a.chargeChain() {
+			return k, false
+		}
 		switch toks[k].val {
 		case ".":
 			if k+1 >= len(toks) || toks[k+1].kind != kindName {
@@ -671,13 +718,13 @@ func (a *analyzer) chainCall(last int) (int, bool) {
 			}
 			k += 2
 		case "[":
-			next, ok := skipGroup(toks, k, "[", "]")
+			next, ok := a.skipGroup(k, "[", "]")
 			if !ok {
 				return k, false
 			}
 			k = next
 		case "(":
-			next, ok := skipGroup(toks, k, "(", ")")
+			next, ok := a.skipGroup(k, "(", ")")
 			if !ok {
 				return k, true
 			}
@@ -689,15 +736,94 @@ func (a *analyzer) chainCall(last int) (int, bool) {
 	return k, false
 }
 
-// skipGroup returns the index just past the group that opens at k, and whether
-// the group was terminated.
-func skipGroup(toks []token, k int, open, close string) (int, bool) {
-	depth := 0
-	for i := k; i < len(toks); i++ {
-		if toks[i].kind != kindOp {
+// chargeChain spends one unit of the chain/group budget. Overflow is reported
+// once and stops the walk that asked.
+func (a *analyzer) chargeChain() bool {
+	if a.chainBudget <= 0 {
+		if !a.chainLimit {
+			a.chainLimit = true
+			limits.Emit(a.sink, limits.RuleEntries, "MaxJinjaChainTokens", 0, 0, "Jinja chain analysis")
+		}
+		return false
+	}
+	a.chainBudget--
+	return true
+}
+
+// checkComputedIndex resolves a name used as a subscript index through the
+// strict {% set %} alias table.
+func (a *analyzer) checkComputedIndex(i int, idx token) {
+	v, ok := a.aliasValue[idx.val]
+	if !ok {
+		return
+	}
+	switch {
+	case strings.HasPrefix(v, "__"):
+		a.emit(rulePyObject, idx.off, "computed subscript selects "+strconv.Quote(v))
+		a.calledReach(i, i+2)
+	case strings.HasPrefix(v, "_"):
+		a.emit(ruleDangerousGlobal, idx.off, "computed subscript selects the private name "+strconv.Quote(v))
+	default:
+		a.emit(ruleDynamicName, idx.off, "computed subscript selects "+strconv.Quote(v))
+	}
+}
+
+// attrPathFilters reports a dunder or private attribute named inside a filter's
+// attribute= (or dictsort's by=) argument. Those filters read an attribute by
+// name just like attr, so leaving them out bypassed the same check.
+var attrPathFilters = map[string]bool{
+	"map": true, "selectattr": true, "rejectattr": true, "sort": true, "unique": true,
+	"min": true, "max": true, "sum": true, "join": true, "groupby": true, "dictsort": true,
+}
+
+func (a *analyzer) attrPathFilters(i int) {
+	toks := a.toks
+	if i+2 >= len(toks) || toks[i+1].kind != kindName || !attrPathFilters[toks[i+1].val] ||
+		toks[i+2].kind != kindOp || toks[i+2].val != "(" {
+		return
+	}
+	end, ok := a.skipGroup(i+2, "(", ")")
+	if !ok {
+		return
+	}
+	for k := i + 3; k+2 < end; k++ {
+		if toks[k].kind != kindName || (toks[k].val != "attribute" && toks[k].val != "by") ||
+			toks[k+1].kind != kindOp || toks[k+1].val != "=" {
 			continue
 		}
-		switch toks[i].val {
+		if toks[k+2].kind != kindString {
+			a.emit(ruleDynamicName, toks[k].off, "filter "+toks[i+1].val+" reads a computed attribute name")
+			continue
+		}
+		a.checkPathValue(toks[k+2])
+	}
+}
+
+func (a *analyzer) checkPathValue(tok token) {
+	for _, part := range strings.Split(tok.val, ",") {
+		for _, seg := range strings.Split(part, ".") {
+			switch {
+			case dunderNames[seg]:
+				a.emit(rulePyObject, tok.off, "filter attribute path selects "+strconv.Quote(seg))
+			case strings.HasPrefix(seg, "_"):
+				a.emit(ruleDangerousGlobal, tok.off, "filter attribute path selects the private name "+strconv.Quote(seg))
+			}
+		}
+	}
+}
+
+// skipGroup returns the index just past the group that opens at k, and whether
+// the group was terminated. It charges the chain budget once per visited token.
+func (a *analyzer) skipGroup(k int, open, close string) (int, bool) {
+	depth := 0
+	for i := k; i < len(a.toks); i++ {
+		if !a.chargeChain() {
+			return k, false
+		}
+		if a.toks[i].kind != kindOp {
+			continue
+		}
+		switch a.toks[i].val {
 		case open:
 			depth++
 		case close:
