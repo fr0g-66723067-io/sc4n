@@ -63,7 +63,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var o options
 	fs.StringVar(&o.profile, "profile", "containers", "containers, native or graphs")
-	fs.StringVar(&o.seeds, "seeds", "$CORPUS/top25-downloads/repos", "directories searched for .onnx graph seeds")
+	fs.StringVar(&o.seeds, "seeds", "", "directories searched for .onnx graph seeds (graphs profile; required there)")
 	fs.StringVar(&o.out, "out", "", "output root (required)")
 	fs.Int64Var(&o.seed, "seed", 1, "deterministic generation seed")
 	fs.IntVar(&o.n, "n", 2, "seeds used per profile")
@@ -88,6 +88,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "containers", "native", "graphs":
 	default:
 		fmt.Fprintf(stderr, "sc4nlab: unknown profile %q (want containers, native or graphs)\n", o.profile)
+		return exitUsage
+	}
+	// The seed root has no default: it is a corpus of someone else's models, not
+	// part of this tree, and a guessed path would be an operator's home directory
+	// baked into a released tool.
+	if o.profile == "graphs" && o.seeds == "" {
+		fmt.Fprintln(stderr, "sc4nlab: -seeds is required for the graphs profile")
 		return exitUsage
 	}
 	out, err := filepath.Abs(o.out)

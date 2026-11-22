@@ -16,8 +16,9 @@ CLI directly, so the numbers are CLI-to-CLI and a reader can reproduce them
 without the campaign machinery:
 
 ```sh
-# one corpus (the command used for every row below)
-cd $CORPUS/top25-downloads/repos
+# one corpus (the command used for every row below); $CORPUS is the -out
+# directory a `sc4n hub` run wrote
+cd "$CORPUS/top25-downloads/repos"
 sc4n scan -root . -format json -out scan.json \
   $(for p in $(cat partials.txt); do printf -- '-partial %s ' "$p"; done) .
 ```

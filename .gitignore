@@ -30,3 +30,15 @@ __pycache__/
 *~
 *.swp
 /dist/
+
+# Nothing in this tree is a credential. The ignore list is the second line of
+# defence: a scanner's own repository must not become the example it warns about.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+certs/
+vault/
+pki_vault/

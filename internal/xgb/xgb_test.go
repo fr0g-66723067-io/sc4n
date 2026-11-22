@@ -60,7 +60,7 @@ func TestTrailingPayloadReported(t *testing.T) {
 
 func TestMalformedReported(t *testing.T) {
 	cases := map[string][]byte{
-		"unknown marker":      []byte{'!'},
+		"unknown marker":      {'!'},
 		"negative string len": append([]byte{'S', 'i', 0xff}, []byte("x")...),
 		"truncated string":    {'S', 'i', 10, 'a'},
 		"unterminated array":  {'[', 'i', 1},
@@ -266,9 +266,14 @@ func TestCommittedFixturesUnchanged(t *testing.T) {
 
 // The llama.cpp source corpus the round measured. It contains no UBJSON artifact
 // and a great many files whose first two bytes alone would pass the cheap shape
-// gate; this test keeps both facts true against the real files on disk.
+// gate; this test keeps both facts true against real files on disk.
+//
+// The corpus is not vendored — it is a checkout of someone else's source tree —
+// so its location comes from the environment. The test skips when the variable is
+// unset, which keeps a personal absolute path out of the repository.
+var corpusRoot = os.Getenv("SC4N_XGB_CORPUS")
+
 const (
-	corpusRoot    = "/path/to/llama-cpp/index-src"
 	corpusMaxSize = 8 << 20
 	// corpusUBJFiles is how many artifacts in corpusRoot the round measured as
 	// UBJSON: none. A non-zero value here means the sniffer started claiming a
@@ -278,6 +283,9 @@ const (
 )
 
 func TestRealCorpusHasNoUBJSONFalsePositives(t *testing.T) {
+	if corpusRoot == "" {
+		t.Skip("SC4N_XGB_CORPUS is unset: real-corpus check skipped")
+	}
 	if _, err := os.Stat(corpusRoot); err != nil {
 		t.Skipf("real corpus absent: %v", err)
 	}
