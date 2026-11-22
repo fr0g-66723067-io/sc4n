@@ -65,11 +65,11 @@ go build -o sc4n ./cmd/sc4n
 no authentication. Nothing is published from a branch, and `make release` builds
 and verifies the same artifacts locally.
 
-The provenance posture is checksums only: the assets carry `SHA256SUMS`, and there
-is no signing key and no build attestation. That is a stated position rather than
-an omission — [`docs/release.md`](docs/release.md) §Provenance says what it does
-and does not prove. Verify the checksum, or build from the tag when you need
-provenance.
+The release assets are checksums-only: `SHA256SUMS` and no signature on the
+binaries. The git history and the release tags are signed with the project's SSH
+signing key, so the tag a build claims can be verified before you trust it.
+[`docs/release.md`](docs/release.md) §Provenance gives the key and the command,
+and states what each check does and does not prove.
 
 ## Quickstart
 
