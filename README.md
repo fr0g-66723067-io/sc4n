@@ -60,11 +60,10 @@ VERSION=v1.0.1 make docker
 go build -o sc4n ./cmd/sc4n
 ```
 
-`v1.0.1` is published by `.github/workflows/release.yml`: five static binaries and
-`SHA256SUMS` on the release page. The container image is not published — CI builds
-no image — and `make docker` builds it locally from the same tag. Nothing is
-published from a branch, and `make release` builds and verifies the same artifacts
-locally.
+Every tag publishes five static binaries and `SHA256SUMS` through
+`.github/workflows/release.yml`; the container image is not published and
+`make docker` builds it locally. `make release` builds and verifies the same
+artifacts, and [`docs/release.md`](docs/release.md) is the process.
 
 The release assets are checksums-only: `SHA256SUMS` and no signature on the
 binaries. The git history and the release tags are signed with the project's SSH

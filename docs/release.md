@@ -1,114 +1,103 @@
 # Cutting a release
 
-`v1.0.0` is the first tag. The process is three commands and one push, and it is
-reproducible by anyone:
+A tag is the release. Nothing is published from a branch, and no release is
+created by hand: `.github/workflows/release.yml` runs on the tag push, gates the
+tree, builds and verifies the artifacts, then publishes them.
 
 ```sh
-git tag -s v1.0.1 -m "sc4n v1.0.1"
-make release                      # builds, verifies, builds the image, verifies it
-git push origin v1.0.1            # the tag, not the branch — CI does the rest
+git switch main && git pull --ff-only
+make release-gate                       # the gate a tag must pass
+VERSION=vX.Y.Z make release             # builds dist/ and verifies it locally
+git tag -a vX.Y.Z -m "sc4n vX.Y.Z"      # tag.gpgsign=true signs it
+git verify-tag vX.Y.Z
+git push origin main                    # operator only
+git push origin vX.Y.Z                  # operator only; this publishes
 ```
 
-`make release` is `release-binaries` + `release-image` + `verify-release`:
+`VERSION=vX.Y.Z make release` proves a tag will work before it is pushed: the
+tree is dirty at that point, so the version string is supplied, and the
+artifacts are byte-comparable with what CI builds from the tag apart from the
+embedded version.
 
-| target | what it produces |
+## The shape every release has
+
+| part | value |
 |---|---|
-| `make release-binaries` | `dist/sc4n_<version>_<os>_<arch>` for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, and `dist/SHA256SUMS` over all of them |
-| `make release-image` | `sc4n:<version>` from `Dockerfile` (distroless, non-root, OCI labels) |
-| `make verify-release` | runs `tools/release/verify.sh` against both |
+| trigger | a signed annotated tag `vX.Y.Z` (or `vX.Y.Z-rcN`) pushed to `origin` |
+| publisher | `github-actions[bot]`, from the repository's own workflow token |
+| title | `sc4n vX.Y.Z` |
+| body | `## What changed` (the CHANGELOG section), `## Install`, `## Verify`, and a compare link |
+| assets | five binaries and `SHA256SUMS` |
+| prerelease | any tag containing `-`; nothing else is |
 
-Verification is not a formality; each check exists because it has caught something
-or would have:
+Asset names are `sc4n_vX.Y.Z_<os>_<arch>` for linux/amd64, linux/arm64,
+darwin/amd64, darwin/arm64 and windows/amd64 (the last with `.exe`).
+`SHA256SUMS` covers all five. No container image is published; `make docker`
+builds one locally from the same tag.
+
+`tools/release/notes.sh` renders the body from `CHANGELOG.md`. A tag with no
+`## [X.Y.Z]` section fails the workflow before anything is built, so notes and
+code ship together. `tools/release/verify.sh` proves the artifacts before
+publishing:
 
 - `sha256sum -c SHA256SUMS` — an asset that does not verify teaches users to skip
   the check;
 - `file` on every cross-built binary — a mistyped `GOARCH` builds a binary that
   runs on nothing, and `go build` exits 0;
-- the native binary's `version` — must equal the tag, because every report carries
-  it and a stale binary is invisible until someone compares a SARIF file;
-- the benign fixture tree scans clean at `-fail-on low`, and the critical fixture
-  exits 1 — the release gate applied to the *artifact*, not to the tree it was
-  built from;
-- the same two checks through the image, plus its `version`.
+- the native binary's `version` — it must name the tag, because a stale binary is
+  invisible until someone compares a report;
+- `tools/release/smoke.sh` — the repository's own gate applied to the artifact
+  (benign fixture tree scans clean, the critical fixture exits 1), not to the
+  tree it was built from.
 
-A run looks like this:
+`tools/release/publish.sh` is idempotent: a re-run edits the existing release and
+replaces its assets, so a re-pointed tag does not die halfway.
 
-```text
-== checksums
-   5 artifact(s) verified
-== architectures
-   sc4n_v1.0.0_darwin_amd64: x86_64, format ok
-   sc4n_v1.0.0_darwin_arm64: arm64, format ok
-   sc4n_v1.0.0_linux_amd64: x86-64, format ok
-   sc4n_v1.0.0_linux_arm64: aarch64, format ok
-   sc4n_v1.0.0_windows_amd64.exe: x86-64, format ok
-== native binary
-   sc4n v1.0.0
-   benign tree: clean
-   critical fixture: exits 1
-== image sc4n:v1.0.0
-   sc4n v1.0.0
-   benign tree: clean
-   critical fixture: exits 1
-verify-release: ok
-```
-
-## What the tag triggers
-
-`.github/workflows/release.yml` runs the full test gate at the tag, then:
-
-- **binaries** — `make release-binaries`, the same verification, then
-  `gh release create` with the five binaries and `SHA256SUMS` as assets.
-
-Nothing is published from a branch. A tag that fails the test gate publishes
-nothing, because the publishing job `needs: test`. CI does not build or push a
-container image; `make docker` builds one locally from the same tree.
-
-`v1.0.1` is the current release: the five binaries and `SHA256SUMS` are assets on
-the release. The assets are public and need no credentials, and `make release`
-produces the same binaries from the tag. The container image is not published;
-`make docker` builds it locally.
+The image is local-only: `make release-image` builds it and runs
+`tools/release/image-check.sh`, which requires the same version and the same two
+scan outcomes inside `--network=none --read-only`.
 
 ## Provenance
 
-The project's position is stated here rather than left implicit:
-
-- every release asset is covered by one `SHA256SUMS`, generated by
+- Commits and tags are signed with the project's SSH signing key; `git
+  verify-tag vX.Y.Z` proves which commit a tag names, and that commit's tree is
+  what the workflow builds.
+- Every asset is covered by one `SHA256SUMS`, generated by
   `make release-binaries` from the files it just built and re-checked by
-  `tools/release/verify.sh` before the workflow publishes anything;
-- commits are signed with the project's SSH signing key, and so is every release
-  tag, so a tag authenticates the commit it names, and that commit's tree is what
-  `make release` rebuilds;
-- the assets themselves are not signed, and there is no keyless signature and no
-  `actions/attest-build-provenance` step, so nothing inside a binary
-  authenticates the publisher;
-- `SHA256SUMS` proves that a download is the file the release page offers. It does
-  not prove who built it: an attacker who can replace both the asset and the
-  checksum replaces both consistently.
+  `tools/release/verify.sh` before publishing.
+- The assets themselves are not signed, and there is no keyless signature and no
+  provenance attestation: `SHA256SUMS` proves a download is the file the release
+  page offers, not who built it.
 
-Verify a tag against the published key (git 2.34 or newer):
+Verify a tag against the published key:
 
 ```sh
 cat > allowed_signers <<'EOF'
 fr0g@66723067.io ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMnWt+F8q/gry7x18CAllZf5srH4aHeR4AYkPjA9UOwl
 EOF
-git -c gpg.ssh.allowedSignersFile=$PWD/allowed_signers verify-tag v1.0.0
+git -c gpg.ssh.allowedSignersFile=$PWD/allowed_signers verify-tag vX.Y.Z
 ```
 
-The public key is:
+The fingerprint is `SHA256:EgiFpUPNOe0+12duE+sFx+2aV9IPYGHGcAc/BXRX4qQ`.
 
-```text
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMnWt+F8q/gry7x18CAllZf5srH4aHeR4AYkPjA9UOwl fr0g@66723067.io
+## Before tagging
+
+```sh
+git status --short                # empty
+make release-gate
+VERSION=vX.Y.Z make release
 ```
 
-Its fingerprint is `SHA256:EgiFpUPNOe0+12duE+sFx+2aV9IPYGHGcAc/BXRX4qQ`. A
-signature nobody can check is worse than an honest checksum, which is why the key
-and the command are here.
+The CHANGELOG must already carry `## [X.Y.Z] - YYYY-MM-DD`, and `## [Unreleased]`
+must be empty above it.
 
-What to do, in order of strength: verify the tag against the key above and build
-from that commit; compare the asset's SHA-256 with the release page; or rebuild
-from a commit you have verified yourself. The checksum still matters, because the
-binary is the thing you run.
+## What a release does not claim
+
+- No signed assets and no provenance attestation (see §Provenance).
+- No semantic-versioning promise beyond what this module's README states; a
+  published tag is never moved, and a wrong note is corrected in the next patch.
+- The workflow is identical in every fr0g-66723067-io public repository; its
+  gate and scripts are the contract, not the YAML.
 
 ## Repository visibility
 
@@ -161,32 +150,3 @@ subjects, and corrected one committer address typo. Every commit and both tags
 were re-signed with the project key (§Provenance). The four paths above are the
 complete tree diff between the old and new tag commits, taken from the
 pre-rewrite backup before it was pruned.
-
-## Before tagging
-
-```sh
-make test                         # vet + test + test -race
-make fixtures && git diff --exit-code testdata/fixtures
-make rules-doc && git diff --exit-code docs/rules.md
-make sarif-check                  # skipped loudly without python3 + jsonschema
-VERSION=v1.0.1 make release       # the binaries CI will build; the image is local-only
-```
-
-`make release` with `VERSION` overridden is how to prove a tag will work before
-pushing it: the tree is dirty at that point, so the version string is yours to
-give, and the artifacts are byte-comparable with what CI produces apart from the
-embedded version.
-
-## What a release does not claim
-
-- **No signed assets and no provenance attestation.** The binaries carry
-  `SHA256SUMS` and no signature; the commit and tag are signed (§Provenance),
-  which authenticates the source, not the uploaded file.
-- **No semantic-versioning promise beyond the report schema.** The JSON report
-  carries `schemaVersion` and the exit codes are a contract
-  ([README](../README.md#exit-codes)); rule IDs are stable once published, and a
-  rule that changes meaning is renamed rather than reused. `sc4n rules` is the
-  authority on what exists.
-- **The fixture corpus in the release is the same one in the tree**, so a released
-  binary's own gate (`benign clean, critical exits 1`) is reproducible with
-  `make release` from the same tag.
