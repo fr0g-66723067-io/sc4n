@@ -7,7 +7,7 @@ an artifact with nothing in it.
 
 ## Supported versions
 
-The latest `v1.0.x` release. Fixes land on `master` and ship in the next tag;
+The latest `v1.0.x` release. Fixes land on `main` and ship in the next tag;
 pre-releases (`v1.0.1-rc1`) exist for testing and are not supported. Older
 releases are not backported.
 

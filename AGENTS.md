@@ -169,7 +169,7 @@ tests: no wall-clock assertions, because a busy machine is not a regression
 archive: a .joblib in xz, lzma or lz4 is a loader escalation, not just an unscanned payload
 ```
 
-- Commit on the branch you are on (`master` is normal). Push only to the
+- Commit on the branch you are on (`main` is normal). Push only to the
   operator-designated mirror remote; github.com and every other remote stay
   operator-gated.
 - Stage explicit paths, never `-A`: generated corpora and binaries are easy to
