@@ -149,6 +149,10 @@ type modelShape struct {
 	// than at an illegal tag: the artifact is a prefix of a larger file.
 	truncated bool
 	fields    int
+	// capped records that the top-level field walk stopped at maxSniffFields
+	// while bytes remained; a model whose graph follows the field cap is still
+	// a model, not an unknown blob.
+	capped bool
 }
 
 // decisive reports whether the shape is enough to tell ONNX from the other
@@ -181,6 +185,9 @@ func (m modelShape) summary() string {
 	}
 	if m.hasOpset {
 		parts = append(parts, "opset_import present")
+	}
+	if m.capped {
+		parts = append(parts, "field probe cap reached")
 	}
 	if len(parts) == 0 {
 		return "no ONNX-specific field was recognised"
@@ -215,6 +222,12 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 	}
 	if sh.ok && sh.firstIR && sh.extraSignals() {
 		// A complete walk with a second ONNX field but none decisive.
+		return artifact.FormatONNX, true
+	}
+	if sh.ok && sh.firstIR && sh.capped {
+		// The field probe stopped at its cap with bytes remaining. The graph may
+		// follow the cap; claiming the model lets the parser report the ambiguous
+		// shape instead of dispatching the file as unknown.
 		return artifact.FormatONNX, true
 	}
 	// Everything else that opens with a plausible ir_version is not a model: a raw
@@ -326,6 +339,7 @@ func sniffShape(r *reader, s source.Source) (modelShape, bool) {
 	// of the bytes we were given. A parse error is not — that is a tag that cannot
 	// be read at all.
 	m.truncated = errors.Is(r.err, io.ErrUnexpectedEOF)
+	m.capped = m.ok && r.remaining() > 0
 	return m, m.ok
 }
 
@@ -877,7 +891,7 @@ func (w *walker) walkTensor(r *reader) {
 					return
 				}
 				b := r.view(bo, n)
-				for len(b) > 0 && len(dims) <= maxRank {
+				for len(b) > 0 && len(dims) < maxRank {
 					v, k := protowire.ConsumeVarint(b)
 					if k < 0 {
 						w.structAt(off, "packed dims is not a varint list")
@@ -887,8 +901,10 @@ func (w *walker) walkTensor(r *reader) {
 					w.addDim(off, int64(v), &dims, &rankHit)
 					b = b[k:]
 				}
-				if len(b) > 0 && !rankHit {
-					w.structAt(off, "rank exceeds the internal cap")
+				if len(b) > 0 {
+					if !rankHit {
+						w.structAt(off, "rank exceeds the internal cap")
+					}
 					rankHit = true
 				}
 			}

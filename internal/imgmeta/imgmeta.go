@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
@@ -108,14 +109,26 @@ func (im *image) report() {
 }
 
 func joinKinds(kinds []string) string {
-	out := ""
-	for i, k := range kinds {
-		if i > 0 {
-			out += ", "
-		}
-		out += k
+	if len(kinds) > 8 {
+		return strings.Join(kinds[:8], ", ") + fmt.Sprintf(" (%d more)", len(kinds)-8)
 	}
-	return out
+	return strings.Join(kinds, ", ")
+}
+
+// maxMetaBlob bounds one metadata value before any conversion or decode. The
+// chunk length is attacker-controlled; a 100 MiB tEXt is not metadata.
+const maxMetaBlob = 16 << 20
+
+func (im *image) capBytes(off int64, what string, b []byte) []byte {
+	if int64(len(b)) <= maxMetaBlob {
+		return b
+	}
+	limits.Emit(im.ctx.Sink, limits.RuleString, "MaxStringBlob", int64(len(b)), maxMetaBlob, what)
+	return b[:maxMetaBlob]
+}
+
+func (im *image) capString(off int64, what, s string) string {
+	return string(im.capBytes(off, what, []byte(s)))
 }
 
 // text hands one metadata string to the indicator engine and the invisible
@@ -156,7 +169,7 @@ func (im *image) png() {
 		case "tEXt":
 			im.kinds = append(im.kinds, "tEXt")
 			if k, v, ok := splitNUL(body); ok {
-				im.text(base+int64(k)+1, v)
+				im.text(base+int64(k)+1, im.capString(base+int64(k)+1, "PNG tEXt value", v))
 			}
 		case "zTXt":
 			im.kinds = append(im.kinds, "zTXt")
@@ -220,7 +233,7 @@ func (im *image) pngInternational(base int64, body []byte) {
 	off := base + int64(len(body)) - int64(len(text))
 	switch flag {
 	case 0:
-		im.text(off, string(text))
+		im.text(off, im.capString(off, "PNG iTXt value", string(text)))
 	case 1:
 		if method != 0 {
 			im.structFinding(off, "iTXt chunk uses compression method %d, only 0 (deflate) is defined", method)
@@ -328,12 +341,12 @@ func (im *image) jpeg() {
 				im.exif(base+6, body[6:])
 			case bytes.HasPrefix(body, []byte("http://ns.adobe.com/xap/1.0/\x00")):
 				im.kinds = append(im.kinds, "XMP")
-				im.text(base+int64(len("http://ns.adobe.com/xap/1.0/\x00")),
-					string(body[len("http://ns.adobe.com/xap/1.0/\x00"):]))
+				xoff := base + int64(len("http://ns.adobe.com/xap/1.0/\x00"))
+				im.text(xoff, im.capString(xoff, "JPEG XMP", string(body[len("http://ns.adobe.com/xap/1.0/\x00"):])))
 			}
 		case 0xfe: // COM
 			im.kinds = append(im.kinds, "COM")
-			im.text(base, string(body))
+			im.text(base, im.capString(base, "JPEG COM", string(body)))
 		}
 		off = end
 	}
@@ -407,7 +420,7 @@ func (im *image) ifd(base int64, tiff []byte, off int64, bo binary.ByteOrder, le
 			entry += 12
 			continue
 		}
-		val := tiff[valueOff : valueOff+size]
+		val := im.capBytes(base+valueOff, "EXIF tag value", tiff[valueOff:valueOff+size])
 		switch tag {
 		case 0x010e: // ImageDescription, ASCII
 			im.text(base+valueOff, trimNUL(val))

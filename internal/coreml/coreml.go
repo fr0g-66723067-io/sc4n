@@ -35,14 +35,19 @@ import (
 
 // CoreML ModelProto field numbers (apple/coremltools mlmodel/format/Model.proto).
 const (
-	fieldSpecVersion   = 1  // int32 specificationVersion
-	fieldDescription   = 2  // ModelDescription
-	fieldIsUpdatable   = 10 // bool
-	fieldCustomModel   = 555
-	fieldNeuralNetwork = 500 // NeuralNetwork
-	fieldNeuralRegr    = 303 // NeuralNetworkRegressor { NeuralNetwork = 1 }
-	fieldNeuralClass   = 403 // NeuralNetworkClassifier  { NeuralNetwork = 1 }
-	fieldMLProgram     = 502 // MILSpec.Program
+	fieldSpecVersion        = 1  // int32 specificationVersion
+	fieldDescription        = 2  // ModelDescription
+	fieldIsUpdatable        = 10 // bool
+	fieldCustomModel        = 555
+	fieldNeuralNetwork      = 500 // NeuralNetwork
+	fieldNeuralRegr         = 303 // NeuralNetworkRegressor { NeuralNetwork = 1 }
+	fieldNeuralClass        = 403 // NeuralNetworkClassifier  { NeuralNetwork = 1 }
+	fieldMLProgram          = 502 // MILSpec.Program
+	fieldPipelineClassifier = 200
+	fieldPipelineRegressor  = 201
+	fieldPipeline           = 202
+	pipelineFieldModels     = 1
+	maxPipelineDepth        = 8
 )
 
 // NeuralNetwork / NeuralNetworkLayer / CustomLayerParams field numbers
@@ -119,9 +124,10 @@ type walker struct {
 	sink *report.Sink
 	l    limits.Limits
 
-	elems    int64
-	elemsHi  bool
-	structHi bool
+	elems         int64
+	elemsHi       bool
+	structHi      bool
+	pipelineDepth int
 }
 
 func (w *walker) count() bool {
@@ -197,6 +203,12 @@ func (w *walker) modelField(num protowire.Number, v []byte) {
 	switch num {
 	case fieldDescription:
 		w.walkStrings(v, 0)
+	case fieldPipelineClassifier, fieldPipelineRegressor:
+		if inner := findBytesField(v, pipelineFieldModels, "pipeline wrapper"); inner != nil {
+			w.walkPipeline(inner, 0)
+		}
+	case fieldPipeline:
+		w.walkPipeline(v, 0)
 	case fieldCustomModel:
 		w.walkCustomModel(v)
 	case fieldNeuralNetwork:
@@ -204,7 +216,7 @@ func (w *walker) modelField(num protowire.Number, v []byte) {
 	case fieldNeuralRegr, fieldNeuralClass:
 		// These wrappers carry the NeuralNetwork in field 1.
 		w.walkStrings(v, 0)
-		if inner := findBytesField(v, 1); inner != nil {
+		if inner := findBytesField(v, 1, "Network wrapper"); inner != nil {
 			w.walkNeuralNetwork(inner)
 		}
 	case fieldMLProgram:
@@ -222,63 +234,85 @@ func (w *walker) modelField(num protowire.Number, v []byte) {
 }
 
 func (w *walker) walkNeuralNetwork(b []byte) {
-	w.eachBytesField(b, nnFieldLayers, w.walkLayer)
+	w.eachBytesField(b, nnFieldLayers, "NeuralNetwork.layers", w.walkLayer)
 }
 
 func (w *walker) walkLayer(b []byte) {
-	if v := findBytesField(b, layerFieldCustom); v != nil {
+	if v := findBytesField(b, layerFieldCustom, "NeuralNetworkLayer"); v != nil {
 		w.walkCustomLayer(v)
 	}
 }
 
 func (w *walker) walkCustomLayer(b []byte) {
-	if v := findBytesField(b, customFieldClass); v != nil {
+	if v := findBytesField(b, customFieldClass, "CustomLayerParams.className"); v != nil {
 		w.emitCustom("custom layer", v)
 	}
-	if v := findBytesField(b, customFieldDescr); v != nil {
+	if v := findBytesField(b, customFieldDescr, "CustomLayerParams.description"); v != nil {
 		w.walkStrings(v, 0)
 	}
-	w.eachBytesField(b, customFieldParams, w.scanMapEntry)
+	w.eachBytesField(b, customFieldParams, "CustomLayerParams.params", w.scanMapEntry)
 }
 
 func (w *walker) walkCustomModel(b []byte) {
-	if v := findBytesField(b, customFieldClass); v != nil {
+	if v := findBytesField(b, customFieldClass, "CustomModel.className"); v != nil {
 		w.emitCustom("custom model", v)
 	}
-	if v := findBytesField(b, modelCustomDescr); v != nil {
+	if v := findBytesField(b, modelCustomDescr, "CustomModel.description"); v != nil {
 		w.walkStrings(v, 0)
 	}
 	// CustomModel parameters are map<string, CustomModelParamValue>; the value is a
 	// message whose string/bytes members may carry data.
-	w.eachBytesField(b, customModelParams, w.scanParamEntry)
+	w.eachBytesField(b, customModelParams, "CustomModel.params", w.scanParamEntry)
+}
+
+// walkPipeline walks a Pipeline model wrapper. The depth is carried on the
+// walker so a nested pipeline inside one of its models also charges the cap.
+func (w *walker) walkPipeline(b []byte, depth int) {
+	if depth >= maxPipelineDepth || w.pipelineDepth >= maxPipelineDepth {
+		w.bad("Core ML pipeline nests deeper than the internal cap")
+		return
+	}
+	w.pipelineDepth++
+	defer func() { w.pipelineDepth-- }()
+	w.eachBytesField(b, pipelineFieldModels, "Pipeline.models", func(v []byte) {
+		w.walkModel(v)
+	})
 }
 
 func (w *walker) emitCustom(what string, className []byte) {
 	name := string(className)
+	cap := w.l.MaxStringBlob
+	if cap <= 0 {
+		cap = limits.Default().MaxStringBlob
+	}
+	if int64(len(name)) > cap {
+		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", int64(len(name)), cap, "Core ML "+what+" class name")
+		name = name[:cap]
+	}
 	w.sink.EmitExtra(RuleCustomLayer, 0,
-		"the model declares a "+what+" named "+name+"; the implementation is supplied by the host "+
+		"the model declares a "+what+" named "+report.TruncateEvidence(name, 256)+"; the implementation is supplied by the host "+
 			"application, not by this file",
-		map[string]string{"kind": what, "class": name})
-	if len(className) > 0 {
-		stringscan.EmitString(w.sink, 0, name)
+		map[string]string{"kind": what, "class": report.TruncateEvidence(name, 256)})
+	if len(name) > 0 {
+		w.scanText([]byte(name))
 	}
 }
 
 // scanMapEntry walks a map<string,string> entry (key=1, value=2).
 func (w *walker) scanMapEntry(b []byte) {
-	w.eachBytesField(b, 1, w.scanText)
-	w.eachBytesField(b, 2, w.scanText)
+	w.eachBytesField(b, 1, "map entry key", w.scanText)
+	w.eachBytesField(b, 2, "map entry value", w.scanText)
 }
 
 // scanParamEntry walks a CustomModel parameters entry (key=1, value=2 message);
 // the value's string/bytes members (20/60) are scanned.
 func (w *walker) scanParamEntry(b []byte) {
-	w.eachBytesField(b, 1, w.scanText)
-	w.eachBytesField(b, 2, func(v []byte) {
-		if s := findBytesField(v, paramValueStrField); s != nil {
+	w.eachBytesField(b, 1, "param entry key", w.scanText)
+	w.eachBytesField(b, 2, "param entry value", func(v []byte) {
+		if s := findBytesField(v, paramValueStrField, "CustomModelParamValue.stringValue"); s != nil {
 			w.scanText(s)
 		}
-		if s := findBytesField(v, paramValueByteField); s != nil {
+		if s := findBytesField(v, paramValueByteField, "CustomModelParamValue.bytesValue"); s != nil {
 			w.scanText(s)
 		}
 	})
@@ -375,7 +409,7 @@ func (w *walker) isText(v []byte) bool {
 // number, without materialising a slice of them. Element counting is shared with
 // the rest of the walk so a crafted message with a million repeated fields stops at
 // MaxEntries rather than allocating a slice per field.
-func (w *walker) eachBytesField(b []byte, want protowire.Number, fn func([]byte)) {
+func (w *walker) eachBytesField(b []byte, want protowire.Number, what string, fn func([]byte)) {
 	for len(b) > 0 {
 		if !w.count() {
 			return
@@ -413,14 +447,22 @@ func (w *walker) eachBytesField(b []byte, want protowire.Number, fn func([]byte)
 				return
 			}
 			b = b[m:]
+		case protowire.StartGroupType:
+			_, m := protowire.ConsumeGroup(num, b)
+			if m < 0 {
+				w.bad("Core ML " + what + " field is malformed or truncated")
+				return
+			}
+			b = b[m:]
 		default:
+			w.bad("Core ML " + what + " field is malformed or truncated")
 			return
 		}
 	}
 }
 
 // findBytesField returns the first length-delimited value of field want, or nil.
-func findBytesField(b []byte, want protowire.Number) []byte {
+func findBytesField(b []byte, want protowire.Number, what string) []byte {
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
@@ -451,6 +493,12 @@ func findBytesField(b []byte, want protowire.Number) []byte {
 			b = b[m:]
 		case protowire.Fixed64Type:
 			m := consumeFixed64(b)
+			if m < 0 {
+				return nil
+			}
+			b = b[m:]
+		case protowire.StartGroupType:
+			_, m := protowire.ConsumeGroup(num, b)
 			if m < 0 {
 				return nil
 			}
@@ -515,6 +563,7 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 		return artifact.FormatUnknown, false
 	}
 	b := head[n+m:]
+	sawType, sawDesc, sawONNX := false, false, false
 	for len(b) > 0 {
 		fnum, ftyp, k := protowire.ConsumeTag(b)
 		if k < 0 {
@@ -535,17 +584,14 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 			}
 			b = b[z:]
 			if fnum >= 200 && len(v) > 0 {
-				return artifact.FormatCoreML, true
+				sawType = true
 			}
-			// A CoreML Model carries its description in field 2 as a nested
-			// ModelDescription; ONNX's ModelProto carries producer_name in the
-			// same field as a string. Accepting the description is what keeps a
-			// CoreML model whose weights live outside the file (whisperkit's
-			// .mlmodelc bundles) from being claimed by the ONNX sniffer, which
-			// only requires a plausible ir_version in field 1 — CoreML's
-			// specificationVersion satisfies it.
 			if fnum == fieldDescription && len(v) > 0 && isProtoMessage(v) {
-				return artifact.FormatCoreML, true
+				sawDesc = true
+			}
+			switch fnum {
+			case 7, 8, 14, 20, 25, 26:
+				sawONNX = true
 			}
 		case protowire.Fixed32Type:
 			if z := consumeFixed32(b); z < 0 {
@@ -562,6 +608,12 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 		default:
 			return artifact.FormatUnknown, false
 		}
+	}
+	if sawONNX {
+		return artifact.FormatUnknown, false
+	}
+	if sawType || sawDesc {
+		return artifact.FormatCoreML, true
 	}
 	return artifact.FormatUnknown, false
 }

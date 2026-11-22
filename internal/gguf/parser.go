@@ -47,12 +47,8 @@ const (
 	// here because a metadata string can otherwise be the whole file).
 	hardStringCap = 64 << 20
 
-	// Chat templates are always collected in full. The indicator engine runs over
-	// every element of a metadata array too: the array walk is already bounded by
-	// Limits.MaxArrayElements (which reports itself when it is hit), so a second
-	// fixed sample budget only meant that a value past it was invisible — a
-	// webhook at element 5001 behind benign filler reported clean.
-	maxTemplates = 256
+	// A tensor name is materialised only to this length; the rest is skipped.
+	maxTensorNameBytes = 4096
 
 	// Polyglot windows: the APE/llamafile preamble and appended payload live at
 	// one end or the other; the residual sample is what the trailing-data
@@ -205,22 +201,29 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 			st.structf(keyOff, "metadata_kv_count %d exceeds the bytes present", kvCount)
 			return st.meta, nil
 		}
+		var key string
 		if kl > maxKeyBytes {
 			st.structf(keyOff, "metadata key length %d exceeds %d", kl, maxKeyBytes)
+			if !r.skip(kl) {
+				st.structf(keyOff, "oversized metadata key runs past EOF")
+				return st.meta, nil
+			}
+			key = "<oversized key>"
+		} else {
+			kb, ok := r.take(kl)
+			if !ok {
+				st.structf(keyOff, "metadata key of %d bytes runs past EOF", kl)
+				return st.meta, nil
+			}
+			key = string(kb)
+			if !validKey(key) {
+				st.structf(keyOff, "metadata key %q is not non-empty printable ASCII", trunc(key, 64))
+			}
+			if seen[key] {
+				st.structf(keyOff, "duplicate metadata key %q", key)
+			}
+			seen[key] = true
 		}
-		kb, ok := r.take(kl)
-		if !ok {
-			st.structf(keyOff, "metadata key of %d bytes runs past EOF", kl)
-			return st.meta, nil
-		}
-		key := string(kb)
-		if !validKey(key) {
-			st.structf(keyOff, "metadata key %q is not non-empty printable ASCII", trunc(key, 64))
-		}
-		if seen[key] {
-			st.structf(keyOff, "duplicate metadata key %q", key)
-		}
-		seen[key] = true
 
 		vtOff := r.off
 		vt, ok := r.u32()
@@ -259,12 +262,27 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 			st.structf(infoOff, "tensor_count %d exceeds the bytes present", tensorCount)
 			return st.meta, nil
 		}
-		nb, ok := r.take(nl)
-		if !ok {
-			st.structf(infoOff, "tensor name of %d bytes runs past EOF", nl)
-			return st.meta, nil
+		var name string
+		if nl > maxTensorNameBytes {
+			st.structf(infoOff, "tensor name length %d exceeds %d", nl, maxTensorNameBytes)
+			prefix, ok := r.take(256)
+			if !ok {
+				st.structf(infoOff, "tensor name runs past EOF")
+				return st.meta, nil
+			}
+			name = string(prefix) + "..."
+			if !r.skip(nl - 256) {
+				st.structf(infoOff, "tensor name runs past EOF")
+				return st.meta, nil
+			}
+		} else {
+			nb, ok := r.take(nl)
+			if !ok {
+				st.structf(infoOff, "tensor name of %d bytes runs past EOF", nl)
+				return st.meta, nil
+			}
+			name = string(nb)
 		}
-		name := string(nb)
 
 		ndOff := r.off
 		nd, ok := r.u32()
@@ -506,6 +524,8 @@ type state struct {
 	// SC4N-PARTIAL-SLICE instead of as a structural violation per tensor.
 	partial  bool
 	eofSkips int
+	// retained is the aggregate chat-template text kept in Meta.Templates.
+	retained int64
 }
 
 func (st *state) emit(r *report.Rule, off int64, ev string) {
@@ -781,12 +801,23 @@ func (st *state) considerString(key string, off int64, b []byte) {
 	// SC4N-JINJA-DANGEROUS-GLOBAL, -DYNAMIC-NAME, -INCLUDE or -RAW, nor the
 	// corroboration logic that decides whether an instruction phrase deserves the
 	// high-severity rule.
-	if isTemplateKey(key) && len(st.meta.Templates) < maxTemplates {
+	if isTemplateKey(key) {
 		tmpl := string(b)
-		st.meta.Templates = append(st.meta.Templates, tmpl)
+		// Analysis runs for every template, independent of retention: a later
+		// template must not become invisible because an earlier one filled the
+		// budget. Retention is the separate, bounded copy in Meta.Templates.
 		if st.sink != nil {
 			jinja.Analyze(st.sink, off, key, tmpl)
 		}
+		if st.retained+int64(len(tmpl)) > retainedCap(st.lim) {
+			if st.retained <= retainedCap(st.lim) {
+				st.limit(limits.RuleRetained, "MaxRetainedText", st.retained+int64(len(tmpl)), retainedCap(st.lim), "chat template retention")
+				st.retained = retainedCap(st.lim) + 1
+			}
+			return
+		}
+		st.retained += int64(len(tmpl))
+		st.meta.Templates = append(st.meta.Templates, tmpl)
 	}
 }
 
@@ -948,6 +979,17 @@ func (r *reader) take(n uint64) ([]byte, bool) {
 	return b, true
 }
 
+// skip advances past n bytes without materialising them. It has the same bounds
+// check as take, so an oversized key or tensor name is consumed and the value
+// that follows is still parsed.
+func (r *reader) skip(n uint64) bool {
+	if r.off > r.size || n > uint64(r.size-r.off) {
+		return false
+	}
+	r.off += int64(n)
+	return true
+}
+
 func (r *reader) u8() (byte, bool) {
 	b, ok := r.take(1)
 	if !ok {
@@ -1066,6 +1108,16 @@ func defaultLimits(l *limits.Limits) {
 	if l.MaxStringBlob == 0 {
 		l.MaxStringBlob = limits.Default().MaxStringBlob
 	}
+	if l.MaxRetainedText == 0 {
+		l.MaxRetainedText = limits.Default().MaxRetainedText
+	}
+}
+
+func retainedCap(l limits.Limits) int64 {
+	if l.MaxRetainedText > 0 {
+		return l.MaxRetainedText
+	}
+	return limits.Default().MaxRetainedText
 }
 
 func trunc(s string, n int) string {
