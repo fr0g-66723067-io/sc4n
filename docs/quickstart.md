@@ -12,12 +12,12 @@ artifacts from the tag if you would rather not download them.
 
 ```sh
 # 1. released binary (linux/amd64 shown; darwin and windows builds are published too)
-curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.0/sc4n_v1.0.0_linux_amd64
-curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.0/SHA256SUMS
-sha256sum -c SHA256SUMS --ignore-missing && chmod +x sc4n_v1.0.0_linux_amd64
+curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/sc4n_v1.0.1_linux_amd64
+curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing && chmod +x sc4n_v1.0.1_linux_amd64
 
 # 2. container, which is the right way to scan bytes you do not trust
-docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.0
+docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.1
 
 # 3. from source: Go 1.27.3, no code generation, no third-party tooling
 git clone https://github.com/fr0g-66723067-io/sc4n && cd sc4n
@@ -174,7 +174,7 @@ For bytes you do not trust, run the container. `--network=none` is safe because
 docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
   --user "$(id -u):$(id -g)" \
   -v "$PWD:/scan:ro" \
-  ghcr.io/fr0g-66723067-io/sc4n:v1.0.0 \
+  ghcr.io/fr0g-66723067-io/sc4n:v1.0.1 \
   scan -format sarif -out /tmp/sc4n.sarif -fail-on high /scan
 ```
 

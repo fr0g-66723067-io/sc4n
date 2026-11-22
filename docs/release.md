@@ -4,9 +4,9 @@
 reproducible by anyone:
 
 ```sh
-git tag -a v1.0.0 -m "sc4n v1.0.0"
+git tag -s v1.0.1 -m "sc4n v1.0.1"
 make release                      # builds, verifies, builds the image, verifies it
-git push origin v1.0.0            # the tag, not the branch — CI does the rest
+git push origin v1.0.1            # the tag, not the branch — CI does the rest
 ```
 
 `make release` is `release-binaries` + `release-image` + `verify-release`:
@@ -66,10 +66,11 @@ verify-release: ok
 Nothing is published from a branch. A tag that fails the test gate publishes
 nothing, because both publishing jobs `needs: test`.
 
-`v1.0.0` is published: the five binaries and `SHA256SUMS` are assets on the
-release, and the image is `ghcr.io/fr0g-66723067-io/sc4n:v1.0.0` and `:latest`.
-Both are public; neither the assets nor the image need credentials, and
-`make release` produces exactly the same artifacts from the tag.
+`v1.0.1` is the current release: the five binaries and `SHA256SUMS` are assets on
+the release, and the image is `ghcr.io/fr0g-66723067-io/sc4n:v1.0.1` and
+`:latest`. `v1.0.0` and `v1.0.1-rc1` remain on the release page. Both the assets
+and the image are public; neither needs credentials, and `make release` produces
+exactly the same artifacts from the tag.
 
 ## Provenance
 
@@ -174,7 +175,7 @@ make test                         # vet + test + test -race
 make fixtures && git diff --exit-code testdata/fixtures
 make rules-doc && git diff --exit-code docs/rules.md
 make sarif-check                  # skipped loudly without python3 + jsonschema
-VERSION=v1.0.0 make release       # the same artifacts CI will build
+VERSION=v1.0.1 make release       # the same artifacts CI will build
 ```
 
 `make release` with `VERSION` overridden is how to prove a tag will work before

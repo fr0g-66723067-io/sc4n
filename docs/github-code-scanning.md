@@ -36,7 +36,7 @@ jobs:
           docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work" \
-            ghcr.io/fr0g-66723067-io/sc4n:v1.0.0 \
+            ghcr.io/fr0g-66723067-io/sc4n:v1.0.1 \
             scan -format sarif -out /work/sc4n.sarif -fail-on high /work
           echo "$?" > /tmp/sc4n-status
 

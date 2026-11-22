@@ -49,18 +49,18 @@ prose copies of them drifted twice.
 
 ```sh
 # released binary (linux/amd64; arm64, darwin and windows builds are published too)
-curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.0/sc4n_v1.0.0_linux_amd64
-curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.0/SHA256SUMS
+curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/sc4n_v1.0.1_linux_amd64
+curl -LO https://github.com/fr0g-66723067-io/sc4n/releases/download/v1.0.1/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
 
 # container, which is the right way to scan bytes you do not trust
-docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.0
+docker pull ghcr.io/fr0g-66723067-io/sc4n:v1.0.1
 
 # or from source: Go 1.27.3, no code generation, no third-party tooling
 go build -o sc4n ./cmd/sc4n
 ```
 
-`v1.0.0` is published by `.github/workflows/release.yml`: five static binaries and
+`v1.0.1` is published by `.github/workflows/release.yml`: five static binaries and
 `SHA256SUMS` on the release page, and the image in GHCR. Both are public and need
 no authentication. Nothing is published from a branch, and `make release` builds
 and verifies the same artifacts locally.
@@ -86,7 +86,7 @@ and states what each check does and does not prove.
 # scan untrusted bytes in the container (scan never dials, so no network needed)
 docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g \
   --user "$(id -u):$(id -g)" -v "$PWD:/scan:ro" \
-  ghcr.io/fr0g-66723067-io/sc4n:v1.0.0 scan -fail-on high /scan
+  ghcr.io/fr0g-66723067-io/sc4n:v1.0.1 scan -fail-on high /scan
 ```
 
 [`docs/quickstart.md`](docs/quickstart.md) is the ten-minute version: install, a
