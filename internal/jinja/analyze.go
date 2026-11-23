@@ -383,10 +383,19 @@ func (a *analyzer) analyzeSet(inner []token) {
 	// is the alias case. Last assignment wins.
 	if len(inner) > 1 && inner[1].kind == kindName {
 		name := inner[1].val
-		if len(rhs) == 1 && rhs[0].kind == kindString {
+		switch {
+		case len(rhs) == 1 && rhs[0].kind == kindString:
 			a.aliasValue[name] = rhs[0].val
-		} else if len(rhs) == 1 && rhs[0].kind == kindName {
+		case len(rhs) == 1 && rhs[0].kind == kindName:
 			a.aliasGlobal[name] = rhs[0].val
+		default:
+			// `{% set k = p ~ q %}` builds the subscript key from pieces, so the
+			// binding has to be folded through the values already bound or a
+			// computed subscript stays unresolvable. Folding only constants keeps
+			// ordinary template arithmetic out of the alias table.
+			if s, ok := a.foldStrings(rhs); ok {
+				a.aliasValue[name] = s
+			}
 		}
 	}
 	if simpleRHS(rhs) || !buildsAName(rhs) {
@@ -535,10 +544,7 @@ func (a *analyzer) expressions() {
 				a.emit(rulePyObject, t.off, "template reaches the Python name "+t.val)
 				a.calledReach(i, i)
 			}
-			recv := t.val
-			if v, ok := a.aliasGlobal[recv]; ok {
-				recv = v
-			}
+			recv := a.resolveAlias(t.val)
 			if dangerousGlobals[recv] && i+1 < len(toks) && toks[i+1].kind == kindOp &&
 				(toks[i+1].val == "." || toks[i+1].val == "[") {
 				a.emit(ruleDangerousGlobal, t.off, t.val+" is used as the receiver of attribute/subscript access")
@@ -736,6 +742,54 @@ func (a *analyzer) chainCall(last int) (int, bool) {
 	return k, false
 }
 
+// foldStrings returns the constant a {% set %} right-hand side builds, when every
+// operand is a string literal or a name already bound to one, joined by `~` or
+// `+`. It exists so `{% set k = p ~ q %}` yields the key the subscript uses;
+// anything else (a filter, a call, an attribute) is not folded.
+func (a *analyzer) foldStrings(rhs []token) (string, bool) {
+	if len(rhs) < 3 || len(rhs)%2 == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	for k := range len(rhs) {
+		t := rhs[k]
+		if k%2 == 1 {
+			if t.kind != kindOp || (t.val != "~" && t.val != "+") {
+				return "", false
+			}
+			continue
+		}
+		switch t.kind {
+		case kindString:
+			b.WriteString(t.val)
+		case kindName:
+			v, ok := a.aliasValue[t.val]
+			if !ok {
+				return "", false
+			}
+			b.WriteString(v)
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+// resolveAlias follows strict {% set a = b %} bindings, bounded so a cycle cannot
+// spin. One hop was not enough: `{% set a = lipsum %}{% set f = a %}` resolved f
+// to a and stopped, so the receiver of `f[k]` was never tested against the
+// dangerous globals.
+func (a *analyzer) resolveAlias(name string) string {
+	for hops := 0; hops < 8; hops++ {
+		next, ok := a.aliasGlobal[name]
+		if !ok || next == name {
+			break
+		}
+		name = next
+	}
+	return name
+}
+
 // chargeChain spends one unit of the chain/group budget. Overflow is reported
 // once and stops the walk that asked.
 func (a *analyzer) chargeChain() bool {
@@ -797,6 +851,17 @@ func (a *analyzer) attrPathFilters(i int) {
 		}
 		a.checkPathValue(toks[k+2])
 	}
+	// selectattr, rejectattr and groupby take the attribute path as their first
+	// positional argument, so `|groupby('__globals__.os.popen')` walked a dunder
+	// path with no finding while the keyword spelling was checked.
+	if positionalAttrFilters[toks[i+1].val] && i+3 < end && toks[i+3].kind == kindString {
+		a.checkPathValue(toks[i+3])
+	}
+}
+
+// positionalAttrFilters are the filters whose attribute path is positional.
+var positionalAttrFilters = map[string]bool{
+	"selectattr": true, "rejectattr": true, "groupby": true,
 }
 
 func (a *analyzer) checkPathValue(tok token) {

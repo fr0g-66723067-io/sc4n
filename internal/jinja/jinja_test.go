@@ -396,3 +396,47 @@ func TestChainAnalysisIsBudgeted(t *testing.T) {
 		t.Fatalf("chain budget was silent; findings=%v", c.Findings())
 	}
 }
+
+// TestPositionalAttributeFilterReportsDunder covers the spelling the keyword loop
+// could not see: selectattr, rejectattr and groupby take the attribute path as
+// their first positional argument, so `|groupby('__globals__.os.popen')` walked a
+// dunder path and produced no finding at all.
+func TestPositionalAttributeFilterReportsDunder(t *testing.T) {
+	for _, tmpl := range []string{
+		`{{ ([lipsum] | groupby('__globals__.os.popen'))[0][0]('id') }}`,
+		`{{ ([lipsum] | selectattr('__globals__')) | list }}`,
+		`{{ ([lipsum] | rejectattr('__class__')) | list }}`,
+	} {
+		fs := analyze(t, tmpl)
+		if ids(fs)["SC4N-JINJA-PY-OBJECT"] == 0 {
+			t.Fatalf("positional attribute path %q was not reported; findings=%v", tmpl, fs)
+		}
+	}
+}
+
+// TestTwoHopAliasWithBuiltKeyReportsPyObject pins the data flow the one-hop alias
+// table and the literal-only computed key could not follow: the receiver is an
+// alias of an alias, and the subscript key is assembled from two bound strings.
+func TestTwoHopAliasWithBuiltKeyReportsPyObject(t *testing.T) {
+	tmpl := `{% set a = lipsum %}{% set f = a %}{% set p = '__g' %}{% set q = 'lobals__' %}` +
+		`{% set k = p ~ q %}{{ f[k]['os']['popen']('id') }}`
+	fs := analyze(t, tmpl)
+	if len(fs) == 0 {
+		t.Fatal("a two-hop alias with a built key produced no finding")
+	}
+}
+
+// TestTokenBudgetBoundsTheBackingArray pins that the cap is enforced while
+// tokenising: a template of many short expressions used to be tokenised in full
+// and only then sliced, so the analysis kept a backing array of every token the
+// template could produce.
+func TestTokenBudgetBoundsTheBackingArray(t *testing.T) {
+	tmpl := strings.Repeat("{{a}}", maxJinjaTokens/2)
+	toks, _ := lex(tmpl)
+	if len(toks) != maxJinjaTokens {
+		t.Fatalf("tokens = %d, want the cap %d", len(toks), maxJinjaTokens)
+	}
+	if cap(toks) != maxJinjaTokens {
+		t.Fatalf("cap(tokens) = %d, want the cap %d (the backing array was kept)", cap(toks), maxJinjaTokens)
+	}
+}
