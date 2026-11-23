@@ -173,7 +173,7 @@ func key(repoID, rel string) string { return repoID + "\x00" + rel }
 // name a file on disk.
 func topPath(artifact string) string {
 	top, _, _ := strings.Cut(artifact, ":")
-	return strings.TrimSuffix(top, ".slice")
+	return top
 }
 
 // splitTop splits a repo-relative artifact path into repo id and file path.

@@ -30,6 +30,7 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/polyglot"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 	"github.com/fr0g-66723067-io/sc4n/internal/stringscan"
 )
@@ -48,6 +49,11 @@ const (
 
 // nativeWindow is the window the segment scan reads at a time.
 const nativeWindow = 1 << 20
+
+const (
+	maxSegmentScanBytes = 16 << 20
+	maxNativeCandidates = 64
+)
 
 func init() {
 	artifact.RegisterFormat(artifact.Info{
@@ -150,6 +156,12 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 // artifact, so a payload in the middle of a large segment region would otherwise
 // never be seen at all.
 func scanNative(ctx *artifact.Ctx, s source.Source, base, size int64) {
+	if size > maxSegmentScanBytes {
+		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxSegmentScan", size, maxSegmentScanBytes,
+			"ExecuTorch segment scan")
+		size = maxSegmentScanBytes
+	}
+	attempts := 0
 	for off := int64(0); off < size; off += nativeWindow {
 		n := size - off
 		if n > nativeWindow {
@@ -162,15 +174,26 @@ func scanNative(ctx *artifact.Ctx, s source.Source, base, size int64) {
 			}
 			continue
 		}
-		kind, at, ok := bytescan.FindNative(b)
-		if !ok {
-			continue
+		for i := 0; i < len(b); i++ {
+			if bytescan.MagicAt(b[i:]) == bytescan.NativeNone {
+				continue
+			}
+			attempts++
+			if attempts > maxNativeCandidates {
+				limits.Emit(ctx.Sink, limits.RuleEntries, "MaxNativeCandidates",
+					int64(attempts), maxNativeCandidates, "ExecuTorch segment native candidates")
+				return
+			}
+			abs := base + off + int64(i)
+			kind, ok := polyglot.ValidateNativeHeader(s, s.Size(), abs)
+			if !ok {
+				continue
+			}
+			ctx.Sink.EmitExtra(RuleNative, abs,
+				"a validated "+kind.String()+" header sits inside the ExecuTorch segment data, which the "+
+					"runtime maps and hands to the device backend",
+				map[string]string{"kind": kind.String(), "offset": strconv.FormatInt(abs, 10)})
 		}
-		abs := base + off + int64(at)
-		ctx.Sink.EmitExtra(RuleNative, abs,
-			"a validated "+kind.String()+" header sits inside the ExecuTorch segment data, which the "+
-				"runtime maps and hands to the device backend",
-			map[string]string{"kind": kind.String(), "offset": strconv.FormatInt(abs, 10)})
 	}
 }
 
@@ -185,6 +208,10 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 		return artifact.FormatUnknown, false
 	}
 	if !isMagic(head[offFileMagic:]) {
+		return artifact.FormatUnknown, false
+	}
+	root := binary.LittleEndian.Uint32(head[offRootOffset:])
+	if root < 4 || int64(root) >= s.Size() {
 		return artifact.FormatUnknown, false
 	}
 	return artifact.FormatPTE, true

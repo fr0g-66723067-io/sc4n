@@ -41,6 +41,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/malice"
@@ -50,7 +51,44 @@ const (
 	exitOK     = 0
 	exitFailed = 1 // at least one artifact could not be confirmed
 	exitUsage  = 2
+
+	// The container's stdout/stderr and the files it leaves behind are
+	// attacker-influenced: a payload can print forever or write a huge trace.
+	// The harness keeps a bounded tail so a hostile load cannot exhaust the
+	// host's memory before it is graded.
+	maxDockerOutput = 64 << 10
+	maxTraceBytes   = 8 << 20
+	maxResultBytes  = 1 << 20
 )
+
+// cappedBuffer accepts every write (so the child never blocks on a full pipe)
+// but retains only the first max bytes. Stdout and stderr may be copied
+// concurrently, so the mutex is required.
+type cappedBuffer struct {
+	mu  sync.Mutex
+	max int
+	buf bytes.Buffer
+}
+
+func newCappedBuffer(max int) *cappedBuffer { return &cappedBuffer{max: max} }
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room := b.max - b.buf.Len(); room > 0 {
+		if len(p) < room {
+			room = len(p)
+		}
+		_, _ = b.buf.Write(p[:room])
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
@@ -186,16 +224,17 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 		"--tmpfs", "/tmp:rw,size=64m",
 		"--tmpfs", "/home/worker:rw,size=64m",
 		"--memory", "2g", "--pids-limit", "128", "--cpus", "2",
+		"--ulimit", "fsize=67108864:67108864",
 		"--cap-add", "SYS_PTRACE", "--security-opt", "no-new-privileges",
 		"-v", mount, "-v", outDir + ":/out",
-		o.image, target, "/out/result.json",
+		o.image, target, "/tmp/result.json",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", runArgs...) // #nosec G204 -- fixed image, operator-supplied artifact
-	var tail bytes.Buffer
-	cmd.Stdout = &tail
-	cmd.Stderr = &tail
+	tail := newCappedBuffer(maxDockerOutput)
+	cmd.Stdout = tail
+	cmd.Stderr = tail
 	runErr := cmd.Run()
 	if ctx.Err() != nil {
 		// The client was killed; the container it started may not have been.
@@ -227,8 +266,10 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 		r.Error = res.Error
 		r.MissingModules = res.MissingModules
 	}
-	if trace, terr := os.ReadFile(filepath.Join(outDir, "trace")); terr == nil {
-		applyTrace(r, string(trace))
+	if trace, terr := readTail(filepath.Join(outDir, "trace"), maxTraceBytes); terr == nil {
+		applyTrace(r, trace)
+	} else if r.Error == "" {
+		r.Error = "trace: " + terr.Error()
 	}
 	if r.Error == "" && r.Loaded {
 		r.Error = ""
@@ -294,15 +335,69 @@ type loaderResult struct {
 }
 
 func readResult(path string) (*loaderResult, error) {
-	b, err := os.ReadFile(path)
+	b, truncated, err := readCappedFile(path, maxResultBytes)
 	if err != nil {
 		return nil, fmt.Errorf("the container wrote no loader result: %w", err)
+	}
+	if truncated {
+		return nil, fmt.Errorf("loader result exceeds %d bytes", maxResultBytes)
 	}
 	var r loaderResult
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, fmt.Errorf("loader result: %w", err)
 	}
 	return &r, nil
+}
+
+// readCappedFile reads at most max bytes and reports whether the file was
+// larger. A payload can write a multi-gigabyte result; nothing here needs more
+// than the first megabyte to decide what happened.
+func readCappedFile(path string, max int) ([]byte, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(b) > max {
+		return b[:max], true, nil
+	}
+	return b, false, nil
+}
+
+// readTail returns the last max bytes of path, suffixing a truncation marker to
+// the returned text when the file was larger. The trace is attacker-influenced
+// and can be arbitrarily large; only the tail is needed because a load's last
+// effects are the ones that matter when the file was cut short.
+func readTail(path string, max int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	off := fi.Size() - max
+	if off < 0 {
+		off = 0
+	}
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return "", err
+	}
+	b, err := io.ReadAll(io.LimitReader(f, max))
+	if err != nil {
+		return "", err
+	}
+	s := string(b)
+	if fi.Size() > max {
+		s += fmt.Sprintf("\n; trace truncated at %d bytes", max)
+	}
+	return s, nil
 }
 
 func isRegularFile(path string) bool {

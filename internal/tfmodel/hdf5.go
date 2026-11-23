@@ -72,8 +72,9 @@ func (hdf5Parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 // region and applies the Keras class analysis to every document it finds.
 func scanHDF5Region(ctx *artifact.Ctx, base int64, region []byte) {
 	cap := ctx.Limits.MaxStringBlob
+	budget := &kerasBudget{}
 	st := extractJSONObjects(region, cap, hdf5MaxObjects, func(blob jsonBlob) {
-		analyzeKerasValue(ctx, base+blob.off, "hdf5 model_config", blob.doc, 0)
+		analyzeKerasValue(ctx, base+blob.off, "hdf5 model_config", blob.doc, 0, budget)
 	})
 	if st.overBudget {
 		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxRecoveryBytes", st.spent, st.budget,

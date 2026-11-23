@@ -141,7 +141,41 @@ func analyzeKerasDocument(ctx *artifact.Ctx, base int64, what string, data []byt
 		scanTextCapped(ctx, base, what, string(data))
 		return
 	}
-	analyzeKerasValue(ctx, base, what, doc, 0)
+	analyzeKerasValue(ctx, base, what, doc, 0, &kerasBudget{})
+}
+
+const (
+	maxKerasPythonRuns  = 256
+	maxKerasPythonBytes = 1 << 20
+)
+
+// kerasBudget bounds the code-value and base64 fan-out of one Keras document.
+// A config can hold thousands of code strings; without a budget every one of
+// them reaches the Python analyzer and the shared indicator engine.
+type kerasBudget struct {
+	runs, bytes   int64
+	runsReported  bool
+	bytesReported bool
+}
+
+func (b *kerasBudget) charge(ctx *artifact.Ctx, n int64) bool {
+	b.runs++
+	b.bytes += n
+	if b.runs > maxKerasPythonRuns {
+		if !b.runsReported {
+			b.runsReported = true
+			limits.Emit(ctx.Sink, limits.RuleEntries, "MaxKerasPythonRuns", b.runs, maxKerasPythonRuns, "Keras code values")
+		}
+		return false
+	}
+	if b.bytes > maxKerasPythonBytes {
+		if !b.bytesReported {
+			b.bytesReported = true
+			limits.Emit(ctx.Sink, limits.RuleEntries, "MaxKerasPythonBytes", b.bytes, maxKerasPythonBytes, "Keras code values")
+		}
+		return false
+	}
+	return true
 }
 
 // maxJSONDepth bounds the recursive walk. Real Keras configs nest well under
@@ -152,7 +186,7 @@ const maxJSONDepth = 64
 // order so the emission order is deterministic even against a document with many
 // classes (the report sorts anyway, but a finding cap must not depend on Go's map
 // iteration order).
-func analyzeKerasValue(ctx *artifact.Ctx, base int64, what string, v any, depth int) {
+func analyzeKerasValue(ctx *artifact.Ctx, base int64, what string, v any, depth int, budget *kerasBudget) {
 	if depth > maxJSONDepth {
 		return
 	}
@@ -172,15 +206,15 @@ func analyzeKerasValue(ctx *artifact.Ctx, base int64, what string, v any, depth 
 				}
 			case codeKeys[k]:
 				if s, ok := val.(string); ok {
-					analyzeCodeValue(ctx, base, what, k, s)
+					analyzeCodeValue(ctx, base, what, k, s, budget)
 					continue
 				}
 			}
-			analyzeKerasValue(ctx, base, what, val, depth+1)
+			analyzeKerasValue(ctx, base, what, val, depth+1, budget)
 		}
 	case []any:
 		for _, e := range t {
-			analyzeKerasValue(ctx, base, what, e, depth+1)
+			analyzeKerasValue(ctx, base, what, e, depth+1, budget)
 		}
 	}
 }
@@ -223,15 +257,22 @@ func lastClassComponent(name string) string {
 // analyzeCodeValue scans one code-shaped string with the shared indicator engine
 // and, when the text looks like Python, with the Python analyzer. A `code` value
 // is base64 in the Lambda config, so it is decoded first.
-func analyzeCodeValue(ctx *artifact.Ctx, base int64, what, key, val string) {
+func analyzeCodeValue(ctx *artifact.Ctx, base int64, what, key, val string, budget *kerasBudget) {
 	if val == "" {
 		return
 	}
 	scanTextCapped(ctx, base, key+" in "+what, val)
+	if budget != nil && !budget.charge(ctx, int64(len(val))) {
+		return
+	}
 
 	text := val
 	if key == "code" {
 		if b, ok := decodeBase64Loose(val); ok {
+			if budget != nil && !budget.charge(ctx, int64(len(b))) {
+				scanTextCapped(ctx, base, key+" (base64-decoded) in "+what, string(b))
+				return
+			}
 			// The decoded variant is reported with its own label, so the Python
 			// analysis below needs no note about it.
 			text = string(b)

@@ -208,3 +208,12 @@ func TestPackageArchivePointerIsNotAHighFinding(t *testing.T) {
 			"archive as a .tar.gz", seen)
 	}
 }
+
+func TestSetupHookInTopLevelIfSuiteIsReported(t *testing.T) {
+	want(t, run(t, "setup.py", "if True:\n    import os\n    os.system('id')\n"), "SC4N-REPO-SETUP-HOOK")
+}
+
+func TestBackendPathShadowingAllowlistedBackendIsReported(t *testing.T) {
+	got := run(t, "pyproject.toml", "[build-system]\nrequires = []\nbuild-backend = \"setuptools.build_meta\"\nbackend-path = [\"src\"]\n")
+	want(t, got, "SC4N-REPO-BACKEND-PATH")
+}

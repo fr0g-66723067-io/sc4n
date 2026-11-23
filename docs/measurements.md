@@ -163,6 +163,33 @@ at 360 MB/s opcode-dense, indicator engine at 131 MB/s and why it is not 1 GB/s)
 are in [`docs/architecture.md`](architecture.md#performance) with their measurement
 conditions.
 
+### Before and after the Aikido hardening round
+
+The budgets added to the pickle walk, the indicator scan and the pickle state-dict
+walker are measured against the commit the round started from. Both runs are
+`make bench` on the same host, one after the other; the numbers are a report, not
+a gate.
+
+| benchmark | before (`08d12d3`) | after (`537d196`) |
+|---|---|---|
+| `BenchmarkEntropy` | 550583 ns/op, 1904.48 MB/s, 0 allocs | 706485 ns/op, 1484.22 MB/s, 0 allocs |
+| `BenchmarkFindNative` | 3331964 ns/op, 314.70 MB/s | 3310962 ns/op, 316.70 MB/s |
+| `BenchmarkWalkStateDict` | 3843532 ns/op, 307.01 MB/s, 14736 allocs | 4518490 ns/op, 261.15 MB/s, 14739 allocs |
+| `BenchmarkWalkLargeBlobs` | 61575 ns/op, 17039.43 MB/s, 108 allocs | 63779 ns/op, 16450.54 MB/s, 111 allocs |
+| `BenchmarkHeader` | 5504 ns/op, 285794.67 MB/s | 5365 ns/op, 293200.95 MB/s |
+| `BenchmarkScanClean` | 13235125 ns/op, 79.23 MB/s | 12916163 ns/op, 81.19 MB/s |
+| `BenchmarkSecretTokenShapes/clean` | 5431329 ns/op, 243.03 MB/s, 0 allocs | 5296917 ns/op, 249.20 MB/s, 0 allocs |
+| `BenchmarkSecretTokenShapes/tokens` | 154730 ns/op, 146.06 MB/s, 800 allocs | 151722 ns/op, 148.96 MB/s, 800 allocs |
+| `BenchmarkScanIndicators` | 29885919 ns/op, 34.13 MB/s, 120003 allocs | 29838972 ns/op, 34.18 MB/s, 120003 allocs |
+
+`BenchmarkEntropy` is unchanged code and the first after-run was a cold outlier:
+five repeats measured 523912–587784 ns/op (1784–2001 MB/s, still zero
+allocations). The one real cost is the three extra allocations in the state-dict
+walker, which are the per-stream budget and member-count bookkeeping; the walk is
+about 15% slower at 307 → 261 MB/s, and that is the price of bounding a stream
+that previously could retain every walked object. The indicator scan, which runs
+on every scanned byte, is unchanged within noise.
+
 ## Limits
 
 These are the places where the numbers above are *not* evidence of absence:

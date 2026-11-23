@@ -166,6 +166,9 @@ func mutate(ctx context.Context, o options, out string, g graphOp, seed string) 
 		return "", err
 	}
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network=none",
+		"--read-only", "--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges", "--tmpfs", "/tmp",
+		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		"-v", seedDir+":/s:ro",
 		"-v", dir+":/o",
 		"-v", py+":/opt/sc4nlab:ro",

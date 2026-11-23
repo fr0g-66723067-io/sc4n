@@ -84,7 +84,13 @@ sc4nconfirm -artifact model.bin -out attestation.json
 
 The container is `--network=none`, `--read-only`, tmpfs scratch, canary
 credentials, `--memory`/`--pids-limit`/`--cpus`, and one capability (`SYS_PTRACE`,
-because `strace` is the effect source a native payload cannot blind).
+because `strace` is the effect source a native payload cannot blind). The
+entrypoint starts as root only to plant the canaries and run the tracer; the
+Python loader drops to uid 65534 before it opens the artifact, so the payload
+cannot write the root-owned `/out` or `/tmp/trace`. The container's file-size
+limit is 64 MiB; the host keeps the first 64 KiB of container output and the last
+8 MiB of the trace, and treats the trace rather than `result.json` as the
+authoritative effect record.
 
 **2. The same loader in a VM or pod.** `tools/sc4nconfirm/image/load.py` is the
 whole loader matrix and it has no dependency on Docker: copy it into a throwaway

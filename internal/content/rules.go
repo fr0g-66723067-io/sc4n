@@ -221,6 +221,24 @@ var (
 		Tags: []string{"gitattributes", "command-execution"},
 	})
 
+	// ruleGitattributesDiffName is info: naming a built-in diff driver is a
+	// syntax-highlighting convention, but a local Git config can attach a
+	// textconv command to that name, so it is recorded without failing a benign
+	// repository.
+	ruleGitattributesDiffName = define(report.Rule{
+		ID:         "SC4N-GITATTRIBUTES-DIFF-NAME",
+		Title:      ".gitattributes names a built-in diff driver",
+		Severity:   report.SeverityInfo,
+		Confidence: report.ConfidenceLow,
+		CWE:        []string{"CWE-829"},
+		Class:      "gitattributes",
+		Description: "A `.gitattributes` line assigns `diff=<built-in>` for a driver Git ships. The name " +
+			"itself is a highlighting convention, but a local Git config may define a `textconv` command " +
+			"under the same driver name, so the attribute is recorded without failing a benign repository.",
+		Refs: []string{"https://git-scm.com/docs/gitattributes"},
+		Tags: []string{"gitattributes"},
+	})
+
 	// ruleNotUTF8 is low: the fallback classifier claimed the artifact as text
 	// (no NUL byte in its first kilobyte) but the bytes are not valid UTF-8, so
 	// the text-only layers — the model-card detector, the tokenizer analyser, the

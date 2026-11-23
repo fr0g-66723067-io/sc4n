@@ -101,7 +101,7 @@ func TestParseHeaderLiteral(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h, err := parseNPYHeader([]byte(tc.text))
+			h, err := parseNPYHeader([]byte(tc.text), limits.Default(), nil)
 			if tc.ok && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -181,7 +181,7 @@ func TestParseNPYStructuredDescr(t *testing.T) {
 		"{'descr': [('a', [('x', '<f4'), ('y', '<f4')])], 'shape': (3,)}",
 		"{'descr': [('a', '<i4'), ('b', '<f8')], 'shape': (3,)}",
 	} {
-		hh, err := parseNPYHeader([]byte(h))
+		hh, err := parseNPYHeader([]byte(h), limits.Default(), nil)
 		if err != nil {
 			t.Errorf("parseNPYHeader(%q) = %v, want nil", h, err)
 			continue
@@ -192,7 +192,7 @@ func TestParseNPYStructuredDescr(t *testing.T) {
 	}
 
 	// A descr that is neither a string nor a list is still rejected.
-	if _, err := parseNPYHeader([]byte("{'descr': 3, 'shape': (1,)}")); err == nil {
+	if _, err := parseNPYHeader([]byte("{'descr': 3, 'shape': (1,)}"), limits.Default(), nil); err == nil {
 		t.Error("numeric descr accepted")
 	}
 	// A structured dtype with an unsizeable shape is still a structural finding.
@@ -292,12 +292,12 @@ func TestParseNPYObjectFieldDispatchesPickle(t *testing.T) {
 // `fatal error: stack overflow` — not a panic, so no recovery could report it.
 func TestParseNPYHeaderDepthIsBounded(t *testing.T) {
 	deep := "{'descr': " + strings.Repeat("[", maxLitDepth+1) + ", 'shape': (1,)}"
-	if _, err := parseNPYHeader([]byte(deep)); err == nil {
+	if _, err := parseNPYHeader([]byte(deep), limits.Default(), nil); err == nil {
 		t.Fatal("a descr nested past maxLitDepth was accepted")
 	}
 	// A descr nested within the bound still parses.
 	within := "{'descr': " + strings.Repeat("[", maxLitDepth-1) + strings.Repeat("]", maxLitDepth-1) + ", 'shape': (1,)}"
-	h, err := parseNPYHeader([]byte(within))
+	h, err := parseNPYHeader([]byte(within), limits.Default(), nil)
 	if err != nil {
 		t.Fatalf("a descr nested within maxLitDepth was rejected: %v", err)
 	}
@@ -337,5 +337,23 @@ func TestParseNPYDeterministic(t *testing.T) {
 		if a[i].RuleID != b[i].RuleID || a[i].Offset != b[i].Offset {
 			t.Fatalf("finding %d differs: %+v vs %+v", i, a[i], b[i])
 		}
+	}
+}
+
+func TestNPYShapeRankAndRetainedTextAreCapped(t *testing.T) {
+	header := "{'descr': '" + strings.Repeat("a", 32) + "', 'shape': (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33)}"
+	l := limits.Default()
+	l.MaxStringBlob = 8
+	l.MaxRetainedText = 16
+	col := report.NewCollector(0)
+	if _, err := parseNPYHeader([]byte(header), l, col.For("x.npy")); err == nil {
+		t.Fatal("a 33-dimension shape was accepted")
+	}
+	got := map[string]bool{}
+	for _, f := range col.Findings() {
+		got[f.RuleID] = true
+	}
+	if !got["SC4N-LIMIT-STRING"] {
+		t.Fatalf("header string cap was silent; findings=%v", col.Findings())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	// The campaign runs the real scanner, so it needs the format/model registry
@@ -12,7 +13,6 @@ import (
 	// artifact package's built-in sniffers: every pickle, GGUF and safetensors
 	// file is classified as text and the campaign reports a clean corpus.
 	_ "github.com/fr0g-66723067-io/sc4n/internal/formats"
-	"github.com/fr0g-66723067-io/sc4n/internal/policy"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/scan"
 )
@@ -69,12 +69,12 @@ func ScanTree(ctx context.Context, o Options) (*ScanResult, error) {
 	}
 
 	cfg := scan.Config{
-		Paths:       []string{repos},
-		Limits:      o.Limits,
-		Jobs:        o.ScanJobs,
-		Root:        repos,
-		Partial:     partialFiles(o),
-		MaxFindings: 0,
+		Paths:    []string{repos},
+		Limits:   o.Limits,
+		Jobs:     o.ScanJobs,
+		Root:     repos,
+		Partial:  partialFiles(o),
+		Baseline: prefixBaseline(repos, o.Baseline),
 	}
 	res, err := scan.Run(ctx, cfg)
 	if res == nil {
@@ -87,16 +87,8 @@ func ScanTree(ctx context.Context, o Options) (*ScanResult, error) {
 	rep.Unreadable = res.Unreadable
 	rep.Cancelled = res.Cancelled
 	relativise(repos, rep)
-	// The baseline is applied here rather than inside the scan engine because a
-	// baseline fingerprint covers the artifact path, and the campaign's paths are
-	// only repo-relative after relativise: a fingerprint taken inside the walk
-	// would carry the absolute path and match nothing in the previous campaign's
-	// scan.json.
-	suppressed := 0
-	if len(o.Baseline) > 0 {
-		rep.Findings, suppressed = policy.Unsuppressed(rep.Findings, o.Baseline)
-		rep.Suppressed = suppressed
-	}
+	suppressed := res.Suppressed
+	rep.Suppressed = suppressed
 	if werr := writeReportJSON(o.path(fileScan), rep); werr != nil {
 		return nil, werr
 	}
@@ -127,6 +119,26 @@ func ScanTree(ctx context.Context, o Options) (*ScanResult, error) {
 	progress(o, "scan: %d artifacts, %d findings [%d critical, %d high]",
 		len(out.Artifacts), len(out.Findings), out.BySeverity[report.SeverityCritical], out.BySeverity[report.SeverityHigh])
 	return out, nil
+}
+
+// prefixBaseline rewrites the artifact component of each baseline fingerprint to
+// the absolute path the scan engine sees. The previous scan.json is repo-relative
+// after relativise, while suppression runs while the engine still names the file by
+// its absolute path.
+func prefixBaseline(base string, fp map[string]bool) map[string]bool {
+	if len(fp) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(fp))
+	for k := range fp {
+		parts := strings.SplitN(k, "\x00", 3)
+		if len(parts) == 3 {
+			parts[1] = filepath.Join(base, filepath.FromSlash(parts[1]))
+			k = strings.Join(parts, "\x00")
+		}
+		out[k] = true
+	}
+	return out
 }
 
 // relativise strips the repos root from every path in the report.

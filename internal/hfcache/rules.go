@@ -41,6 +41,23 @@ var RuleBlobMissing = report.DefineRule(report.Rule{
 	Tags: []string{"hf-cache", "missing"},
 })
 
+// RuleNotScanned reports a cache entry that was deliberately not yielded: a
+// directory link, a resolved non-regular file, or an unreadable subtree. It is
+// high because the cache scan's coverage claim is false without it.
+var RuleNotScanned = report.DefineRule(report.Rule{
+	ID:         "SC4N-HFCACHE-NOT-SCANNED",
+	Title:      "Hugging Face cache entry was not scanned",
+	Severity:   report.SeverityHigh,
+	Confidence: report.ConfidenceHigh,
+	CWE:        []string{"CWE-693"},
+	Class:      "path",
+	Description: "A snapshot entry was omitted: it resolves to a directory or a non-regular file, or " +
+		"its subtree could not be walked. The cache scan's claim to have covered the snapshot is then " +
+		"false, so the omission fails the default high gate.",
+	Refs: []string{"https://cwe.mitre.org/data/definitions/693.html"},
+	Tags: []string{"hf-cache", "coverage"},
+})
+
 // RuleRefMalformed reports a refs/<name> file that is not a 40-hex commit.
 var RuleRefMalformed = report.DefineRule(report.Rule{
 	ID:         "SC4N-HFCACHE-REF-MALFORMED",

@@ -239,16 +239,32 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 			body = rest[:k]
 		}
 		quoted := strconv.Quote(report.TruncateEvidence(body, 120))
+		secret := stringscan.HasSecretHit(body)
 		if hasInstruction(body) {
-			sink.Emit(ruleCardHidden, base+int64(start),
-				"HTML comment in "+what+", hidden from every Markdown renderer, carries instruction-shaped text: "+quoted)
+			ev := "HTML comment in " + what + ", hidden from every Markdown renderer, carries instruction-shaped text: " + quoted
+			if secret {
+				sink.EmitRedacted(ruleCardHidden, base+int64(start),
+					"HTML comment in "+what+", hidden from every Markdown renderer, carries instruction-shaped text and a masked secret", nil)
+			} else {
+				sink.Emit(ruleCardHidden, base+int64(start), ev)
+			}
 			if len(stringscan.ScanString(body)) > 0 {
-				sink.Emit(ruleCardInjection, base+int64(start),
-					"instruction-like content hidden in an HTML comment in "+what+": "+quoted)
+				if secret {
+					sink.EmitRedacted(ruleCardInjection, base+int64(start),
+						"instruction-like content hidden in an HTML comment in "+what+" and a masked secret", nil)
+				} else {
+					sink.Emit(ruleCardInjection, base+int64(start),
+						"instruction-like content hidden in an HTML comment in "+what+": "+quoted)
+				}
 			}
 		} else {
-			sink.Emit(ruleCardComment, base+int64(start),
-				"HTML comment in "+what+", hidden from every Markdown renderer, carries no instruction: "+quoted)
+			if secret {
+				sink.EmitRedacted(ruleCardComment, base+int64(start),
+					"HTML comment in "+what+", hidden from every Markdown renderer, carries a masked secret", nil)
+			} else {
+				sink.Emit(ruleCardComment, base+int64(start),
+					"HTML comment in "+what+", hidden from every Markdown renderer, carries no instruction: "+quoted)
+			}
 		}
 		if k < 0 {
 			break

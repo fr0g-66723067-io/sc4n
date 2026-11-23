@@ -18,6 +18,7 @@ FROM python:3.12-slim
 
 # strace is the effect source: it is the only one a payload cannot blind from
 # native code, which is why the container is started with SYS_PTRACE.
+#checkov:skip=CKV_DOCKER_3:The entrypoint starts as root only to plant canaries and run the root strace tracer; the loader drops itself to uid 65534 before it opens the artifact
 RUN apt-get update \
  && apt-get install -y --no-install-recommends strace \
  && rm -rf /var/lib/apt/lists/*

@@ -29,7 +29,7 @@ func TestRecoverLocalMembersDeclaredSizeIsTheSpan(t *testing.T) {
 	data = append(data, second...)
 	data = append(data, "xyz"...)
 
-	ms, capped := recoverLocalMembers(source.Mem("t.zip", data), limits.Default())
+	ms, capped, _ := recoverLocalMembers(source.Mem("t.zip", data), limits.Default())
 	if capped {
 		t.Fatal("cap reported with three members")
 	}
@@ -56,7 +56,7 @@ func TestRecoverLocalMembersDataDescriptorBoundedByNextHeader(t *testing.T) {
 	data = append(data, second...)
 	data = append(data, "little"...)
 
-	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	ms, _, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
 	if len(ms) != 2 {
 		t.Fatalf("members = %d, want 2", len(ms))
 	}
@@ -73,7 +73,7 @@ func TestRecoverLocalMembersDataDescriptorBoundedByNextHeader(t *testing.T) {
 
 func TestRecoverLocalMembersStopsAtNonHeader(t *testing.T) {
 	data := []byte("this is not a local header at all, only text")
-	if ms, capped := recoverLocalMembers(source.Mem("t.bin", data), limits.Default()); ms != nil || capped {
+	if ms, capped, _ := recoverLocalMembers(source.Mem("t.bin", data), limits.Default()); ms != nil || capped {
 		t.Fatalf("recovered %v (capped %v) from a non-zip prefix", ms, capped)
 	}
 }
@@ -86,7 +86,7 @@ func TestRecoverLocalMembersCap(t *testing.T) {
 	}
 	l := limits.Default()
 	l.MaxEntries = 1
-	ms, capped := recoverLocalMembers(source.Mem("t.zip", data), l)
+	ms, capped, _ := recoverLocalMembers(source.Mem("t.zip", data), l)
 	if !capped {
 		t.Fatal("cap not reported")
 	}
@@ -137,7 +137,7 @@ func TestRecoverLocalMembersTrimsDataDescriptor16(t *testing.T) {
 	data = append(data, "little"...)
 	data = append(data, descr16(0x12345678, 6)...)
 
-	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	ms, _, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
 	if len(ms) != 2 {
 		t.Fatalf("members = %d, want 2", len(ms))
 	}
@@ -172,7 +172,7 @@ func TestRecoverLocalMembersTrimsDataDescriptor12(t *testing.T) {
 	data = append(data, second...)
 	data = append(data, "l"...)
 
-	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	ms, _, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
 	if len(ms) != 2 {
 		t.Fatalf("members = %d, want 2", len(ms))
 	}
@@ -198,7 +198,7 @@ func TestRecoverLocalMembersTrimsDataDescriptor64(t *testing.T) {
 	data = append(data, second...)
 	data = append(data, "l"...)
 
-	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	ms, _, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
 	if len(ms) != 2 {
 		t.Fatalf("members = %d, want 2", len(ms))
 	}
@@ -219,7 +219,7 @@ func TestRecoverLocalMembersKeepsBytesThatOnlyLookLikeADescriptor(t *testing.T) 
 	data = append(data, second...)
 	data = append(data, "l"...)
 
-	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	ms, _, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
 	if len(ms) != 2 {
 		t.Fatalf("members = %d, want 2", len(ms))
 	}
@@ -235,7 +235,7 @@ func TestRecoverLocalMembersDescriptorAtEOF(t *testing.T) {
 	data = append(data, payload...)
 	data = append(data, descr16(0x0, uint32(len(payload)))...)
 
-	ms, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
+	ms, _, _ := recoverLocalMembers(source.Mem("t.pt", data), limits.Default())
 	if len(ms) != 1 {
 		t.Fatalf("members = %d, want 1", len(ms))
 	}
@@ -252,7 +252,7 @@ func TestRecoverLocalMembersIgnoredWithoutBit3(t *testing.T) {
 	data := append([]byte{}, first...)
 	data = append(data, payload...)
 
-	ms, _ := recoverLocalMembers(source.Mem("t.zip", data), limits.Default())
+	ms, _, _ := recoverLocalMembers(source.Mem("t.zip", data), limits.Default())
 	if len(ms) != 1 {
 		t.Fatalf("members = %d, want 1", len(ms))
 	}

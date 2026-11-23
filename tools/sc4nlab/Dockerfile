@@ -11,3 +11,4 @@ RUN pip install --no-cache-dir onnx==1.20.0 onnxruntime==1.22.0
 COPY py/check.py py/mutate.py /opt/sc4nlab/
 
 WORKDIR /w
+USER 65532:65532

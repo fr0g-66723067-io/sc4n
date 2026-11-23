@@ -523,3 +523,20 @@ func TestPathLike(t *testing.T) {
 		}
 	}
 }
+
+func TestKerasPythonAnalysisBudgetStopsFanOut(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"layers":[`)
+	for i := 0; i < maxKerasPythonRuns+10; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"class_name":"Lambda","config":{"code":"aW1wb3J0IG9zCg=="}}`)
+	}
+	b.WriteString(`]}`)
+	ctx, c := newTestCtx()
+	analyzeKerasDocument(ctx, 0, "config.json", []byte(b.String()))
+	if !ids(c)["SC4N-LIMIT-ENTRIES"] {
+		t.Fatalf("Keras code budget was silent; findings=%v", c.Findings())
+	}
+}

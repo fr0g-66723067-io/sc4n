@@ -200,3 +200,26 @@ func TestCopiedCacheWithoutSymlinksKeepsEveryRepo(t *testing.T) {
 		}
 	}
 }
+
+func TestDirectorySymlinkIsReportedNotSilent(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "models--org--repo")
+	snap := filepath.Join(repo, "snapshots", strings.Repeat("5", 40))
+	blobDir := filepath.Join(repo, "blobs", "dirblob")
+	if err := os.MkdirAll(snap, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "..", "blobs", "dirblob"), filepath.Join(snap, "folder")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	c := report.NewCollector(0)
+	if _, err := Expand(dir, c); err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if !hasRule(c.Findings(), RuleNotScanned.ID) {
+		t.Fatalf("directory link was silent; findings=%v", ids(c.Findings()))
+	}
+}

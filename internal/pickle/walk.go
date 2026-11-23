@@ -87,6 +87,10 @@ type Stream struct {
 	// RequiresUnsafeLoader reports whether any opcode outside the weights-only
 	// accepted set appeared.
 	RequiresUnsafeLoader bool
+	// FirstOpLineOverflow records that the first opcode's newline argument ran
+	// past the probe budget. It is evidence that the stream is one, not that the
+	// candidate is byte soup, and the sniffer uses it for a no-PROTO slice.
+	FirstOpLineOverflow bool
 }
 
 // Walk analyses the whole window at off 0 of s.
@@ -105,14 +109,15 @@ func Walk(ctx *artifact.Ctx, s source.Source, opt Options) (*Stream, error) {
 		return &Stream{}, nil
 	}
 	w := &walker{
-		sink:    ctx.Sink,
-		lim:     ctx.Limits,
-		data:    data,
-		opt:     opt,
-		mm:      newMemo(len(data)),
-		globals: map[string]*Global{},
-		structs: map[string]*structStat{},
-		once:    map[string]bool{},
+		sink:     ctx.Sink,
+		lim:      ctx.Limits,
+		data:     data,
+		opt:      opt,
+		mm:       newMemo(len(data)),
+		globals:  map[string]*Global{},
+		structs:  map[string]*structStat{},
+		once:     map[string]bool{},
+		siteOnce: map[string]bool{},
 
 		memoOverwriteOff: -1,
 	}
@@ -185,6 +190,14 @@ type walker struct {
 
 	// once guards findings that should appear at most once per stream.
 	once map[string]bool
+	// siteOnce guards per-offset keys; it is bounded separately because an
+	// attacker controls the offset and a stream of malformed bytes would
+	// otherwise grow this map without limit.
+	siteOnce map[string]bool
+
+	// globalsOverflow is set when the distinct-global cap was reached and later
+	// names were classified without being retained in globals/stream.Globals.
+	globalsOverflow bool
 
 	// resyncRun counts consecutive bytes that produced no decoded opcode; it
 	// bounds the cost of walking a region that is not opcodes at all.
@@ -215,16 +228,27 @@ type walker struct {
 // Five keeps the evidence readable and the extras deterministic.
 const maxNoteNames = 5
 
+const (
+	maxNoteSeen        = 4096
+	maxDistinctGlobal  = 4096
+	maxGlobalName      = 1024
+	maxOnceKeys        = 1 << 16
+	maxWalkOps         = 1 << 24
+	maxStreamStartScan = 1 << 20
+	maxNameScan        = 1 << 20
+)
+
 // classNote accumulates the names one rule saw in a stream, so the rule reports
 // once per stream instead of once per class. Measured: one YOLO checkpoint's
 // data.pkl produced 40+ SC4N-PICKLE-NEWOBJ findings that all said "the reference
 // loader permits only torch.nn.Parameter".
 type classNote struct {
-	first string
-	off   int64
-	names []string
-	seen  map[string]bool
-	count int // distinct names
+	first    string
+	off      int64
+	names    []string
+	seen     map[string]bool
+	count    int  // distinct names
+	overflow bool // the seen map reached maxNoteSeen
 }
 
 func (n *classNote) add(name string, off int64) {
@@ -235,6 +259,10 @@ func (n *classNote) add(name string, off int64) {
 		n.first, n.off = name, off
 	}
 	if n.seen[name] {
+		return
+	}
+	if len(n.seen) >= maxNoteSeen {
+		n.overflow = true
 		return
 	}
 	n.seen[name] = true
@@ -290,7 +318,19 @@ func (w *walker) run() {
 	size := int64(len(w.data))
 	w.stream.Bytes = size
 	start := 0
-	if !w.probePickle(0, false) {
+	if w.data[0] != opPROTO {
+		// A window that does not begin with PROTO is either a protocol-0/1
+		// stream or a prefix followed by a protocol-bearing one. Text in the
+		// prefix can decode as ordinary opcodes and reach the later STOP, so a
+		// successful walk from 0 is not proof that the prefix is part of the
+		// pickle; a clean stream at a later PROTO is the stronger evidence.
+		if k, ok := w.locateStreamStart(); ok {
+			w.emitPrefix(0, k)
+			w.windowStart = k
+			start = k
+		}
+	}
+	if start == 0 && !w.probePickle(0, false) {
 		// The window does not open with a clean pickle. If a clean one starts
 		// later, the bytes in front of it are a prefix (the nullifAI shape) and
 		// are reported as such.
@@ -359,7 +399,7 @@ func (w *walker) plausibleStart(off int) bool {
 func (w *walker) locateStreamStart() (int, bool) {
 	const maxCandidates = 64
 	tried := 0
-	for i := 1; i+1 < len(w.data); i++ {
+	for i := 1; i+1 < len(w.data) && i < maxStreamStartScan; i++ {
 		if w.data[i] != opPROTO || w.data[i+1] < 1 || w.data[i+1] > highestProtocol {
 			continue
 		}
@@ -413,7 +453,7 @@ func (w *walker) probePickle(off int, needEvidence bool) bool {
 	// every Python source file. This is the gate that kept source, tar and zip
 	// artifacts out of this parser before the protocol path was loosened, and it
 	// stays exactly as strict for them.
-	if !hasProto && probe.stream.StructErrors > 0 {
+	if !hasProto && probe.stream.StructErrors > 0 && !probe.stream.FirstOpLineOverflow {
 		return false
 	}
 	// A byte that is not an opcode is decisive: a pickle contains only opcodes, so a
@@ -482,7 +522,10 @@ func (w *walker) probePickle(off int, needEvidence bool) bool {
 	// a candidate at offset 143483 of a 1.3 MB tensor blob that decodes PROTO 3 and a
 	// BINUNICODE8 declaring 11598068109612881803 bytes, and it must not be a pickle.
 	truncatedByBudget := probe.limit < len(w.data) && probe.stream.Ops > 0 && consumed >= probe.limit
-	return hasProto && (probe.stream.Ops >= minSniffOps || truncatedByBudget)
+	if hasProto {
+		return probe.stream.Ops >= minSniffOps || truncatedByBudget
+	}
+	return truncatedByBudget || probe.stream.FirstOpLineOverflow
 }
 
 // segment walks one pickle, from start to its STOP. It returns the offset just
@@ -492,6 +535,11 @@ func (w *walker) segment(start int) (int, bool) {
 	w.resyncRun = 0
 	end := w.end()
 	for pos < end {
+		if w.stream.Ops >= maxWalkOps {
+			w.emitOnce("walk-ops", limits.RuleEntries, int64(pos),
+				"MaxWalkOps reached: the stream decoded "+strconv.Itoa(w.stream.Ops)+" opcodes; the remainder was not walked")
+			return pos, true
+		}
 		if w.lim.MaxStackDepth > 0 && len(w.st.vals) > w.lim.MaxStackDepth {
 			w.emitOnce("stack", ruleStack, int64(pos),
 				fmt.Sprintf("operand stack depth %d exceeds MaxStackDepth %d; the remainder of the stream was not walked", len(w.st.vals), w.lim.MaxStackDepth))
@@ -502,7 +550,7 @@ func (w *walker) segment(start int) (int, bool) {
 		if info.name == "" {
 			w.structFinding("unknown-opcode",
 				fmt.Sprintf("0x%02x is not an opcode", code), int64(pos))
-			w.emitOnce("incomplete:"+strconv.Itoa(pos), ruleIncomplete, int64(pos),
+			w.emitSiteOnce("incomplete:"+strconv.Itoa(pos), ruleIncomplete, int64(pos),
 				fmt.Sprintf("the walk could not decode the byte at this offset (0x%02x is not an opcode); scanning resumed at the next byte so that anything after it is still reported", code))
 			w.resyncRun++
 			if w.resyncRun > maxResyncRun {
@@ -516,8 +564,18 @@ func (w *walker) segment(start int) (int, bool) {
 
 		arg, next, err := w.decodeArg(info, pos)
 		if err != nil {
-			w.structFinding(errKind(err), err.Error(), int64(pos))
-			w.emitOnce("incomplete:"+strconv.Itoa(pos)+":"+err.Error(), ruleIncomplete, int64(pos), err.Error())
+			kind := errKind(err)
+			if pos == start && (kind == "no-newline" || kind == "line-over-blob-cap") {
+				w.stream.FirstOpLineOverflow = true
+				w.structFinding(kind, err.Error(), int64(pos))
+				return pos, true
+			}
+			if kind == "line-over-blob-cap" {
+				w.structFinding(kind, err.Error(), int64(pos))
+				return pos, true
+			}
+			w.structFinding(kind, err.Error(), int64(pos))
+			w.emitSiteOnce("incomplete:"+strconv.Itoa(pos)+":"+err.Error(), ruleIncomplete, int64(pos), err.Error())
 			if errKind(err) == "truncated-argument" {
 				// The stream ended inside a value: a length or a fixed-width
 				// argument runs past the end of the data. Resyncing here would read
@@ -989,6 +1047,8 @@ func (w *walker) popN(n int) ([]Val, bool) {
 
 // globalValue classifies a name and records it.
 func (w *walker) globalValue(module, name string, off int64, stackBuilt bool) Val {
+	module = truncateGlobalName(module)
+	name = truncateGlobalName(name)
 	resolvedModule, resolvedName, remapped := resolveGlobal(module, name)
 	verdict := isAllowed(resolvedModule, resolvedName)
 	g := &Global{
@@ -1013,22 +1073,46 @@ func (w *walker) globalValue(module, name string, off int64, stackBuilt bool) Va
 		_ = prev
 		return Val{kind: kGlobal, text: g.textKey(), global: g}
 	}
+	if len(w.globals) >= maxDistinctGlobal {
+		w.stream.SawGlobal = true
+		if !w.globalsOverflow {
+			w.globalsOverflow = true
+			w.emitOnce("globals", limits.RuleEntries, off,
+				"MaxDistinctGlobals reached: the stream names more than "+strconv.Itoa(maxDistinctGlobal)+
+					" distinct globals; later names are classified and reported but not retained in the per-stream summary")
+		}
+		w.emitGlobalVerdict(g, stackBuilt, remapped)
+		return Val{kind: kGlobal, text: g.textKey(), global: g}
+	}
 	w.globals[g.QualName()] = g
 	w.stream.Globals = append(w.stream.Globals, g)
 	w.stream.SawGlobal = true
+	w.emitGlobalVerdict(g, stackBuilt, remapped)
+	return Val{kind: kGlobal, text: g.textKey(), global: g}
+}
 
+func truncateGlobalName(s string) string {
+	if len(s) > maxGlobalName {
+		return s[:maxGlobalName]
+	}
+	return s
+}
+
+// emitGlobalVerdict reports one classified name. It is separate from
+// globalValue so the overflow path still classifies and reports a dangerous
+// name after the per-stream summary has stopped retaining new names.
+func (w *walker) emitGlobalVerdict(g *Global, stackBuilt, remapped bool) {
 	if objectDtypeConditional[g.QualName()] {
 		// The dtype argument is decoded after this point, so the critical is
 		// decided at REDUCE (reportReduce); here the name joins the summary.
-		w.unknown.add(g.QualName(), off)
-		return Val{kind: kGlobal, text: g.textKey(), global: g}
+		w.unknown.add(g.QualName(), g.Off)
+		return
 	}
-
 	switch {
-	case verdict == AllowBlocked:
-		w.emitOnce("global:"+g.QualName(), ruleGlobalCritical, off,
+	case g.Allows == AllowBlocked:
+		w.emitOnce("global:"+g.QualName(), ruleGlobalCritical, g.Off,
 			fmt.Sprintf("%s: sink %s; its module is in the weights-only blocklist ({sys, os, posix, nt}), which the unpickler consults before its allowlist, so no add_safe_globals entry can make this loadable", g.QualName(), g.Gadget.Sink))
-	case verdict == AllowDefault:
+	case g.Allows == AllowDefault:
 		// Nothing to report: this is a name the loader accepts on its own.
 	default:
 		sink := g.Gadget.Sink
@@ -1040,18 +1124,17 @@ func (w *walker) globalValue(module, name string, off int64, stackBuilt bool) Va
 			ev += "; the name was assembled by STACK_GLOBAL from strings rather than written as a literal"
 		}
 		if remapped {
-			ev += "; the name was remapped from " + module + "." + name + " by the loader's Python-2 compatibility table"
+			ev += "; the name was remapped from " + g.SrcModule + "." + g.SrcName + " by the loader's Python-2 compatibility table"
 		}
 		switch g.Gadget.Class {
 		case GadgetDirect:
-			w.emitOnce("global:"+g.QualName(), ruleGlobalCritical, off, ev)
+			w.emitOnce("global:"+g.QualName(), ruleGlobalCritical, g.Off, ev)
 		case GadgetLibrary:
-			w.emitOnce("global:"+g.QualName(), ruleGlobalHigh, off, ev)
+			w.emitOnce("global:"+g.QualName(), ruleGlobalHigh, g.Off, ev)
 		default:
-			w.unknown.add(g.QualName(), off)
+			w.unknown.add(g.QualName(), g.Off)
 		}
 	}
-	return Val{kind: kGlobal, text: g.textKey(), global: g}
 }
 
 func (g *Global) textKey() string { return g.Module + "." + g.Name }
@@ -1115,7 +1198,7 @@ func (w *walker) checkCodeStrings(v Val, off int, where string, callable string)
 			return
 		}
 		if ind := looksLikeCode(text); ind != "" {
-			w.emitExtraOnce("code-string:"+ind+":"+strconv.Itoa(off)+":"+text[:codeStringMinBytes], ruleCodeString, int64(off),
+			w.emitSiteExtraOnce("code-string:"+ind+":"+strconv.Itoa(off)+":"+text[:codeStringMinBytes], ruleCodeString, int64(off),
 				fmt.Sprintf("%s carries a %d-byte string that looks like source (indicator %q): %s", where, len(text), ind, quote(text)),
 				map[string]string{"indicator": ind, "where": where, "length": strconv.Itoa(len(text))})
 		}
@@ -1232,14 +1315,18 @@ func (w *walker) flush() {
 			if g, ok := w.globals[name]; ok {
 				off = g.Off
 			}
-			w.sink.EmitExtra(ruleMemoAlias, off,
-				fmt.Sprintf("%s is reachable through %d distinct bindings (%s) in memo slots %v; a benign stream binds a name one way",
-					name, len(b.routes), strings.Join(routeNames(b.routes), ", "), b.slots),
-				map[string]string{
-					"global": name,
-					"slots":  strconv.Itoa(len(b.slots)),
-					"routes": strconv.Itoa(len(b.routes)),
-				})
+			ev := fmt.Sprintf("%s is reachable through %d distinct bindings (%s) in memo slots %v; a benign stream binds a name one way",
+				name, len(b.routes), strings.Join(routeNames(b.routes), ", "), b.slots)
+			extra := map[string]string{
+				"global": name,
+				"slots":  strconv.Itoa(len(b.slots)),
+				"routes": strconv.Itoa(len(b.routes)),
+			}
+			if b.slotsOverflow || b.routeOverflow {
+				ev += "; the slot and route counts are lower bounds because the per-name table is capped"
+				extra["countLowerBound"] = "true"
+			}
+			w.sink.EmitExtra(ruleMemoAlias, off, ev, extra)
 		}
 	}
 	// Out-of-allowlist requirement.
@@ -1288,7 +1375,13 @@ func (w *walker) flush() {
 		if ne.note.count == 0 {
 			continue
 		}
-		w.sink.EmitExtra(ne.rule, ne.note.off, fmt.Sprintf(ne.evFmt, ne.note.count, ne.note.first), ne.note.extras(ne.key))
+		ev := fmt.Sprintf(ne.evFmt, ne.note.count, ne.note.first)
+		extra := ne.note.extras(ne.key)
+		if ne.note.overflow {
+			ev += "; the distinct-name count is a lower bound because the per-stream name table is capped"
+			extra["countLowerBound"] = "true"
+		}
+		w.sink.EmitExtra(ne.rule, ne.note.off, ev, extra)
 	}
 }
 
@@ -1382,6 +1475,39 @@ func (w *walker) emitExtraOnce(key string, r *report.Rule, off int64, ev string,
 	w.sink.EmitExtra(r, off, ev, extra)
 }
 
+// siteOnceKey records an attacker-controlled per-offset key. The map is capped:
+// a stream of malformed bytes at a million offsets must not turn deduplication
+// into the memory exhaustion the rest of the walk budgets against.
+func (w *walker) siteOnceKey(key string) bool {
+	if w.silent {
+		return false
+	}
+	if w.siteOnce[key] {
+		return false
+	}
+	if len(w.siteOnce) >= maxOnceKeys {
+		w.emitOnce("once-keys", limits.RuleEntries, 0,
+			"MaxOnceKeys reached: per-site deduplication is exhausted; later malformed sites are not reported")
+		return false
+	}
+	w.siteOnce[key] = true
+	return true
+}
+
+func (w *walker) emitSiteOnce(key string, r *report.Rule, off int64, ev string) {
+	if !w.siteOnceKey(key) {
+		return
+	}
+	w.sink.Emit(r, off, ev)
+}
+
+func (w *walker) emitSiteExtraOnce(key string, r *report.Rule, off int64, ev string, extra map[string]string) {
+	if !w.siteOnceKey(key) {
+		return
+	}
+	w.sink.EmitExtra(r, off, ev, extra)
+}
+
 // stringValue builds a str value from a decoded argument.
 //
 // The scan sees the whole constant up to MaxStringBlob; only the *retained* copy
@@ -1426,22 +1552,24 @@ func (w *walker) reportBlobCap(off, full int, cap int64, what string) {
 // all — and the truncation is reported once through SC4N-LIMIT-RETAINED rather
 // than being invisible.
 func (w *walker) retain(s string) string {
-	if w.lim.MaxRetainedText <= 0 || w.retained+int64(len(s)) <= w.lim.MaxRetainedText {
+	if w.lim.MaxRetainedText <= 0 {
+		return s
+	}
+	room := w.lim.MaxRetainedText - w.retained
+	if room <= 0 {
+		w.emitOnce("limit-retained", limits.RuleRetained, 0,
+			"retained text budget reached; later values keep their length and kind but not their text")
+		return ""
+	}
+	if int64(len(s)) <= room {
 		w.retained += int64(len(s))
 		return s
 	}
+	w.retained = w.lim.MaxRetainedText
 	w.emitOnce("limit-retained", limits.RuleRetained, 0,
 		"retained text budget reached; later values keep their length and kind but not their text")
-	if len(s) > retainAfterBudget {
-		return s[:retainAfterBudget]
-	}
-	return s
+	return s[:room]
 }
-
-// retainAfterBudget is how much of a value survives once the budget is spent. It
-// is enough for evidence to name the value and for a rule that inspects a prefix
-// (a magic, a `#!` line, an opcode word) to still work.
-const retainAfterBudget = 256
 
 // bytesValue builds a bytes value.
 //
@@ -1665,7 +1793,7 @@ func (w *walker) decodeArg(info opcodeInfo, pos int) (any, int, error) {
 		return math.Float64frombits(binary.BigEndian.Uint64(d[p:])), p + 8, nil
 
 	case argDecimalnlShort, argDecimalnlLong:
-		raw, next, err := w.readNewline(info, p)
+		raw, next, err := w.readNewline(info, p, maxNameScan)
 		if err != nil {
 			return nil, p, err
 		}
@@ -1688,7 +1816,7 @@ func (w *walker) decodeArg(info opcodeInfo, pos int) (any, int, error) {
 		return n, next, nil
 
 	case argFloatnl:
-		raw, next, err := w.readNewline(info, p)
+		raw, next, err := w.readNewline(info, p, maxNameScan)
 		if err != nil {
 			return nil, p, err
 		}
@@ -1699,7 +1827,7 @@ func (w *walker) decodeArg(info opcodeInfo, pos int) (any, int, error) {
 		return f, next, nil
 
 	case argStringnl, argStringnlNoescape:
-		raw, next, err := w.readNewline(info, p)
+		raw, next, err := w.readNewline(info, p, int(w.blobCap()))
 		if err != nil {
 			return nil, p, err
 		}
@@ -1720,11 +1848,11 @@ func (w *walker) decodeArg(info opcodeInfo, pos int) (any, int, error) {
 		return latin1String(decoded), next, nil
 
 	case argStringnlNoescapePair:
-		first, next, err := w.readNewline(info, p)
+		first, next, err := w.readNewline(info, p, maxNameScan)
 		if err != nil {
 			return nil, p, err
 		}
-		second, next2, err := w.readNewline(info, next)
+		second, next2, err := w.readNewline(info, next, maxNameScan)
 		if err != nil {
 			return nil, p, err
 		}
@@ -1734,7 +1862,7 @@ func (w *walker) decodeArg(info opcodeInfo, pos int) (any, int, error) {
 		return [2]string{string(first), string(second)}, next2, nil
 
 	case argUnicodestringnl:
-		raw, next, err := w.readNewline(info, p)
+		raw, next, err := w.readNewline(info, p, int(w.blobCap()))
 		if err != nil {
 			return nil, p, err
 		}
@@ -1824,18 +1952,26 @@ func (w *walker) decodeArg(info opcodeInfo, pos int) (any, int, error) {
 		fmt.Sprintf("opcode %s has an argument kind the walker does not implement (%d)", info.name, info.arg))
 }
 
-// readNewline reads a newline-terminated argument. The scan is bounded: every
-// newline-terminated argument in the grammar is a name, a number or a small
-// string, so a region without a newline is a structural violation rather than an
-// invitation to walk the whole file.
-func (w *walker) readNewline(info opcodeInfo, p int) ([]byte, int, error) {
-	const maxScan = 1 << 20
-	limit := len(w.data)
+// readNewline reads a newline-terminated argument. Names and numbers use
+// maxNameScan; a string payload uses MaxStringBlob. A payload without a newline
+// inside its cap is reported and treated as fatal: resyncing through the payload
+// would decode the value's own bytes as opcodes and hide a later gadget.
+func (w *walker) readNewline(info opcodeInfo, p, maxScan int) ([]byte, int, error) {
+	if maxScan <= 0 {
+		maxScan = maxNameScan
+	}
+	limit := w.end()
 	if p+maxScan < limit {
 		limit = p + maxScan
 	}
 	i := bytes.IndexByte(w.data[p:limit], '\n')
 	if i < 0 {
+		if info.arg == argStringnl || info.arg == argStringnlNoescape || info.arg == argUnicodestringnl {
+			full := len(w.data) - p
+			w.reportBlobCap(p, full, int64(maxScan), "newline argument")
+			return nil, p, argErr("line-over-blob-cap",
+				fmt.Sprintf("%s has no newline within %d bytes, so its argument cannot be read", info.name, maxScan))
+		}
 		return nil, p, argErr("no-newline",
 			fmt.Sprintf("%s has no newline within %d bytes, so its argument cannot be read", info.name, maxScan))
 	}
@@ -1857,6 +1993,10 @@ func (w *walker) countedString(info opcodeInfo, start int, n int64, decode func(
 	}
 	raw := w.data[start : start+int(n)]
 	next := start + int(n)
+	if cap := w.blobCap(); int64(len(raw)) > cap {
+		w.reportBlobCap(start-1, len(raw), cap, "string argument")
+		raw = raw[:cap]
+	}
 	if info.arg != argString1 && info.arg != argString4 && !utf8.Valid(raw) {
 		// CPython decodes a *UNICODE* payload with "surrogatepass", which accepts
 		// any byte sequence; a payload that is not valid UTF-8 is therefore a

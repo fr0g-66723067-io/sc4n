@@ -272,6 +272,9 @@ func HasSecretHit(s string) bool {
 
 func emit(sink *report.Sink, base int64, h Hit) {
 	ev := h.Match
+	if h.Rule == ruleObfuscation {
+		ev = "a " + h.Extra["kind"] + " literal of " + h.Extra["length"] + " bytes is passed to a decoder"
+	}
 	if h.Rule.Class == "metadata" || h.Rule.Class == "content" {
 		ev = "indicator " + strconv.Quote(report.TruncateEvidence(h.Match, 120)) + " in a data string"
 		// A raw-IP URL carries the notation its host was written in ("0x7f000001"

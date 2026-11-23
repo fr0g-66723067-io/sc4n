@@ -239,7 +239,10 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		// totals under the new ones, so a run whose fixes cut 181 high findings to
 		// 65 reported "1809 findings [28 critical, 181 high]" on the next line.
 		if _, err = hubcampaign.ScanTree(ctx, o); err == nil {
-			if fresh, jerr := hubcampaign.Join(o); jerr == nil {
+			fresh, jerr := hubcampaign.Join(o)
+			if jerr != nil {
+				err = jerr
+			} else {
 				freshScan = fresh
 			}
 		}

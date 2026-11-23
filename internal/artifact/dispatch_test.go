@@ -44,12 +44,15 @@ func TestSniffByContentNotExtension(t *testing.T) {
 		// Real .pte shape: a root uint32 at offset 0 and "ET" + two ASCII
 		// version digits at offset 4. Claimed by internal/pte's content sniffer,
 		// not by any table in this package.
-		{"x.pte", []byte{0x1c, 0x00, 0x00, 0x00, 'E', 'T', '1', '2'}, artifact.FormatPTE},
+		{"x.pte", []byte{0x04, 0x00, 0x00, 0x00, 'E', 'T', '1', '2'}, artifact.FormatPTE},
 		// Text that merely begins "ET," is not a .pte: the magic lives at
 		// offset 4, so claiming it from offset 0 would dispatch ordinary text
 		// to the flatbuffer parser.
 		{"x.pte", []byte("ET,01234\n"), artifact.FormatText},
-		{"x.so", []byte("\x7fELF\x02\x01\x01"), artifact.FormatNative},
+		// A bare ELF magic is not a validated header; the text fallback is
+		// allowed to claim content that only looks like a program. The
+		// polyglot layer still reports the magic-only shape.
+		{"x.so", []byte("\x7fELF\x02\x01\x01"), artifact.FormatText},
 		{"x.exe", []byte("MZ\x90\x00"), artifact.FormatNative},
 		{"x.tar", append(append(make([]byte, 257), []byte("ustar")...), make([]byte, 100)...), artifact.FormatTar},
 		{"x.xz", []byte("\xfd7zXZ\x00"), artifact.FormatXz},
@@ -185,4 +188,12 @@ func FuzzSniffNeverPanics(f *testing.F) {
 			t.Fatalf("Sniff is not deterministic: %s then %s", got, again)
 		}
 	})
+}
+
+func TestInvalidNativeMagicDoesNotSuppressTextRules(t *testing.T) {
+	data := []byte("MZ instructions: import os\nos.system('id')\n")
+	got, _ := sniff(t, "instructions.bin", data)
+	if got != artifact.FormatText {
+		t.Fatalf("MZ-prefixed instructions dispatched as %s, want text", got)
+	}
 }

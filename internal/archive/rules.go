@@ -238,6 +238,24 @@ var (
 		Tags: []string{"scanner-evasion", "structure"},
 	})
 
+	// ruleArchiveDirectoryAmbiguous fires when two central directories validate
+	// at different offsets. The member list sc4n scanned is then not provably
+	// the one a loader will read.
+	ruleArchiveDirectoryAmbiguous = report.DefineRule(report.Rule{
+		ID:         "SC4N-ARCHIVE-DIRECTORY-AMBIGUOUS",
+		Title:      "Zip has two valid central directories",
+		Severity:   report.SeverityHigh,
+		Confidence: report.ConfidenceHigh,
+		CWE:        []string{"CWE-436"},
+		Class:      "archive",
+		Description: "The literal directory offset and the offset derived from the prefix both hold a " +
+			"central-directory signature, at different positions. A reader that resolves the prefix one " +
+			"way and a loader that resolves it another read different member sets, so a clean scan of this " +
+			"member list is not a clean statement about what the loader sees.",
+		Refs: []string{"https://cwe.mitre.org/data/definitions/436.html"},
+		Tags: []string{"parser-differential"},
+	})
+
 	// ruleArchiveTrailingData fires when bytes follow the zip's
 	// end-of-central-directory record. It is medium: appending to a zip is the
 	// standard polyglot trick (a file that is both a zip and something else), and

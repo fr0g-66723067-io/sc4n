@@ -175,7 +175,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	if data == nil {
 		return nil
 	}
-	if !texty(data) {
+	if !texty(data) && base != ".gitattributes" {
 		// The fallback classifier called it text, but it is not valid UTF-8.
 		// Analysing arbitrary binary as prose would manufacture findings from
 		// random bytes — a NUL-free symbol table such as cscope.out yields dozens
@@ -522,7 +522,7 @@ func baseName(path string) string {
 	if i := strings.LastIndexByte(path, ':'); i >= 0 {
 		path = path[i+1:]
 	}
-	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+	if i := strings.LastIndexAny(path, "/\\"); i >= 0 {
 		path = path[i+1:]
 	}
 	return path

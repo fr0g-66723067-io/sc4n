@@ -56,6 +56,10 @@ type Entry struct {
 	// Revision is a comma-separated list of refs/<name> labels whose commit points
 	// at this snapshot, when any.
 	Revision string
+	// RootDir and Rel let the engine open the blob through os.Root rather than
+	// by a path that a concurrent symlink replacement could redirect.
+	RootDir string
+	Rel     string
 }
 
 // DefaultDir is the standard Hugging Face Hub cache location.
@@ -112,6 +116,8 @@ func Expand(dir string, c *report.Collector) ([]Entry, error) {
 		err := filepath.WalkDir(filepath.Join(dir, filepath.FromSlash(snapDir)),
 			func(p string, d fs.DirEntry, walkErr error) error {
 				if walkErr != nil {
+					rel, _ := filepath.Rel(dir, p)
+					emit(c, RuleNotScanned, filepath.ToSlash(rel), "snapshot subtree could not be walked: "+walkErr.Error())
 					return nil
 				}
 				if d.IsDir() {
@@ -148,6 +154,8 @@ func Expand(dir string, c *report.Collector) ([]Entry, error) {
 					Display:  display,
 					Digest:   digestOf(blobRel),
 					Revision: strings.Join(refs[commit], ","),
+					RootDir:  dir,
+					Rel:      blobRel,
 				})
 				return nil
 			})
@@ -220,6 +228,11 @@ func resolveEntry(root *os.Root, c *report.Collector, relSlash string) (blobRel,
 		return "", "", false
 	}
 	if tfi.IsDir() {
+		emit(c, RuleNotScanned, display, "snapshot entry resolves to a directory; its contents were not scanned")
+		return "", "", false
+	}
+	if !tfi.Mode().IsRegular() {
+		emit(c, RuleNotScanned, display, "resolved blob is not a regular file: "+tfi.Mode().String())
 		return "", "", false
 	}
 	return target, display, true
@@ -231,7 +244,12 @@ func readRefs(root *os.Root, c *report.Collector, repoRel string) map[string][]s
 	refRoot := path.Join(repoRel, "refs")
 	_ = filepath.WalkDir(filepath.Join(root.Name(), filepath.FromSlash(refRoot)),
 		func(p string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil || d.IsDir() {
+			if walkErr != nil {
+				rel, _ := filepath.Rel(root.Name(), p)
+				emit(c, RuleNotScanned, filepath.ToSlash(rel), "refs subtree could not be walked: "+walkErr.Error())
+				return nil
+			}
+			if d.IsDir() {
 				return nil
 			}
 			rel, rerr := filepath.Rel(root.Name(), p)
@@ -241,6 +259,7 @@ func readRefs(root *os.Root, c *report.Collector, repoRel string) map[string][]s
 			relSlash := filepath.ToSlash(rel)
 			b, err := root.ReadFile(relSlash)
 			if err != nil {
+				emit(c, RuleNotScanned, relSlash, "ref could not be read: "+err.Error())
 				return nil
 			}
 			name := strings.TrimPrefix(relSlash, repoRel+"/refs/")

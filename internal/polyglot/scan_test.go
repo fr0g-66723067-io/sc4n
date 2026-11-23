@@ -301,3 +301,23 @@ func TestMagicWindowsNeverOverlap(t *testing.T) {
 		t.Fatalf("the second window of a two-window artifact was not scanned; findings=%v", got)
 	}
 }
+
+func TestAppendedZipAfterValidNativeIsScanned(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: "archive/data.pkl", Method: zip.Deflate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("cos\nsystem\n(S'id'\ntR.")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := append(tinyELF(), buf.Bytes()...)
+	got := ids(run(t, "lib.so", data, artifact.FormatNative, 0))
+	if !got["SC4N-PICKLE-GLOBAL-CRITICAL"] || !got["SC4N-POLYGLOT-CONTAINER"] {
+		t.Fatalf("an appended zip was not dispatched as a container; findings=%v", got)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/cards"
 	"github.com/fr0g-66723067-io/sc4n/internal/jinja"
+	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/tokenizer"
 )
 
@@ -288,6 +289,14 @@ func trustRemoteCodeRule(ctx *artifact.Ctx, name string, data []byte, doc any) {
 // one informational finding per entry naming where the template came from.
 func chatTemplateRule(ctx *artifact.Ctx, name string, data []byte) {
 	templates := tokenizer.ChatTemplates(data)
+	cap := ctx.Limits.MaxChatTemplates
+	if cap <= 0 {
+		cap = limits.Default().MaxChatTemplates
+	}
+	if len(templates) > cap {
+		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxChatTemplates", int64(len(templates)), int64(cap), "chat templates")
+		templates = templates[:cap]
+	}
 	for i, tmpl := range templates {
 		base := offsetOf(data, tmpl)
 		ctx.Sink.EmitExtra(ruleConfigChatTemplate, base,
@@ -372,57 +381,59 @@ func modulesRemote(ctx *artifact.Ctx, name string, data []byte, doc any) {
 // line by line because .gitattributes is a whitespace-separated pattern/attribute
 // list, not YAML or JSON, and the plan links no parser for it.
 func gitAttributes(ctx *artifact.Ctx, name string, data []byte) {
-	for _, ln := range lineSpans(data) {
-		fields := strings.Fields(string(data[ln.start:ln.end]))
-		if len(fields) < 2 {
-			continue
+	start := 0
+	for start <= len(data) {
+		end := bytes.IndexByte(data[start:], '\n')
+		lineEnd := len(data)
+		if end >= 0 {
+			lineEnd = start + end
 		}
-		for _, attr := range fields[1:] {
-			if attr == "filter=lfs" || attr == "diff=lfs" || attr == "merge=lfs" {
-				ctx.Sink.Emit(ruleGitattributesLFS, int64(ln.start),
-					".gitattributes routes "+clip(fields[0], 60)+" through Git LFS ("+attr+")")
-				continue
-			}
-			key, val, ok := strings.Cut(attr, "=")
-			if !ok {
-				continue
-			}
-			switch key {
-			case "filter":
-				ctx.Sink.Emit(ruleGitattributesFilter, int64(ln.start),
-					".gitattributes assigns filter driver "+clip(val, 60)+" to "+clip(fields[0], 60)+
-						"; the driver's command lives in the local Git configuration")
-			case "diff":
-				if !builtinDiffDrivers[val] {
-					ctx.Sink.Emit(ruleGitattributesFilter, int64(ln.start),
-						".gitattributes assigns non-builtin diff driver "+clip(val, 60)+" to "+clip(fields[0], 60)+
-							"; a diff driver may name a textconv command Git executes")
+		trim := lineEnd
+		if trim > start && data[trim-1] == '\r' {
+			trim--
+		}
+		fields := strings.Fields(string(data[start:trim]))
+		if len(fields) >= 2 {
+			for _, attr := range fields[1:] {
+				if attr == "filter=lfs" || attr == "diff=lfs" || attr == "merge=lfs" {
+					ctx.Sink.Emit(ruleGitattributesLFS, int64(start),
+						".gitattributes routes "+clip(fields[0], 60)+" through Git LFS ("+attr+")")
+					continue
+				}
+				key, val, ok := strings.Cut(attr, "=")
+				if !ok {
+					continue
+				}
+				switch key {
+				case "filter":
+					ctx.Sink.Emit(ruleGitattributesFilter, int64(start),
+						".gitattributes assigns filter driver "+clip(val, 60)+" to "+clip(fields[0], 60)+
+							"; the driver's command lives in the local Git configuration")
+				case "diff":
+					if builtinDiffDrivers[val] {
+						ctx.Sink.Emit(ruleGitattributesDiffName, int64(start),
+							".gitattributes names built-in diff driver "+clip(val, 60)+" for "+clip(fields[0], 60))
+					} else {
+						ctx.Sink.Emit(ruleGitattributesFilter, int64(start),
+							".gitattributes assigns non-builtin diff driver "+clip(val, 60)+" to "+clip(fields[0], 60)+
+								"; a diff driver may name a textconv command Git executes")
+					}
+				case "merge":
+					switch val {
+					case "text", "binary", "union", "ours":
+					default:
+						ctx.Sink.Emit(ruleGitattributesFilter, int64(start),
+							".gitattributes assigns merge driver "+clip(val, 60)+" to "+clip(fields[0], 60)+
+								"; the driver's command lives in the local Git configuration")
+					}
 				}
 			}
 		}
-	}
-}
-
-type span struct{ start, end int }
-
-// lineSpans returns each line's byte range, exclusive of the trailing newline.
-func lineSpans(b []byte) []span {
-	var out []span
-	start := 0
-	for i := range b {
-		if b[i] == '\n' {
-			end := i
-			if end > start && b[end-1] == '\r' {
-				end--
-			}
-			out = append(out, span{start, end})
-			start = i + 1
+		if end < 0 {
+			break
 		}
+		start = lineEnd + 1
 	}
-	if start < len(b) {
-		out = append(out, span{start, len(b)})
-	}
-	return out
 }
 
 // localDirExists reports whether a path-shaped value resolves to a directory

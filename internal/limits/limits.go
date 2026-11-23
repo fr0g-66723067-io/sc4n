@@ -68,6 +68,12 @@ type Limits struct {
 	// length and kind and lose their text, and SC4N-LIMIT-RETAINED says so.
 	MaxRetainedText int64
 
+	// MaxChatTemplates caps the number of chat templates a content document is
+	// analysed for. Default 64. GGUF analyses every template and caps only its
+	// retained copy; this cap is for JSON documents whose template list is
+	// attacker-sized.
+	MaxChatTemplates int
+
 	// MaxHashBytes caps how much of an artifact the scan digests. Default
 	// 256 MiB. The digest identifies an artifact and de-duplicates a blob
 	// reachable from several cache revisions; it is not a provenance proof, and
@@ -114,6 +120,7 @@ func Default() Limits {
 		MaxRatio:             200,
 		MaxStringBlob:        16 << 20,
 		MaxRetainedText:      64 << 20,
+		MaxChatTemplates:     64,
 		MaxHashBytes:         256 << 20,
 		MaxSpillBytes:        4 << 30,
 		MaxFindings:          100_000,
@@ -152,6 +159,9 @@ func (l Limits) withDefaults() Limits {
 	if l.MaxRetainedText == 0 {
 		l.MaxRetainedText = d.MaxRetainedText
 	}
+	if l.MaxChatTemplates == 0 {
+		l.MaxChatTemplates = d.MaxChatTemplates
+	}
 	if l.MaxHashBytes == 0 {
 		l.MaxHashBytes = d.MaxHashBytes
 	}
@@ -188,6 +198,7 @@ func (l Limits) ReportLimits() report.Limits {
 		MaxRatio:             l.MaxRatio,
 		MaxStringBlob:        l.MaxStringBlob,
 		MaxRetainedText:      l.MaxRetainedText,
+		MaxChatTemplates:     l.MaxChatTemplates,
 		MaxHashBytes:         l.MaxHashBytes,
 		MaxSpillBytes:        l.MaxSpillBytes,
 		MaxFindings:          l.MaxFindings,
@@ -209,6 +220,7 @@ func (l Limits) Normalize() (Limits, error) {
 		{"MaxRatio", l.MaxRatio},
 		{"MaxStringBlob", l.MaxStringBlob},
 		{"MaxRetainedText", l.MaxRetainedText},
+		{"MaxChatTemplates", int64(l.MaxChatTemplates)},
 		{"MaxHashBytes", l.MaxHashBytes},
 		{"MaxSpillBytes", l.MaxSpillBytes},
 		{"MaxFindings", int64(l.MaxFindings)},
@@ -255,6 +267,9 @@ func (l *Limits) SetMaxHashBytes(v int64) { l.MaxHashBytes = v }
 
 // SetMaxSpillBytes overrides the per-member spill cap.
 func (l *Limits) SetMaxSpillBytes(v int64) { l.MaxSpillBytes = v }
+
+// SetMaxChatTemplates overrides the chat-template analysis cap.
+func (l *Limits) SetMaxChatTemplates(v int) { l.MaxChatTemplates = v }
 
 // SetMaxEntries overrides the archive member cap.
 func (l *Limits) SetMaxEntries(v int) { l.MaxEntries = v }

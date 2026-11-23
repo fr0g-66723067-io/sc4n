@@ -325,6 +325,8 @@ before it reached the payload, and reported clean.**
 | `SC4N-ARCHIVE-PATH` | absolute paths, `..` segments, NUL, drive letters, backslash separators, over-long names — the zip-slip class |
 | `SC4N-ARCHIVE-LINK` | symlink/hardlink/device members |
 | `SC4N-ARCHIVE-NAME-MISMATCH` | the local header name differing from the central directory name: the classic way to make a scanner read one file and a loader another |
+| `SC4N-ARCHIVE-DIRECTORY-AMBIGUOUS` | the literal and prefix-derived directory offsets both validate at different positions; a loader resolving the prefix differently reads a member set sc4n did not |
+| `SC4N-PATH-ARTIFACT-MUTATED` | the file's size, mtime or ctime changed while it was parsed; the digest may not describe the parsed bytes |
 | `SC4N-ARCHIVE-DUPLICATE-NAME`, `-ENCRYPTED`, `-CRC` | duplicate names, encrypted members (which cannot be inspected), CRC mismatches |
 | `SC4N-ARCHIVE-NATIVE-MEMBER`, `-SHEBANG` | a validated native executable or a script inside an archive (high, not critical: loading the model does not run the member) |
 | `SC4N-ARCHIVE-NESTED-COMPRESSION`, `-UNSUPPORTED-COMPRESSION` | a wrapper inside a wrapper, and a wrapper with no stdlib decoder (xz, lzma, lz4, zstd, 7z, rar, joblib-legacy `ZF`) |

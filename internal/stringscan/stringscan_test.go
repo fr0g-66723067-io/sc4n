@@ -158,7 +158,7 @@ func TestObfuscationNeedsBothHalves(t *testing.T) {
 }
 
 func TestSecretValueIsRedacted(t *testing.T) {
-	hits := hitsFor(t, "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+	hits := hitsFor(t, "AWS_SECRET_ACCESS_KEY=hunter2")
 	var redacted int
 	for _, h := range hits {
 		if h.Redacted {
@@ -173,7 +173,7 @@ func TestSecretValueIsRedacted(t *testing.T) {
 	}
 
 	sink, fs := sinkFor()
-	EmitString(sink, 0, "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+	EmitString(sink, 0, "AWS_SECRET_ACCESS_KEY=hunter2")
 	found := false
 	for _, f := range fs() {
 		if f.RuleID == "SC4N-STRING-SECRET-VALUE" {
@@ -181,7 +181,7 @@ func TestSecretValueIsRedacted(t *testing.T) {
 			if !f.EvidenceRedacted {
 				t.Fatal("the emitted finding is not marked redacted")
 			}
-			if strings.Contains(f.Evidence, "wJalrXUtnFEMI") {
+			if strings.Contains(f.Evidence, "hunter2") {
 				t.Fatalf("the secret value leaked into the evidence: %q", f.Evidence)
 			}
 			// The sentence names the *shape* that matched, not the rule's title:
@@ -424,7 +424,7 @@ func TestCredentialEnvironmentNameNeedsARead(t *testing.T) {
 		// is a name, and only a vendor variable is a credential.
 		{`os.environ.get("TOKEN")`, false},
 		{`getenv("OPENAI_API_KEY")`, true},
-		{"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI", true},
+		{"AWS_SECRET_ACCESS_KEY=hunter2", true},
 	} {
 		var got bool
 		for _, h := range hitsFor(t, tc.text) {
@@ -1015,5 +1015,21 @@ func TestPipeToShellNeedsADownloadSource(t *testing.T) {
 				t.Errorf("%q: reported %s at %d, want nothing", in, h.Extra["shape"], h.Off)
 			}
 		}
+	}
+}
+
+func TestJSONCredentialPropertyIsReported(t *testing.T) {
+	hits := hitsFor(t, `{"password": "correct-Horse-battery9"}`)
+	var found bool
+	for _, h := range hits {
+		if h.Rule.ID == "SC4N-STRING-SECRET-VALUE" && h.Extra["kind"] == "secret-json" {
+			found = true
+			if !h.Redacted {
+				t.Fatal("JSON secret hit was not redacted")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("JSON credential property was not reported: %+v", hits)
 	}
 }

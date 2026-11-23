@@ -61,6 +61,12 @@ ENTRY = re.compile(
 )
 
 
+def fail(message):
+    """Exit non-zero even under python -O, where assert would disappear."""
+    print("genopcodes: " + message, file=sys.stderr)
+    sys.exit(1)
+
+
 def parse(path):
     text = open(path, encoding="utf-8").read()
     start = text.index("opcodes = [")
@@ -72,12 +78,14 @@ def parse(path):
     for m in ENTRY.finditer(body):
         code = m.group("code")[1:-1]
         code = code.encode("utf-8").decode("unicode_escape").encode("latin-1")
-        assert len(code) == 1, (m.group("name"), code)
+        if len(code) != 1:
+            fail("opcode %s has code length %d, want 1" % (m.group("name"), len(code)))
         arg = m.group("arg")
         if arg == "None":
             kind = "argNone"
         else:
-            assert arg in ARG_KINDS, f"unknown argument kind {arg} for {m.group('name')}"
+            if arg not in ARG_KINDS:
+                fail("unknown argument kind %r for %s" % (arg, m.group("name")))
             kind = "arg" + "".join(p.capitalize() for p in arg.split("_"))
         before = [x for x in re.split(r",\s*", m.group("before").strip()) if x]
         after = [x for x in re.split(r",\s*", m.group("after").strip()) if x]
@@ -101,9 +109,11 @@ def main():
     entries, start_line, count, digest = parse(path)
     by_code = {}
     for e in entries:
-        assert e["code"] not in by_code, "duplicate code"
+        if e["code"] in by_code:
+            fail("duplicate code %r" % (e["code"],))
         by_code[e["code"]] = e
-    assert len(entries) == 68, len(entries)
+    if len(entries) != 68:
+        fail("parsed %d entries, want 68" % len(entries))
 
     out = []
     w = out.append
@@ -115,7 +125,7 @@ def main():
     w(f"//   table   lines {start_line}-{start_line + count - 1} (the `opcodes = [ ... ]` list)")
     w("//")
     w("// The list's own uniqueness checks (pickletools.py, immediately after the list) guarantee one")
-    w("// entry per name and per code, and the generator asserts the same, so the table below is a")
+    w("// entry per name and per code, and the generator exits on the same violation, so the table below is a")
     w("// total function over all 256 byte values once OP_UNKNOWN fills the gaps.")
     w("package pickle")
     w("")

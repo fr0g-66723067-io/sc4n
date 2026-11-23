@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -70,19 +70,27 @@ type Index struct {
 // malformed attestation is an operator mistake, and continuing would silently
 // drop the demonstration the operator asked for.
 func Load(path string) (*Index, error) {
-	fi, err := os.Stat(path)
+	f, err := openAttestation(path)
 	if err != nil {
 		return nil, err
 	}
-	if fi.IsDir() {
-		return nil, fmt.Errorf("%s is a directory, not an attestation file", path)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file; refusing to read it", path)
 	}
 	if fi.Size() > maxAttestationBytes {
 		return nil, fmt.Errorf("%s is %d bytes, above the %d-byte attestation limit", path, fi.Size(), maxAttestationBytes)
 	}
-	b, err := os.ReadFile(path)
+	b, err := io.ReadAll(io.LimitReader(f, maxAttestationBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(b) > maxAttestationBytes {
+		return nil, fmt.Errorf("%s grew past the %d-byte attestation limit while being read", path, maxAttestationBytes)
 	}
 	return parse(b, path)
 }

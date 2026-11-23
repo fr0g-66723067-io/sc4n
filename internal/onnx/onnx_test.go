@@ -1104,3 +1104,35 @@ func TestStorageBlobIsNotAModel(t *testing.T) {
 		t.Fatalf("ir_version + opset sniff = %v, %v; want ONNX", f, ok)
 	}
 }
+
+func TestSniffClaimsModelWhoseGraphFollowsTheFieldCap(t *testing.T) {
+	parts := [][]byte{tv(1, 7)}
+	for range maxSniffFields {
+		parts = append(parts, tbytes(3, []byte("x")))
+	}
+	parts = append(parts, tbytes(7, nil))
+	data := tcat(parts...)
+	f, ok := sniff(source.Mem("late.onnx", data), limits.Default())
+	if !ok || f != artifact.FormatONNX {
+		t.Fatalf("a model whose graph follows the field cap sniffed as %v, %v", f, ok)
+	}
+}
+
+func TestPackedDimsPastRankCapAreNotDecoded(t *testing.T) {
+	var dims []byte
+	for range maxRank + 1 {
+		dims = append(dims, 1)
+	}
+	tensor := tcat(
+		tbytes(1, dims),
+		tv(2, 1),
+		tbytes(8, []byte("t")),
+		tbytes(9, make([]byte, 4)),
+	)
+	graph := tbytes(5, tensor)
+	model := tcat(tv(1, 7), tbytes(7, graph))
+	fs := parseFindings(t, "rank.onnx", model, "")
+	if !ids(fs)["SC4N-ONNX-STRUCT"] {
+		t.Fatalf("rank cap was silent; findings=%v", fs)
+	}
+}

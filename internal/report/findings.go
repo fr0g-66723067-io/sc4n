@@ -124,6 +124,11 @@ type Collector struct {
 	// is what keeps a SC4N-LIMIT-FINDINGS notice byte-identical between runs.
 	firstDropped string
 	bestDropped  *Finding
+	// suppress is the baseline fingerprint set. Add checks it before the cap so
+	// a baselined finding consumes no slot and a new finding cannot be evicted by
+	// an old one.
+	suppress   map[string]bool
+	suppressed int
 }
 
 // NewCollector returns a Collector that keeps at most limit findings. A limit of
@@ -158,6 +163,10 @@ func (h *findingHeap) Pop() any {
 func (c *Collector) Add(f Finding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !f.EvidenceRedacted && c.suppress[Fingerprint(f)] {
+		c.suppressed++
+		return
+	}
 	if c.limit <= 0 {
 		c.findings = append(c.findings, f)
 		return
@@ -178,6 +187,21 @@ func (c *Collector) Add(f Finding) {
 	h[0] = f
 	heap.Fix(&h, 0)
 	c.findings = h
+}
+
+// SetSuppress installs a baseline fingerprint set. Suppression is checked at Add,
+// before the finding cap, so baselined findings consume no cap slots.
+func (c *Collector) SetSuppress(fp map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.suppress = fp
+}
+
+// Suppressed returns how many findings a baseline removed.
+func (c *Collector) Suppressed() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.suppressed
 }
 
 // discard records that the cap dropped one finding, keeping the most valuable
@@ -285,7 +309,7 @@ func (c *Collector) Suppress(fp map[string]bool) int {
 	kept := c.findings[:0]
 	n := 0
 	for _, f := range c.findings {
-		if fp[Fingerprint(f)] {
+		if !f.EvidenceRedacted && fp[Fingerprint(f)] {
 			n++
 			continue
 		}
@@ -362,6 +386,12 @@ func (s *Sink) Named(member string) *Sink {
 // A duplicate returns before the finding reaches the cap, so the cap's dropped
 // counter is not touched: the first copy was either retained or counted as
 // dropped, and the second is the same fact, not a second one.
+// maxSinkSeen bounds the per-artifact dedupe map. The collector's MaxFindings
+// bounds retained findings, but a crafted stream can emit a million distinct
+// keys that are all dropped; beyond this cap deduplication stops rather than
+// growing the map with them.
+const maxSinkSeen = 1 << 16
+
 func (s *Sink) duplicate(r *Rule, pos uint64, evidence string) bool {
 	if s.seen == nil {
 		s.seen = make(map[[2]uint64]struct{})
@@ -380,6 +410,9 @@ func (s *Sink) duplicate(r *Rule, pos uint64, evidence string) bool {
 	}
 	if _, ok := s.seen[key]; ok {
 		return true
+	}
+	if len(s.seen) >= maxSinkSeen {
+		return false
 	}
 	s.seen[key] = struct{}{}
 	return false

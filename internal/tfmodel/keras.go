@@ -110,8 +110,19 @@ func analyzeKerasContainer(ctx *artifact.Ctx, s source.Source) {
 // cap. A member larger than the cap is reported and its bounded prefix analysed,
 // never silently skipped.
 func readMemberCapped(ctx *artifact.Ctx, s source.Source, m archive.Member) ([]byte, bool) {
-	rc, err := archive.Open(s, ctx.Limits, m)
+	if ctx.RemainingDecompressed() == 0 {
+		cap := ctx.Session.TopLimits.MaxDecompressedBytes
+		if cap <= 0 {
+			cap = limits.Default().MaxDecompressedBytes
+		}
+		ctx.ReportDecompressedLimit(ctx.ChargeDecompressed(0), cap)
+		return nil, false
+	}
+	l := ctx.Limits
+	l.MaxDecompressedBytes = ctx.RemainingDecompressed()
+	rc, err := archive.Open(s, l, m)
 	if err != nil {
+		archive.EmitOpenError(ctx, m.Name, err)
 		return nil, false
 	}
 	defer rc.Close()
@@ -123,9 +134,13 @@ func readMemberCapped(ctx *artifact.Ctx, s source.Source, m archive.Member) ([]b
 		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", m.Size, cap, "member "+m.Name)
 	}
 	data, err := io.ReadAll(io.LimitReader(rc, cap))
-	if err != nil && len(data) == 0 {
+	if err != nil {
+		archive.EmitOpenError(ctx, m.Name, err)
+	}
+	if len(data) == 0 {
 		return nil, false
 	}
+	ctx.ChargeDecompressed(int64(len(data)))
 	return data, true
 }
 

@@ -55,32 +55,33 @@ release-gate: test docs-links
 release: release-binaries verify-release
 
 release-binaries:
-	rm -rf $(DIST)
-	mkdir -p $(DIST)
+	sh tools/release/tag-check.sh "$(VERSION)"
+	rm -rf "$(DIST)"
+	mkdir -p "$(DIST)"
 	@set -e; for t in $(RELEASE_TARGETS); do \
 	  goos=$${t%/*}; goarch=$${t#*/}; \
-	  out=$(DIST)/$(BIN)_$(VERSION)_$${goos}_$${goarch}; \
-	  [ "$$goos" = windows ] && out=$$out.exe; \
+	  out="$(DIST)/$(BIN)_$(VERSION)_$${goos}_$${goarch}"; \
+	  [ "$$goos" = windows ] && out="$$out.exe"; \
 	  echo "  build $$out"; \
 	  GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 $(GO) build -trimpath \
-	    -ldflags "$(RELEASE_LDFLAGS)" -o $$out ./cmd/sc4n; \
+	    -ldflags "$(RELEASE_LDFLAGS)" -o "$$out" ./cmd/sc4n; \
 	done
-	cd $(DIST) && sha256sum $(BIN)_* | sort -k2 > SHA256SUMS
+	cd "$(DIST)" && sha256sum "$(BIN)"_* | sort -k2 > SHA256SUMS
 	@echo "  $(DIST)/SHA256SUMS"
 
 release-image: docker verify-image
 
 verify-image:
-	sh tools/release/image-check.sh $(BIN) $(VERSION)
+	sh tools/release/image-check.sh "$(BIN)" "$(VERSION)"
 
 verify-release:
-	sh tools/release/verify.sh $(DIST) $(VERSION)
+	sh tools/release/verify.sh "$(DIST)" "$(VERSION)"
 
 # The image is the documented way to scan an untrusted repository: --network=none
 # (the scan path has no dialer), --read-only and a non-root user bound what the
 # binary may read and write, which a path check alone cannot.
 docker:
-	docker build --build-arg VERSION=$(VERSION) -t $(BIN):$(VERSION) .
+	docker build --build-arg VERSION="$(VERSION)" -t "$(BIN):$(VERSION)" .
 
 vet:
 	$(GO) vet ./...

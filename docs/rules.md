@@ -2,7 +2,7 @@
 
 # Rule catalogue
 
-Every rule sc4n can emit, generated from the rule registry: 205 rules, 185 of
+Every rule sc4n can emit, generated from the rule registry: 211 rules, 191 of
 them naming a CWE. `sc4n rules` prints the same table with the rationale for
 each rule; this page exists so a reader holding a finding can look it up
 without a binary, and so every rule carries a link to what to do with it.
@@ -16,6 +16,7 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 |---|---|---|---|---|
 | [`SC4N-ADAPTER-EXTERNAL-BASE`](#sc4n-adapter-external-base) | high | medium | CWE-829 | PEFT adapter resolves its base model to another repository |
 | [`SC4N-ARCHIVE-CRC`](#sc4n-archive-crc) | medium | high | CWE-354 | Archive member CRC-32 does not match its content |
+| [`SC4N-ARCHIVE-DIRECTORY-AMBIGUOUS`](#sc4n-archive-directory-ambiguous) | high | high | CWE-436 | Zip has two valid central directories |
 | [`SC4N-ARCHIVE-DUPLICATE-NAME`](#sc4n-archive-duplicate-name) | medium | high | CWE-436 | Archive contains duplicate member names |
 | [`SC4N-ARCHIVE-ENCRYPTED`](#sc4n-archive-encrypted) | medium | high | CWE-693 | Archive member is encrypted and cannot be inspected |
 | [`SC4N-ARCHIVE-LINK`](#sc4n-archive-link) | high | high | CWE-59 | Archive contains a link or device member |
@@ -67,11 +68,13 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 | [`SC4N-GGUF-POLYGLOT`](#sc4n-gguf-polyglot) | high | high | CWE-506 | GGUF carries an APE/llamafile sigil or an embedded native executable |
 | [`SC4N-GGUF-STRUCT`](#sc4n-gguf-struct) | medium | high | CWE-20 | GGUF structure violates the format's own header |
 | [`SC4N-GGUF-TRAILING-DATA`](#sc4n-gguf-trailing-data) | high | high | CWE-506 | GGUF has undeclared trailing data after the last tensor |
+| [`SC4N-GITATTRIBUTES-DIFF-NAME`](#sc4n-gitattributes-diff-name) | info | low | CWE-829 | .gitattributes names a built-in diff driver |
 | [`SC4N-GITATTRIBUTES-FILTER`](#sc4n-gitattributes-filter) | high | medium | CWE-78 CWE-829 | .gitattributes names a non-LFS filter or diff driver |
 | [`SC4N-GITATTRIBUTES-LFS`](#sc4n-gitattributes-lfs) | medium | high | CWE-829 | .gitattributes routes files through Git LFS |
 | [`SC4N-HDF5-EXTERNAL-LINK`](#sc4n-hdf5-external-link) | high | low | CWE-22 CWE-73 | HDF5 file references an external path |
 | [`SC4N-HDF5-STRUCT`](#sc4n-hdf5-struct) | medium | high | CWE-20 | HDF5 file is shorter than its superblock |
 | [`SC4N-HFCACHE-BLOB-MISSING`](#sc4n-hfcache-blob-missing) | medium | high | CWE-20 | Hugging Face cache snapshot entry has no blob |
+| [`SC4N-HFCACHE-NOT-SCANNED`](#sc4n-hfcache-not-scanned) | high | high | CWE-693 | Hugging Face cache entry was not scanned |
 | [`SC4N-HFCACHE-REF-MALFORMED`](#sc4n-hfcache-ref-malformed) | low | high | CWE-20 | Hugging Face cache ref is not a commit hash |
 | [`SC4N-HFCACHE-SYMLINK-ESCAPE`](#sc4n-hfcache-symlink-escape) | high | high | CWE-22 CWE-59 | Hugging Face cache symlink escapes the cache root |
 | [`SC4N-IMG-METADATA`](#sc4n-img-metadata) | info | high | - | Image metadata was read and scanned |
@@ -131,6 +134,7 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 | [`SC4N-ONNX-STRUCT`](#sc4n-onnx-struct) | medium | high | CWE-20 | ONNX model is structurally inconsistent |
 | [`SC4N-PARSE-FAILED`](#sc4n-parse-failed) | medium | high | CWE-755 | Format parser could not walk the artifact to the end |
 | [`SC4N-PARTIAL-SLICE`](#sc4n-partial-slice) | info | high | CWE-1059 | Artifact is a header slice, so declared extents run past its end |
+| [`SC4N-PATH-ARTIFACT-MUTATED`](#sc4n-path-artifact-mutated) | medium | high | CWE-367 | Artifact changed while it was being scanned |
 | [`SC4N-PATH-ESCAPE`](#sc4n-path-escape) | high | high | CWE-22 CWE-59 | Reference resolves outside the scan root |
 | [`SC4N-PICKLE-APPEND-TARGET`](#sc4n-pickle-append-target) | high | medium | CWE-502 | APPEND/APPENDS targets a non-list |
 | [`SC4N-PICKLE-BUILD-STATE`](#sc4n-pickle-build-state) | high | high | CWE-502 CWE-915 | BUILD applies stream-controlled state to a non-allowlisted class |
@@ -163,6 +167,7 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 | [`SC4N-PTE-NATIVE`](#sc4n-pte-native) | high | high | CWE-506 | Native executable embedded in ExecuTorch segment data |
 | [`SC4N-PTE-STRUCT`](#sc4n-pte-struct) | medium | high | CWE-20 | ExecuTorch program header is invalid |
 | [`SC4N-PTE-UNVERIFIED`](#sc4n-pte-unverified) | info | high | - | ExecuTorch program is recognised but not deep-parsed |
+| [`SC4N-REPO-BACKEND-PATH`](#sc4n-repo-backend-path) | high | high | CWE-427 | PEP 517 backend-path shadows the allowlisted build backend |
 | [`SC4N-REPO-BUILD-BACKEND`](#sc4n-repo-build-backend) | high | high | CWE-506 | pyproject.toml names a build backend outside the known-good set |
 | [`SC4N-REPO-DOCKERFILE`](#sc4n-repo-dockerfile) | medium | low | CWE-506 | Dockerfile present in the scanned tree |
 | [`SC4N-REPO-PTH`](#sc4n-repo-pth) | critical | high | CWE-94 | Path configuration file executes code at interpreter start |
@@ -171,6 +176,7 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 | [`SC4N-REPO-SITE-CUSTOMIZE`](#sc4n-repo-site-customize) | high | high | CWE-506 | sitecustomize/usercustomize module runs at interpreter start |
 | [`SC4N-REPO-SPACE-APP`](#sc4n-repo-space-app) | medium | low | CWE-506 | app.py present in the scanned tree |
 | [`SC4N-REPO-START`](#sc4n-repo-start) | critical | high | CWE-94 | Python 3.15 startup entry point file executes a callable |
+| [`SC4N-REPO-TRUNCATED`](#sc4n-repo-truncated) | high | high | CWE-693 | Repository file truncated before analysis |
 | [`SC4N-REPO-WHEEL-IN-MODEL`](#sc4n-repo-wheel-in-model) | medium | low | CWE-506 | Python package archive found in the scanned tree |
 | [`SC4N-REPO-WORKFLOW-PRT`](#sc4n-repo-workflow-prt) | high | medium | CWE-94 | GitHub workflow interpolates event data into a run step |
 | [`SC4N-SAFETENSORS-DTYPE-UNKNOWN`](#sc4n-safetensors-dtype-unknown) | medium | high | CWE-20 | Tensor declares a dtype outside the known set |
@@ -220,7 +226,7 @@ detector is; `docs/triage.md` explains how the two combine into a decision.
 | [`SC4N-XGB-UBJ-STRUCT`](#sc4n-xgb-ubj-struct) | medium | high | CWE-20 | UBJSON stream is structurally invalid or exceeds the walk budget |
 | [`SC4N-XGB-UBJ-TRAILING`](#sc4n-xgb-ubj-trailing) | high | high | CWE-20 | Bytes follow the root UBJSON value |
 
-205 rule(s).
+211 rule(s).
 
 ## The load path runs code
 
@@ -1122,6 +1128,17 @@ References:
 - https://cwe.mitre.org/data/definitions/354.html
 
 
+### SC4N-ARCHIVE-DIRECTORY-AMBIGUOUS
+
+**Zip has two valid central directories** · severity `high` · confidence `high` · class `archive` · [CWE-436](https://cwe.mitre.org/data/definitions/436.html)
+
+The literal directory offset and the offset derived from the prefix both hold a central-directory signature, at different positions. A reader that resolves the prefix one way and a loader that resolves it another read different member sets, so a clean scan of this member list is not a clean statement about what the loader sees.
+
+References:
+
+- https://cwe.mitre.org/data/definitions/436.html
+
+
 ### SC4N-ARCHIVE-DUPLICATE-NAME
 
 **Archive contains duplicate member names** · severity `medium` · confidence `high` · class `archive` · [CWE-436](https://cwe.mitre.org/data/definitions/436.html)
@@ -1303,6 +1320,17 @@ The parser for this artifact's sniffed format returned an error part-way through
 References:
 
 - https://github.com/protectai/modelscan/issues/354
+
+
+### SC4N-PATH-ARTIFACT-MUTATED
+
+**Artifact changed while it was being scanned** · severity `medium` · confidence `high` · class `path` · [CWE-367](https://cwe.mitre.org/data/definitions/367.html)
+
+The file's size, modification time or inode change time differed after parsing. The digest may describe bytes other than the ones the parser read, so the scan result is not a statement about any single file state.
+
+References:
+
+- https://cwe.mitre.org/data/definitions/367.html
 
 
 ### SC4N-PATH-ESCAPE
@@ -2162,6 +2190,17 @@ References:
 
 How to act on these: [`docs/triage.md#repo-supply-chain`](triage.md#repo-supply-chain).
 
+### SC4N-GITATTRIBUTES-DIFF-NAME
+
+**.gitattributes names a built-in diff driver** · severity `info` · confidence `low` · class `gitattributes` · [CWE-829](https://cwe.mitre.org/data/definitions/829.html)
+
+A `.gitattributes` line assigns `diff=<built-in>` for a driver Git ships. The name itself is a highlighting convention, but a local Git config may define a `textconv` command under the same driver name, so the attribute is recorded without failing a benign repository.
+
+References:
+
+- https://git-scm.com/docs/gitattributes
+
+
 ### SC4N-GITATTRIBUTES-FILTER
 
 **.gitattributes names a non-LFS filter or diff driver** · severity `high` · confidence `medium` · class `gitattributes` · [CWE-78](https://cwe.mitre.org/data/definitions/78.html), [CWE-829](https://cwe.mitre.org/data/definitions/829.html)
@@ -2193,6 +2232,17 @@ References:
 A snapshot entry (or its symlink target) could not be stat'd. Either the link is dangling or the blob it names is absent, so the file contributes no bytes to the scan. Reporting it keeps a partially-populated cache from being mistaken for a fully-scanned one.
 
 
+### SC4N-HFCACHE-NOT-SCANNED
+
+**Hugging Face cache entry was not scanned** · severity `high` · confidence `high` · class `path` · [CWE-693](https://cwe.mitre.org/data/definitions/693.html)
+
+A snapshot entry was omitted: it resolves to a directory or a non-regular file, or its subtree could not be walked. The cache scan's claim to have covered the snapshot is then false, so the omission fails the default high gate.
+
+References:
+
+- https://cwe.mitre.org/data/definitions/693.html
+
+
 ### SC4N-HFCACHE-REF-MALFORMED
 
 **Hugging Face cache ref is not a commit hash** · severity `low` · confidence `high` · class `format` · [CWE-20](https://cwe.mitre.org/data/definitions/20.html)
@@ -2209,6 +2259,17 @@ A snapshot entry is a symlink that is absolute or whose target leaves the cache 
 References:
 
 - https://cwe.mitre.org/data/definitions/59.html
+
+
+### SC4N-REPO-BACKEND-PATH
+
+**PEP 517 backend-path shadows the allowlisted build backend** · severity `high` · confidence `high` · class `repo` · [CWE-427](https://cwe.mitre.org/data/definitions/427.html)
+
+A pyproject.toml [build-system] sets backend-path. PEP 517 puts those directories ahead of the installed backend on sys.path, so repository code can shadow a module the allowlisted backend imports. The backend name can be known-good while the code that runs is the repository's.
+
+References:
+
+- https://peps.python.org/pep-0517/#in-tree-build-backends
 
 
 ### SC4N-REPO-BUILD-BACKEND
@@ -2299,6 +2360,17 @@ A file named *.start contains an entry point of the form `pkg.mod:callable`. Pyt
 References:
 
 - https://docs.python.org/3.15/whatsnew/3.15.html
+
+
+### SC4N-REPO-TRUNCATED
+
+**Repository file truncated before analysis** · severity `high` · confidence `high` · class `repo` · [CWE-693](https://cwe.mitre.org/data/definitions/693.html)
+
+A repository file larger than the analysis cap was analysed only on its prefix. The tail was not examined, and a .pth, setup.py or workflow sink placed after the cap is therefore invisible; the finding fails a high gate rather than presenting the prefix as the whole file.
+
+References:
+
+- https://cwe.mitre.org/data/definitions/693.html
 
 
 ### SC4N-REPO-WHEEL-IN-MODEL

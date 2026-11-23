@@ -66,6 +66,15 @@ type Members struct {
 	Members   []Member
 	Truncated bool  // the member cap was hit
 	Trailing  int64 // bytes between the end-of-central-directory record and EOF
+	// DirAmbiguous means two central directories validated at different
+	// positions. A loader may read the other one, so the member list below is
+	// not provably the set the loader will use.
+	DirAmbiguous bool
+	DirOffsets   [2]int64
+	// NamesCapped records that the directory name-retention budget stopped the
+	// read before the declared member count; the unread records are reported.
+	NamesCapped bool
+	NameBytes   int64
 }
 
 // ErrNotArchive is returned by Collect for content that is neither a zip nor a tar.
@@ -83,7 +92,11 @@ func Collect(s source.Source, l limits.Limits) (Members, error) {
 		if err != nil {
 			return Members{}, err
 		}
-		ms := Members{Format: artifact.FormatZip, Truncated: info.Truncated, Trailing: info.Trailing}
+		ms := Members{
+			Format: artifact.FormatZip, Truncated: info.Truncated, Trailing: info.Trailing,
+			DirAmbiguous: info.DirAmbiguous, DirOffsets: info.DirOffsets,
+			NamesCapped: info.NamesCapped, NameBytes: info.NameBytes,
+		}
 		ms.Members = make([]Member, 0, len(entries))
 		for i := range entries {
 			e := &entries[i]
@@ -98,14 +111,18 @@ func Collect(s source.Source, l limits.Limits) (Members, error) {
 			m.Size = clampU64(e.uncomp)
 			m.CompressedSize = clampU64(e.comp)
 			m.Mode = e.extAttrs >> 16
-			m.IsDir = e.name != "" && strings.HasSuffix(e.name, "/")
+			// A directory is a name ending in "/" *and* no data. Directory
+			// metadata alone must not hide a member whose bytes a loader reads:
+			// a crafted zip sets the mode bits on data.pkl and every walker that
+			// trusted them skipped the payload.
+			m.IsDir = e.uncomp == 0 && e.comp == 0 && e.name != "" && strings.HasSuffix(e.name, "/")
 			switch m.Mode & 0xF000 {
 			case 0xA000:
 				m.LinkKind = "symlink"
 			case 0x2000, 0x6000, 0x1000:
 				m.LinkKind = "device"
 			case 0x4000:
-				m.IsDir = true
+				m.IsDir = e.uncomp == 0 && e.comp == 0
 			}
 			body, localName, mismatch, localErr := resolveLocal(s, *e)
 			m.dataOff = body
@@ -150,6 +167,17 @@ func (ms Members) Check(ctx *artifact.Ctx) {
 		ctx.Sink.EmitExtra(ruleArchiveTrailingData, 0,
 			strconv.FormatInt(ms.Trailing, 10)+" byte(s) follow the end-of-central-directory record, so the container and the appended region disagree about where it ends",
 			map[string]string{"trailingBytes": strconv.FormatInt(ms.Trailing, 10)})
+	}
+	if ms.DirAmbiguous {
+		ctx.Sink.EmitExtra(ruleArchiveDirectoryAmbiguous, 0,
+			"two central directories validate at offsets "+itoa64(ms.DirOffsets[0])+" and "+itoa64(ms.DirOffsets[1])+"; a loader may read a member set sc4n did not",
+			map[string]string{"offsetA": itoa64(ms.DirOffsets[0]), "offsetB": itoa64(ms.DirOffsets[1])})
+	}
+	if ms.NamesCapped {
+		limits.Emit(ctx.Sink, limits.RuleRetained, "MaxRetainedText", ms.NameBytes, retainedCap(ctx.Limits), "archive member names")
+		ctx.Sink.EmitExtra(ruleArchiveMemberSkipped, 0,
+			"central-directory name retention stopped before every declared record was read, so later members were not listed",
+			map[string]string{"nameBytes": itoa64(ms.NameBytes)})
 	}
 	seen := make(map[string]bool, len(ms.Members))
 	for i := range ms.Members {
@@ -322,7 +350,6 @@ func ZipNames(s source.Source, l limits.Limits, max int) ([]string, error) {
 // mapping; a large *compressed* member is spilled to a private temp file.
 func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 	max := maxBlob(ctx.Limits)
-	var cumulative int64
 	for i := range ms.Members {
 		m := ms.Members[i]
 		if m.IsDir || m.LinkKind != "" || m.Encrypted {
@@ -351,13 +378,18 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 			artifact.ScanMember(ctx, m.Name, cs)
 			n := src.Size()
 			_ = cs.Close()
-			cumulative += n
-			if exceededDecompressed(ctx, cumulative) {
+			if chargeDecompressed(ctx, n) {
 				return
 			}
 			continue
 		}
-		rc, err := Open(s, ctx.Limits, m)
+		if ctx.RemainingDecompressed() == 0 {
+			reportDecompressed(ctx)
+			return
+		}
+		l := ctx.Limits
+		l.MaxDecompressedBytes = ctx.RemainingDecompressed()
+		rc, err := Open(s, l, m)
 		if err != nil {
 			EmitOpenError(ctx, m.Name, err)
 			continue
@@ -365,9 +397,9 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 		// The zip member's expansion is already bounded by the ratio cap in
 		// collectZipMember's limitReader, so no extra justification bound is
 		// passed (-1 = unknown at this layer).
-		cumulative += processReader(ctx, m.Name, m.Size, -1, rc, nil)
+		n := processReader(ctx, m.Name, m.Size, -1, rc, nil)
 		_ = rc.Close()
-		if exceededDecompressed(ctx, cumulative) {
+		if chargeDecompressed(ctx, n) {
 			return
 		}
 	}
@@ -394,7 +426,6 @@ func scanTarMembers(ctx *artifact.Ctx, s source.Source) {
 	if max <= 0 {
 		max = limits.Default().MaxEntries
 	}
-	var cumulative int64
 	for i := 0; ; i++ {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -439,19 +470,42 @@ func scanTarMembers(ctx *artifact.Ctx, s source.Source) {
 		if stretch < 0 {
 			stretch = 0
 		}
-		cumulative += processReader(ctx, hdr.Name, hdr.Size, stretch, tr, nil)
-		if exceededDecompressed(ctx, cumulative) {
+		if ctx.RemainingDecompressed() == 0 {
+			reportDecompressed(ctx)
+			return
+		}
+		n := processReader(ctx, hdr.Name, hdr.Size, stretch, tr, nil)
+		if chargeDecompressed(ctx, n) {
 			return
 		}
 	}
 }
 
-func exceededDecompressed(ctx *artifact.Ctx, cumulative int64) bool {
-	if ctx.Limits.MaxDecompressedBytes <= 0 || cumulative <= ctx.Limits.MaxDecompressedBytes {
+// chargeDecompressed charges one member and reports the single scan-wide limit
+// when the budget is spent. It returns true when the caller must stop opening
+// members.
+func chargeDecompressed(ctx *artifact.Ctx, n int64) bool {
+	ctx.ChargeDecompressed(n)
+	if ctx.RemainingDecompressed() > 0 {
 		return false
 	}
-	limits.Emit(ctx.Sink, limits.RuleDecompressed, "MaxDecompressedBytes", cumulative, ctx.Limits.MaxDecompressedBytes, "archive")
+	reportDecompressed(ctx)
 	return true
+}
+
+func reportDecompressed(ctx *artifact.Ctx) {
+	cap := ctx.Session.TopLimits.MaxDecompressedBytes
+	if cap <= 0 {
+		cap = limits.Default().MaxDecompressedBytes
+	}
+	ctx.ReportDecompressedLimit(ctx.ChargeDecompressed(0), cap)
+}
+
+func retainedCap(l limits.Limits) int64 {
+	if l.MaxRetainedText > 0 {
+		return l.MaxRetainedText
+	}
+	return limits.Default().MaxRetainedText
 }
 
 // processReader reads one member from a forward reader and dispatches it. A member
@@ -494,6 +548,14 @@ func processReader(ctx *artifact.Ctx, name string, declared, stretch int64, r io
 
 	if n > max && !unjustified {
 		capBytes := spillCap(ctx.Limits)
+		if remaining := ctx.RemainingSpill(); remaining < capBytes {
+			capBytes = remaining
+		}
+		if capBytes <= 0 {
+			ctx.ReportSpillLimit(ctx.ChargeSpill(1), ctx.Limits.MaxSpillBytes)
+			scanPrefix(ctx, name, probe)
+			return 1
+		}
 		src, err := source.Spill(name, io.MultiReader(bytes.NewReader(probe), r), capBytes)
 		if err != nil {
 			emitSpillError(ctx, name, declared, capBytes, err)
@@ -501,11 +563,13 @@ func processReader(ctx *artifact.Ctx, name string, declared, stretch int64, r io
 			// The spill wrote at most capBytes+1 bytes before refusing; charge
 			// that rather than the probe length so the cumulative budget is not
 			// undercharged by the spill/probe ratio.
+			ctx.ChargeSpill(capBytes + 1)
 			return capBytes + 1
 		}
 		artifact.ScanMember(ctx, name, src)
 		sn := src.Size()
 		_ = src.Close()
+		ctx.ChargeSpill(sn)
 		return sn
 	}
 
@@ -590,7 +654,11 @@ func emitSpillError(ctx *artifact.Ctx, name string, declared, capBytes int64, er
 		}
 		limits.Emit(ctx.Sink, limits.RuleSpill, "MaxSpillBytes", value, st.Limit, "member "+snippet(name))
 	case errors.As(err, &le):
-		limits.Emit(ctx.Sink, le.Rule, le.Limit, le.Value, le.Cap, le.Detail)
+		if le.Rule == limits.RuleDecompressed {
+			ctx.ReportDecompressedLimit(le.Value, le.Cap)
+		} else {
+			limits.Emit(ctx.Sink, le.Rule, le.Limit, le.Value, le.Cap, le.Detail)
+		}
 	case errors.Is(err, errCRC):
 		ctx.Sink.EmitExtra(ruleArchiveCRC, 0, "crc32 mismatch in member "+snippet(name), map[string]string{"member": name})
 	default:
@@ -636,7 +704,11 @@ func EmitOpenError(ctx *artifact.Ctx, name string, err error) {
 	var um *unsupportedMethodError
 	switch {
 	case errors.As(err, &le):
-		limits.Emit(ctx.Sink, le.Rule, le.Limit, le.Value, le.Cap, le.Detail)
+		if le.Rule == limits.RuleDecompressed {
+			ctx.ReportDecompressedLimit(le.Value, le.Cap)
+		} else {
+			limits.Emit(ctx.Sink, le.Rule, le.Limit, le.Value, le.Cap, le.Detail)
+		}
 	case errors.As(err, &um):
 		ctx.Sink.EmitExtra(ruleArchiveUnsupportedCompression, 0,
 			"zip member "+snippet(name)+" uses "+algorithmFor(um)+"; NOT DECOMPRESSED",
@@ -666,13 +738,14 @@ func scanCompressed(ctx *artifact.Ctx, s source.Source) error {
 	if closer != nil {
 		defer closer.Close()
 	}
-	processReader(ctx, decompressedName(ctx), -1, -1, r, func(probe []byte) {
+	n := processReader(ctx, decompressedName(ctx), -1, -1, r, func(probe []byte) {
 		if inner, ok := DetectCompressor(source.Mem("payload", probe), ctx.Limits); ok {
 			ctx.Sink.EmitExtra(ruleArchiveNestedCompression, 0,
 				c.String()+" payload is itself "+inner.String(),
 				map[string]string{"outer": c.String(), "inner": inner.String()})
 		}
 	})
+	chargeDecompressed(ctx, n)
 	return nil
 }
 
@@ -819,6 +892,16 @@ func sniffZlib(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 		return artifact.FormatUnknown, false
 	}
 	if !zlibShape(b) {
+		return artifact.FormatUnknown, false
+	}
+	zr, zerr := zlib.NewReader(s.Reader(0))
+	if zerr != nil {
+		return artifact.FormatUnknown, false
+	}
+	var one [1]byte
+	_, rerr := zr.Read(one[:])
+	_ = zr.Close()
+	if rerr != nil && !errors.Is(rerr, io.EOF) && !errors.Is(rerr, io.ErrUnexpectedEOF) {
 		return artifact.FormatUnknown, false
 	}
 	return artifact.FormatZlib, true

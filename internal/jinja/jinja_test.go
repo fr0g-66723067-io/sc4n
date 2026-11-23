@@ -2,6 +2,7 @@ package jinja
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
@@ -322,5 +323,76 @@ func TestFixtureFiles(t *testing.T) {
 	}
 	if fs := analyze(t, string(benign)); len(fs) != 0 {
 		t.Errorf("benign/llama_template.jinja produced %v", ids(fs))
+	}
+}
+
+func TestPlusEndrawTerminatorDoesNotSwallowTheSuffix(t *testing.T) {
+	toks, _ := lex(`{% raw %}body{% endraw +%}{{ lipsum.__globals__ }}`)
+	found := false
+	for _, tok := range toks {
+		if tok.kind == kindName && tok.val == "lipsum" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the template after a + terminator was not tokenised: %+v", toks)
+	}
+}
+
+func TestOctalAndLongHexEscapesDecodeToDunder(t *testing.T) {
+	for _, tmpl := range []string{
+		`{{ x['\137\137class\137\137'] }}`,
+		`{{ x['\U0000005f\U0000005fclass\U0000005f\U0000005f'] }}`,
+	} {
+		fs := analyze(t, tmpl)
+		if ids(fs)["SC4N-JINJA-PY-OBJECT"] == 0 {
+			t.Fatalf("escaped dunder %q was not reported: %+v", tmpl, fs)
+		}
+	}
+}
+
+func TestUnknownEscapeKeepsBackslash(t *testing.T) {
+	toks, _ := lex(`{{ '\q' }}`)
+	for _, tok := range toks {
+		if tok.kind == kindString {
+			if tok.val != `\q` {
+				t.Fatalf("unknown escape decoded to %q, want literal backslash-q", tok.val)
+			}
+			return
+		}
+	}
+	t.Fatal("no string token")
+}
+
+func TestTokenCapIsReported(t *testing.T) {
+	tmpl := "{{ " + strings.Repeat("a ", maxJinjaTokens+10) + "}}"
+	fs := analyze(t, tmpl)
+	if ids(fs)["SC4N-LIMIT-ENTRIES"] == 0 {
+		t.Fatalf("token cap was silent; findings=%v", fs)
+	}
+}
+
+func TestAttributePathFilterReportsDunder(t *testing.T) {
+	fs := analyze(t, `{{ messages | map(attribute='__class__') | list }}`)
+	if ids(fs)["SC4N-JINJA-PY-OBJECT"] == 0 {
+		t.Fatalf("attribute= dunder was not reported; findings=%v", fs)
+	}
+}
+
+func TestAliasAndComputedKeySubscriptReportsPyObject(t *testing.T) {
+	fs := analyze(t, `{% set g = '__class__' %}{{ x[g] }}`)
+	if ids(fs)["SC4N-JINJA-PY-OBJECT"] == 0 {
+		t.Fatalf("alias subscript was not reported; findings=%v", fs)
+	}
+}
+
+func TestChainAnalysisIsBudgeted(t *testing.T) {
+	c := report.NewCollector(0)
+	a := &analyzer{sink: c.For("x"), chainBudget: 0}
+	if a.chargeChain() {
+		t.Fatal("an exhausted chain budget allowed a step")
+	}
+	if ids(c.Findings())["SC4N-LIMIT-ENTRIES"] == 0 {
+		t.Fatalf("chain budget was silent; findings=%v", c.Findings())
 	}
 }

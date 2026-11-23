@@ -80,6 +80,11 @@ type Session struct {
 	mu      sync.Mutex
 	seen    map[string]string
 	partial map[string]bool
+
+	spentDecompressed int64
+	spentSpill        int64
+	decompressedOnce  sync.Once
+	spillOnce         sync.Once
 }
 
 // IsPartial reports whether the named artifact is a truncated copy.
@@ -132,6 +137,147 @@ func (s *Session) MarkSeen(digest, name string) (string, bool) {
 	}
 	s.seen[digest] = name
 	return name, true
+}
+
+// ChargeDecompressed adds n bytes to the scan-wide decompressed budget and
+// returns the new total. The budget is scan-wide, not per walker: a nested
+// archive that restarted its own cumulative counter multiplied the declared cap
+// by the nesting depth.
+func (s *Session) ChargeDecompressed(n int64) int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n > 0 {
+		s.spentDecompressed += n
+	}
+	return s.spentDecompressed
+}
+
+// RemainingDecompressed returns the bytes left in the scan-wide budget, clamped
+// at zero. A zero result means the next member must not be opened.
+func (s *Session) RemainingDecompressed() int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cap := s.TopLimits.MaxDecompressedBytes
+	if cap <= 0 {
+		cap = limits.Default().MaxDecompressedBytes
+	}
+	if s.spentDecompressed >= cap {
+		return 0
+	}
+	return cap - s.spentDecompressed
+}
+
+// ChargeSpill adds n bytes to the scan-wide materialisation budget.
+func (s *Session) ChargeSpill(n int64) int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n > 0 {
+		s.spentSpill += n
+	}
+	return s.spentSpill
+}
+
+// RemainingSpill returns the bytes left for materialised members, clamped at
+// zero.
+func (s *Session) RemainingSpill() int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cap := s.TopLimits.MaxSpillBytes
+	if cap <= 0 {
+		cap = limits.Default().MaxSpillBytes
+	}
+	if s.spentSpill >= cap {
+		return 0
+	}
+	return cap - s.spentSpill
+}
+
+// ReportDecompressedLimit emits the one SC4N-LIMIT-DECOMPRESSED for the scan,
+// even when a nested container reaches the same exhausted budget from another
+// walker.
+func (s *Session) ReportDecompressedLimit(sink *report.Sink, value, cap int64) {
+	if s == nil || sink == nil {
+		return
+	}
+	s.decompressedOnce.Do(func() {
+		if cap <= 0 {
+			cap = limits.Default().MaxDecompressedBytes
+		}
+		limits.Emit(sink, limits.RuleDecompressed, "MaxDecompressedBytes", value, cap,
+			"scan-wide decompressed budget")
+	})
+}
+
+// ReportSpillLimit emits the one SC4N-LIMIT-SPILL for the scan-wide
+// materialisation budget.
+func (s *Session) ReportSpillLimit(sink *report.Sink, value, cap int64) {
+	if s == nil || sink == nil {
+		return
+	}
+	s.spillOnce.Do(func() {
+		if cap <= 0 {
+			cap = limits.Default().MaxSpillBytes
+		}
+		limits.Emit(sink, limits.RuleSpill, "MaxSpillBytes", value, cap,
+			"scan-wide spill budget")
+	})
+}
+
+// Ctx wrappers are nil-safe so a parser sees the same API whether it was
+// constructed by a scan or by a unit test.
+
+func (c *Ctx) ChargeDecompressed(n int64) int64 {
+	if c == nil {
+		return 0
+	}
+	return c.Session.ChargeDecompressed(n)
+}
+
+func (c *Ctx) RemainingDecompressed() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.Session.RemainingDecompressed()
+}
+
+func (c *Ctx) ChargeSpill(n int64) int64 {
+	if c == nil {
+		return 0
+	}
+	return c.Session.ChargeSpill(n)
+}
+
+func (c *Ctx) RemainingSpill() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.Session.RemainingSpill()
+}
+
+func (c *Ctx) ReportDecompressedLimit(value, cap int64) {
+	if c == nil {
+		return
+	}
+	c.Session.ReportDecompressedLimit(c.Sink, value, cap)
+}
+
+func (c *Ctx) ReportSpillLimit(value, cap int64) {
+	if c == nil {
+		return
+	}
+	c.Session.ReportSpillLimit(c.Sink, value, cap)
 }
 
 // Ctx is the per-artifact, per-nesting-level context. It is created fresh for

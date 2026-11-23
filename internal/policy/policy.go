@@ -124,7 +124,7 @@ func Unsuppressed(findings []report.Finding, baseline map[string]bool) ([]report
 	kept := make([]report.Finding, 0, len(findings))
 	suppressed := 0
 	for _, f := range findings {
-		if baseline[report.Fingerprint(f)] {
+		if !f.EvidenceRedacted && baseline[report.Fingerprint(f)] {
 			suppressed++
 			continue
 		}

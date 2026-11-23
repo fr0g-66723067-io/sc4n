@@ -22,6 +22,20 @@ import traceback
 
 RESULT = {"loader": "", "loaded": False, "error": "", "missingModules": []}
 
+# The loader starts as root only because the entrypoint starts it under the
+# root-owned tracer. Nothing artifact-controlled may run with that identity: the
+# artifact is chosen by an attacker, and its first instruction is the payload.
+PAYLOAD_UID = 65534
+
+
+def drop_privileges():
+    """Become the unprivileged payload identity, or fail closed."""
+    os.setgroups([])
+    os.setgid(PAYLOAD_UID)
+    os.setuid(PAYLOAD_UID)
+    if os.getuid() != PAYLOAD_UID or os.geteuid() != PAYLOAD_UID:
+        raise RuntimeError("could not drop to uid %d" % PAYLOAD_UID)
+
 # An .npz member above this size is a tensor, not a payload; reading it would
 # cost the container's memory and demonstrate nothing. The bound comes from the
 # zip metadata, so it is checked before the member is decompressed.
@@ -80,7 +94,7 @@ def pick(path):
 
         return "torch.load", lambda: torch.load(
             path, map_location="cpu", weights_only=False
-        )
+        )  # nosec B614 -- the harness loads the artifact on purpose
     if low.endswith((".joblib", ".jl")):
         import joblib
 
@@ -90,7 +104,7 @@ def pick(path):
 
         def _pickle_load():
             with open(path, "rb") as f:
-                return pickle.load(f)
+                return pickle.load(f)  # nosec B301 -- the harness unpickles the artifact on purpose
 
         return "pickle.load", _pickle_load
     if low.endswith(".npz"):
@@ -161,20 +175,23 @@ def main(argv):
         return 1
     target, result_path = argv[1], argv[2]
     try:
+        drop_privileges()
+        RESULT["uid"] = os.getuid()
         name, fn = pick(target)
         RESULT["loader"] = name
         fn()
         RESULT["loaded"] = True
-    except ModuleNotFoundError as e:
-        RESULT["loaded"] = False
-        RESULT["missingModules"] = [e.name or "unknown"]
-        RESULT["error"] = "ModuleNotFoundError: %s" % (e.name or "")
     except BaseException as e:  # noqa: BLE001 - a payload may raise anything
         RESULT["loaded"] = False
         RESULT["error"] = "%s: %s" % (type(e).__name__, str(e)[:300])
-        # The traceback goes to stderr, which the caller keeps in the scratch
-        # directory: it is how a human explains a surprising "loaded: false".
-        traceback.print_exc()
+        if not isinstance(e, ModuleNotFoundError):
+            # The traceback goes to stderr, which the caller keeps in the
+            # scratch directory: it is how a human explains a surprising
+            # "loaded: false". A missing module is not a payload failure.
+            traceback.print_exc()
+        if isinstance(e, ModuleNotFoundError):
+            RESULT["missingModules"] = [e.name or "unknown"]
+            RESULT["error"] = "ModuleNotFoundError: %s" % (e.name or "")
     with open(result_path, "w", encoding="utf-8") as f:
         json.dump(RESULT, f, sort_keys=True)
     return 0
