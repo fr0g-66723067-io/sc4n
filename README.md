@@ -117,7 +117,10 @@ covered and produced no finding — the misses are the visible artifact. A gated
 file's reason names the gate mode and the URL: `automatic approval` means the
 account accepts the terms once (in a browser) and the same token then works,
 `manual approval` means only the repository owner can grant access, so no client
-retry can change the outcome.
+retry can change the outcome. A file the Hub declares as 0 bytes is proved empty
+with a one-byte read: a Hub that declares 0 and serves content is reported as
+`size-mismatch` and nothing is stored, because storing it would be an unbounded
+transfer charged as zero.
 
 A campaign does not have to start from a search. Three other universes are
 first-class, and `-level any` scans every repo in the universe instead of only the

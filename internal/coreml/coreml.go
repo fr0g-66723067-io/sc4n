@@ -204,7 +204,7 @@ func (w *walker) modelField(num protowire.Number, v []byte) {
 	case fieldDescription:
 		w.walkStrings(v, 0)
 	case fieldPipelineClassifier, fieldPipelineRegressor:
-		if inner := findBytesField(v, pipelineFieldModels, "pipeline wrapper"); inner != nil {
+		if inner := w.findBytesField(v, pipelineFieldModels, "pipeline wrapper"); inner != nil {
 			w.walkPipeline(inner, 0)
 		}
 	case fieldPipeline:
@@ -216,7 +216,7 @@ func (w *walker) modelField(num protowire.Number, v []byte) {
 	case fieldNeuralRegr, fieldNeuralClass:
 		// These wrappers carry the NeuralNetwork in field 1.
 		w.walkStrings(v, 0)
-		if inner := findBytesField(v, 1, "Network wrapper"); inner != nil {
+		if inner := w.findBytesField(v, 1, "Network wrapper"); inner != nil {
 			w.walkNeuralNetwork(inner)
 		}
 	case fieldMLProgram:
@@ -238,26 +238,26 @@ func (w *walker) walkNeuralNetwork(b []byte) {
 }
 
 func (w *walker) walkLayer(b []byte) {
-	if v := findBytesField(b, layerFieldCustom, "NeuralNetworkLayer"); v != nil {
+	if v := w.findBytesField(b, layerFieldCustom, "NeuralNetworkLayer"); v != nil {
 		w.walkCustomLayer(v)
 	}
 }
 
 func (w *walker) walkCustomLayer(b []byte) {
-	if v := findBytesField(b, customFieldClass, "CustomLayerParams.className"); v != nil {
+	if v := w.findBytesField(b, customFieldClass, "CustomLayerParams.className"); v != nil {
 		w.emitCustom("custom layer", v)
 	}
-	if v := findBytesField(b, customFieldDescr, "CustomLayerParams.description"); v != nil {
+	if v := w.findBytesField(b, customFieldDescr, "CustomLayerParams.description"); v != nil {
 		w.walkStrings(v, 0)
 	}
 	w.eachBytesField(b, customFieldParams, "CustomLayerParams.params", w.scanMapEntry)
 }
 
 func (w *walker) walkCustomModel(b []byte) {
-	if v := findBytesField(b, customFieldClass, "CustomModel.className"); v != nil {
+	if v := w.findBytesField(b, customFieldClass, "CustomModel.className"); v != nil {
 		w.emitCustom("custom model", v)
 	}
-	if v := findBytesField(b, modelCustomDescr, "CustomModel.description"); v != nil {
+	if v := w.findBytesField(b, modelCustomDescr, "CustomModel.description"); v != nil {
 		w.walkStrings(v, 0)
 	}
 	// CustomModel parameters are map<string, CustomModelParamValue>; the value is a
@@ -280,15 +280,18 @@ func (w *walker) walkPipeline(b []byte, depth int) {
 }
 
 func (w *walker) emitCustom(what string, className []byte) {
-	name := string(className)
+	// The cap is applied to the bytes: `string(className)` copies the whole
+	// attacker-sized value, so checking the length afterwards still materialised
+	// it once at the walk window's 64 MiB before truncating to MaxStringBlob.
 	cap := w.l.MaxStringBlob
 	if cap <= 0 {
 		cap = limits.Default().MaxStringBlob
 	}
-	if int64(len(name)) > cap {
-		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", int64(len(name)), cap, "Core ML "+what+" class name")
-		name = name[:cap]
+	if int64(len(className)) > cap {
+		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", int64(len(className)), cap, "Core ML "+what+" class name")
+		className = className[:cap]
 	}
+	name := string(className)
 	w.sink.EmitExtra(RuleCustomLayer, 0,
 		"the model declares a "+what+" named "+report.TruncateEvidence(name, 256)+"; the implementation is supplied by the host "+
 			"application, not by this file",
@@ -309,10 +312,10 @@ func (w *walker) scanMapEntry(b []byte) {
 func (w *walker) scanParamEntry(b []byte) {
 	w.eachBytesField(b, 1, "param entry key", w.scanText)
 	w.eachBytesField(b, 2, "param entry value", func(v []byte) {
-		if s := findBytesField(v, paramValueStrField, "CustomModelParamValue.stringValue"); s != nil {
+		if s := w.findBytesField(v, paramValueStrField, "CustomModelParamValue.stringValue"); s != nil {
 			w.scanText(s)
 		}
-		if s := findBytesField(v, paramValueByteField, "CustomModelParamValue.bytesValue"); s != nil {
+		if s := w.findBytesField(v, paramValueByteField, "CustomModelParamValue.bytesValue"); s != nil {
 			w.scanText(s)
 		}
 	})
@@ -467,24 +470,33 @@ func (w *walker) eachBytesField(b []byte, want protowire.Number, what string, fn
 }
 
 // findBytesField returns the first length-delimited value of field want, or nil.
-func findBytesField(b []byte, want protowire.Number, what string) []byte {
+//
+// A record it cannot parse is reported, not read as "the field is absent". The
+// absent reading is what a truncated nested message got, so a layer whose custom
+// block was cut short produced neither the custom-layer finding nor a structural
+// one: the walker declined to walk and nothing said so.
+func (w *walker) findBytesField(b []byte, want protowire.Number, what string) []byte {
+	fail := func() []byte {
+		w.bad("Core ML " + what + " field is malformed or truncated")
+		return nil
+	}
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
-			return nil
+			return fail()
 		}
 		b = b[n:]
 		switch typ {
 		case protowire.VarintType:
 			_, m := protowire.ConsumeVarint(b)
 			if m < 0 {
-				return nil
+				return fail()
 			}
 			b = b[m:]
 		case protowire.BytesType:
 			v, m := protowire.ConsumeBytes(b)
 			if m < 0 {
-				return nil
+				return fail()
 			}
 			if num == want {
 				return v
@@ -493,23 +505,23 @@ func findBytesField(b []byte, want protowire.Number, what string) []byte {
 		case protowire.Fixed32Type:
 			m := consumeFixed32(b)
 			if m < 0 {
-				return nil
+				return fail()
 			}
 			b = b[m:]
 		case protowire.Fixed64Type:
 			m := consumeFixed64(b)
 			if m < 0 {
-				return nil
+				return fail()
 			}
 			b = b[m:]
 		case protowire.StartGroupType:
 			_, m := protowire.ConsumeGroup(num, b)
 			if m < 0 {
-				return nil
+				return fail()
 			}
 			b = b[m:]
 		default:
-			return nil
+			return fail()
 		}
 	}
 	return nil

@@ -26,7 +26,7 @@ const sampleTrace = `12345 execve("/bin/sh", ["/bin/sh", "-c", "nslookup pickle-
 
 func TestApplyTrace(t *testing.T) {
 	r := &malice.Run{Loaded: true}
-	applyTrace(r, sampleTrace)
+	applyTrace(r, sampleTrace, "")
 
 	if got := r.Exec; len(got) != 1 || got[0] != "/bin/sh -c nslookup pickle-rce-test.rce.lc" {
 		t.Fatalf("Exec = %v", got)
@@ -67,7 +67,7 @@ func TestApplyTrace(t *testing.T) {
 // so a run on a different host does not silently report no effects.
 func TestApplyTraceOldPidForm(t *testing.T) {
 	r := &malice.Run{}
-	applyTrace(r, `[pid 99] execve("/bin/sh", ["/bin/sh", "-c", "id"], 0x0 /* 1 var */) = 0`)
+	applyTrace(r, `[pid 99] execve("/bin/sh", ["/bin/sh", "-c", "id"], 0x0 /* 1 var */) = 0`, "")
 	if len(r.Exec) != 1 || r.Exec[0] != "/bin/sh -c id" {
 		t.Fatalf("Exec = %v", r.Exec)
 	}
@@ -77,7 +77,7 @@ func TestApplyTraceOldPidForm(t *testing.T) {
 // -s, and dropping the whole call would hide the program that ran.
 func TestApplyTraceUnterminated(t *testing.T) {
 	r := &malice.Run{}
-	applyTrace(r, `7 execve("/bin/sh", ["/bin/sh", "-c", "curl http://x") = 0`)
+	applyTrace(r, `7 execve("/bin/sh", ["/bin/sh", "-c", "curl http://x") = 0`, "")
 	if len(r.Exec) != 1 || !strings.Contains(r.Exec[0], "/bin/sh -c curl http://x") {
 		t.Fatalf("Exec = %v", r.Exec)
 	}
@@ -92,7 +92,7 @@ func TestApplyTraceDedupesAndBounds(t *testing.T) {
 		b.WriteString(`1 openat(AT_FDCWD, "/home/worker/f.txt", O_RDONLY) = 3` + "\n")
 	}
 	r := &malice.Run{}
-	applyTrace(r, b.String())
+	applyTrace(r, b.String(), "")
 	if len(r.OpenedOutside) != 1 {
 		t.Fatalf("OpenedOutside = %d entries, want 1 deduped", len(r.OpenedOutside))
 	}
@@ -102,7 +102,7 @@ func TestApplyTraceDedupesAndBounds(t *testing.T) {
 		b.WriteString(`1 openat(AT_FDCWD, "/home/worker/f` + itoa(i) + `.txt", O_RDONLY) = 3` + "\n")
 	}
 	r = &malice.Run{}
-	applyTrace(r, b.String())
+	applyTrace(r, b.String(), "")
 	if len(r.OpenedOutside) != maxEffectEntries {
 		t.Fatalf("OpenedOutside = %d entries, want the bound %d", len(r.OpenedOutside), maxEffectEntries)
 	}
@@ -158,10 +158,36 @@ func TestApplyTraceDropsOnlyTheFirstHarnessExec(t *testing.T) {
 	applyTrace(r, `1 execve("/usr/local/bin/python3", ["python3", "/opt/sc4nconfirm/load.py", "/w/a.pkl", "/tmp/result.json"], 0x0) = 0
 2 execve("/bin/sh", ["/bin/sh", "-c", "id"], 0x0) = 0
 3 execve("/bin/sh", ["/bin/sh", "-c", "/opt/sc4nconfirm/load.py"], 0x0) = 0
-`)
+`, "")
 	if len(r.Exec) != 2 {
 		t.Fatalf("Exec = %v, want the shell and the later loader-named shell", r.Exec)
 	}
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// TestHarnessExecIsDroppedByPIDNotPosition pins the truncated-tail case: only the
+// last 8 MiB of a trace are parsed, so a payload that floods quiet reads and then
+// execs the loader's exact command line is the first exec of the parsed text. When
+// the drop was keyed on position, that exec was discarded as the harness and the
+// payload's own exec left no effect at all.
+func TestHarnessExecIsDroppedByPIDNotPosition(t *testing.T) {
+	harness := "1"
+	tail := `77 execve("/usr/local/bin/python3", ["python3", "/opt/sc4nconfirm/load.py"], 0x0) = 0
+78 execve("/bin/sh", ["/bin/sh", "-c", "id"], 0x0) = 0
+`
+	r := &malice.Run{}
+	applyTrace(r, tail, harness)
+	if len(r.Exec) != 2 {
+		t.Fatalf("Exec = %v, want the payload's loader-shaped exec kept", r.Exec)
+	}
+
+	// The harness's own exec, at its pid, is still dropped.
+	r = &malice.Run{}
+	applyTrace(r, `1 execve("/usr/local/bin/python3", ["python3", "/opt/sc4nconfirm/load.py"], 0x0) = 0
+2 execve("/bin/sh", ["/bin/sh", "-c", "id"], 0x0) = 0
+`, harness)
+	if len(r.Exec) != 1 || r.Exec[0] != "/bin/sh -c id" {
+		t.Fatalf("Exec = %v, want only the shell", r.Exec)
+	}
+}

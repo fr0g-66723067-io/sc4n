@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,8 +15,10 @@ import (
 )
 
 // FetchFile is one file's fetch outcome. Status is one of full, slice, gated,
-// missing, budget, unsafe-path, error or dir; every one of them is a statement
-// about coverage, so a file is never absent from the list.
+// missing, size-mismatch, budget, unsafe-path, error or dir; every one of them is
+// a statement about coverage, so a file is never absent from the list.
+// size-mismatch is a Hub that declares 0 bytes and serves content: nothing is
+// stored, because storing it would be an unbounded transfer charged as zero.
 type FetchFile struct {
 	Path   string `json:"path"`
 	Size   int64  `json:"size"`
@@ -246,6 +249,41 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 			humanBytes(need))
 	}
 
+	if need == 0 {
+		// A file the Hub declares as 0 bytes costs no budget, but it still has to
+		// be proven empty. Download treats max<=0 as "no cap" and copies to EOF,
+		// so fetching it the ordinary way let a Hub that declares 0 and serves a
+		// payload write an unbounded file and wait on it with nothing charged.
+		// One byte is enough to tell an empty file from a lied-about one.
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			ff.Detail = err.Error()
+			return ff
+		}
+		res, derr := f.o.Client.Download(f.ctx, id, e.path, 0, 1, io.Discard)
+		if derr != nil {
+			f.downloadFailure(&ff, id, res, derr)
+			return ff
+		}
+		if res.Bytes > 0 {
+			ff.Status = "size-mismatch"
+			ff.HTTP = res.Status
+			ff.Detail = "the Hub declares 0 bytes but served content; nothing was stored"
+			return ff
+		}
+		fh, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			ff.Detail = err.Error()
+			return ff
+		}
+		if err := fh.Close(); err != nil {
+			ff.Detail = err.Error()
+			return ff
+		}
+		ff.Status = "full"
+		ff.HTTP = res.Status
+		return ff
+	}
+
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		ff.Detail = err.Error()
 		return ff
@@ -265,20 +303,7 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 	}
 	if derr != nil {
 		os.Remove(part)
-		ff.HTTP = res.Status
-		switch {
-		case errors.Is(derr, hubapi.ErrGated):
-			ff.Status = "gated"
-			ff.Detail = f.gateDetail(id, derr)
-		case errors.Is(derr, hubapi.ErrAuth):
-			ff.Status = "gated"
-			ff.Detail = "the Hub rejected the token (401); check -token-file / HF_TOKEN"
-		case errors.Is(derr, hubapi.ErrNotFound):
-			ff.Status = "missing"
-			ff.Detail = "the Hub has no such file (repo disabled after being flagged?)"
-		default:
-			ff.Detail = derr.Error()
-		}
+		f.downloadFailure(&ff, id, res, derr)
 		return ff
 	}
 	if res.Bytes != need {
@@ -301,6 +326,25 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 		ff.Detail = fmt.Sprintf("the Hub listed %d bytes and served %d", e.size, res.Bytes)
 	}
 	return ff
+}
+
+// downloadFailure fills ff from a Download error. Every transfer failure is
+// reported here so the empty-file probe and an ordinary fetch cannot drift.
+func (f *fetcher) downloadFailure(ff *FetchFile, id string, res hubapi.DownloadResult, derr error) {
+	ff.HTTP = res.Status
+	switch {
+	case errors.Is(derr, hubapi.ErrGated):
+		ff.Status = "gated"
+		ff.Detail = f.gateDetail(id, derr)
+	case errors.Is(derr, hubapi.ErrAuth):
+		ff.Status = "gated"
+		ff.Detail = "the Hub rejected the token (401); check -token-file / HF_TOKEN"
+	case errors.Is(derr, hubapi.ErrNotFound):
+		ff.Status = "missing"
+		ff.Detail = "the Hub has no such file (repo disabled after being flagged?)"
+	default:
+		ff.Detail = derr.Error()
+	}
 }
 
 // gateDetail says why the Hub refused the file and what, if anything, the operator

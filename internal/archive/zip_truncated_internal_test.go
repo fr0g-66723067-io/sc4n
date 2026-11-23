@@ -1,6 +1,8 @@
 package archive
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"testing"
 
@@ -258,5 +260,88 @@ func TestRecoverLocalMembersIgnoredWithoutBit3(t *testing.T) {
 	}
 	if got := ms[0].dataEnd - ms[0].dataOff; got != int64(len(payload)) {
 		t.Fatalf("span = %d, want %d", got, len(payload))
+	}
+}
+
+// TestRecoverLocalMembersWrappedZip64SizeKeepsLaterMembers pins the size check
+// that was performed after a uint64→int64 conversion: a compressed size of
+// 2^64-1 converted to -1, so `dataOff+int64(c) <= size` held and the framing
+// guard accepted a local signature planted one byte before the member's data.
+// The walk then skipped the member as zero-length and continued inside its own
+// header, and every later member was never scanned.
+func TestRecoverLocalMembersWrappedZip64SizeKeepsLaterMembers(t *testing.T) {
+	first := localHeader("a.txt", 0, 0, 5, 5)
+	data := append([]byte{}, first...)
+	data = append(data, "hello"...)
+
+	// Only the compressed size is saturated, so the zip64 extra holds it alone:
+	// id 1, length 8, comp = 2^64-1. A trailing extra record ends in 'P', so the
+	// planted "PK\x03\x04" starts one byte before the payload.
+	extra := []byte{1, 0, 8, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	extra = append(extra, 0x99, 0x99, 1, 0, 'P')
+	data = append(data, hdrWithExtra("bad.pkl", 0, 0xFFFFFFFF, 0, extra)...)
+	data = append(data, "K\x03\x04"...)
+
+	later := localHeader("later.pkl", 0, 0, 3, 3)
+	data = append(data, later...)
+	data = append(data, "xyz"...)
+
+	ms, _, _ := recoverLocalMembers(source.Mem("t.zip", data), limits.Default())
+	for _, m := range ms {
+		if m.name == "later.pkl" {
+			return
+		}
+	}
+	t.Fatalf("the member after a wrapped zip64 size was not recovered: %+v", ms)
+}
+
+// TestRecoveredZipMembersShareTheDecompressionBudget pins the budget on the
+// no-EOCD path: each recovered deflate member was opened with the *configured*
+// MaxDecompressedBytes instead of what the scan has left, so a truncated archive
+// decompressed a fresh budget per member. Here the scan has 1 KiB left of an
+// 8 GiB configuration; the first member must be cut at the 1 KiB and the second
+// must not be entered at all.
+func TestRecoveredZipMembersShareTheDecompressionBudget(t *testing.T) {
+	body := bytes.Repeat([]byte("A"), 1<<16)
+	var c1, c2 bytes.Buffer
+	for _, w := range []*bytes.Buffer{&c1, &c2} {
+		fw, err := flate.NewWriter(w, flate.DefaultCompression)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = fw.Write(body)
+		_ = fw.Close()
+	}
+	data := append(localHeader("a", 8, 0, uint32(c1.Len()), uint32(len(body))), c1.Bytes()...)
+	data = append(data, localHeader("b", 8, 0, uint32(c2.Len()), uint32(len(body)))...)
+	data = append(data, c2.Bytes()...)
+
+	l := limits.Default()
+	src := source.Mem("t.zip", data)
+	ms, _, _ := recoverLocalMembers(src, l)
+	if len(ms) != 2 {
+		t.Fatalf("recovered %d members, want 2", len(ms))
+	}
+	ctx, col := testCtx(t, "t.zip", l)
+	const left = 1024
+	ctx.ChargeDecompressed(l.MaxDecompressedBytes - left)
+	if got := ctx.RemainingDecompressed(); got != left {
+		t.Fatalf("remaining budget = %d, want %d", got, left)
+	}
+	scanned, n := scanRecovered(ctx, src, ms)
+	if n > left {
+		t.Fatalf("read %d bytes against a %d byte remainder (the configured cap was used)", n, left)
+	}
+	if scanned != 1 {
+		t.Fatalf("scanned %d members, want 1 before the budget was spent", scanned)
+	}
+found := false
+	for _, f := range col.Findings() {
+		if f.RuleID == "SC4N-LIMIT-DECOMPRESSED" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the shared budget was silent; findings=%v", col.Findings())
 	}
 }

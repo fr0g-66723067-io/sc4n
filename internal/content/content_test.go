@@ -542,3 +542,39 @@ func TestAutoMapLocalIsReportedPerModule(t *testing.T) {
 		}
 	}
 }
+
+// TestJSONCredentialPropertyIsReported pins the decoded-metadata path. config.json
+// is parsed and every key and value is scanned on its own, so the
+// `"password": "value"` pairing exists only in the document bytes; without the
+// pair walk a generic credential in a config produced no SC4N-STRING-SECRET-VALUE
+// while the same bytes in a plain .json produced the high finding, and
+// `-fail-on high` accepted the artifact.
+func TestJSONCredentialPropertyIsReported(t *testing.T) {
+	const value = "correct-Horse-battery9"
+	doc := []byte(`{"tokenizer_kwargs":{"password": "` + value + `"}}`)
+	var got []report.Finding
+	for _, f := range scanBytes(t, "config.json", doc, limits.Default()) {
+		if f.RuleID == "SC4N-STRING-SECRET-VALUE" {
+			got = append(got, f)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("one credential property produced %d findings, want 1: %+v", len(got), got)
+	}
+	f := got[0]
+	if f.Extra["kind"] != "secret-json" || f.Extra["shape"] != "password:" {
+		t.Fatalf("extra = %v, want kind secret-json and shape password:", f.Extra)
+	}
+	if !f.EvidenceRedacted {
+		t.Fatal("the credential property finding is not marked redacted")
+	}
+	if strings.Contains(f.Evidence, value) {
+		t.Fatalf("the value leaked into evidence: %q", f.Evidence)
+	}
+	if f.Offset != int64(bytes.Index(doc, []byte(value))) {
+		t.Fatalf("offset = %d, want the value's offset %d", f.Offset, bytes.Index(doc, []byte(value)))
+	}
+	if f.Severity != report.SeverityHigh {
+		t.Fatalf("severity = %s, want high", f.Severity)
+	}
+}

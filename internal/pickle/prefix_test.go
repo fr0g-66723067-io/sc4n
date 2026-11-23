@@ -1,6 +1,7 @@
 package pickle
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -70,6 +71,30 @@ func TestSniffPrefixProbeIsBounded(t *testing.T) {
 	s.Close()
 	if ok {
 		t.Fatalf("a stream starting past the %d-byte prefix probe was claimed", prefixProbe)
+	}
+}
+
+// TestSniffClaimsStreamWhoseLaterLineExceedsCap pins the second half of the
+// protocol-0 overflow case. The first opcode's oversized line was already
+// evidence, but the same line at any later position was fatal in both the probe
+// and the real walk: the artifact was dispatched "unknown" (no parser, no
+// indicator pass) or claimed and truncated before the REDUCE, so the gadget
+// behind a padded constant was never analysed. The line is skipped, and the
+// walk reaches the loader-executable call after it.
+func TestSniffClaimsStreamWhoseLaterLineExceedsCap(t *testing.T) {
+	data := []byte{opEMPTY_LIST, opSTRING}
+	data = append(data, bytes.Repeat([]byte{'a'}, int(limits.Default().MaxStringBlob)+1)...)
+	data = append(data, '\n')
+	data = append(data, []byte("cos\nsystem\n(S'id'\ntR.")...)
+	s := source.Mem("late-line.pkl", data)
+	got, ok := sniff(s, limits.Default())
+	s.Close()
+	if !ok || got != artifact.FormatPickle {
+		t.Fatalf("sniff = %s, %v; want pickle", got, ok)
+	}
+	_, fs := walk(t, data)
+	if !hasRule(fs, "SC4N-PICKLE-GLOBAL-CRITICAL") {
+		t.Fatalf("the gadget after the padded line was not reported; findings=%v", ruleIDs(fs))
 	}
 }
 

@@ -913,7 +913,10 @@ func scanJSONSecretProps(b []byte, hits []Hit) []Hit {
 			break
 		}
 		key := string(b[i+1 : keyEnd])
-		if !jsonSecretNames[key] {
+		// The key is matched through the same normalisation as an assignment
+		// name, so `apiKey` and `API_KEY` reach the same policy as `api_key`.
+		// The finding still names the spelling the document used.
+		if !jsonSecretNames[normaliseCredential(key)] {
 			i = keyEnd
 			continue
 		}
@@ -961,6 +964,37 @@ func scanJSONSecretProps(b []byte, hits []Hit) []Hit {
 		i = valEnd
 	}
 	return hits
+}
+
+// minJSONSecretValue is the shortest decoded property value the secret rule
+// treats as a credential. Eight bytes is the raw scanner's floor for the same
+// shape: below it a value is a placeholder or a word, and reporting it would
+// make `"password": "changeme"` (a documented default a reader replaces) a
+// finding.
+const minJSONSecretValue = 8
+
+// EmitJSONSecretValue reports `"name": "value"` when name is a credential
+// property and value is not a placeholder, at off (the value's offset).
+//
+// The raw scanner sees the byte form through scanJSONSecretProps. A decoded
+// metadata document (config.json, model_index.json) hands each key and value to
+// the string engine separately, so the property-to-value pairing does not exist
+// in any single buffer it scans: without this call a generic credential in a
+// config was invisible to SC4N-STRING-SECRET-VALUE while the same bytes in a
+// plain .json produced the high finding. The masking contract is the raw
+// scanner's: the finding names the shape and never the value.
+func EmitJSONSecretValue(sink *report.Sink, off int64, name, value string) {
+	if !jsonSecretNames[normaliseCredential(name)] || len(value) < minJSONSecretValue {
+		return
+	}
+	probe := make([]byte, 0, len(name)+1+len(value))
+	probe = append(append(append(probe, name...), '='), value...)
+	if assignmentValueIsPlaceholder(probe, Hit{Off: 0, Match: name + "="}) {
+		return
+	}
+	sink.EmitRedacted(ruleSecretValue, off,
+		"a value matching the "+name+": shape is present and has been masked",
+		map[string]string{"shape": name + ":", "kind": "secret-json"})
 }
 
 func scanOpaqueLiterals(b []byte, hits []Hit) []Hit {

@@ -24,7 +24,13 @@ BIN ?= sc4n
 # tags or git stamps its commit; no git at all stamps "dev", which is what the
 # binary reported for every build before this.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS ?= -X main.version=$(VERSION)
+# The tag reaches every recipe through the environment, never through the recipe
+# text. A ref name may contain backticks or `$(...)`, and a make expansion into a
+# shell line is executed while the shell parses it — before tag-check.sh, the only
+# validator, can reject it. `$${VERSION}` is a variable reference the shell
+# substitutes after parsing, so the value is never re-read as syntax.
+export VERSION
+LDFLAGS ?= -X main.version=$${VERSION}
 
 .PHONY: all build vet test test-simd bench bench-big fixtures fuzz clean fmt diffscan docker lab oracle-image confirm-image confirm release-gate release-binaries verify-release release release-image verify-image
 
@@ -47,6 +53,7 @@ release-gate: test docs-links
 	@git diff --exit-code testdata/fixtures
 	$(GO) run ./tools/sc4nrules -out docs/rules.md
 	@git diff --exit-code docs/rules.md
+	sh tools/release/tag-check_test.sh
 
 # A release is five binaries and one SHA256SUMS covering them. `make release`
 # builds and then verifies what it built, because a release asset that does not
@@ -55,12 +62,12 @@ release-gate: test docs-links
 release: release-binaries verify-release
 
 release-binaries:
-	sh tools/release/tag-check.sh "$(VERSION)"
+	sh tools/release/tag-check.sh "$${VERSION}"
 	rm -rf "$(DIST)"
 	mkdir -p "$(DIST)"
 	@set -e; for t in $(RELEASE_TARGETS); do \
 	  goos=$${t%/*}; goarch=$${t#*/}; \
-	  out="$(DIST)/$(BIN)_$(VERSION)_$${goos}_$${goarch}"; \
+	  out="$(DIST)/$(BIN)_$${VERSION}_$${goos}_$${goarch}"; \
 	  [ "$$goos" = windows ] && out="$$out.exe"; \
 	  echo "  build $$out"; \
 	  GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 $(GO) build -trimpath \
@@ -72,16 +79,16 @@ release-binaries:
 release-image: docker verify-image
 
 verify-image:
-	sh tools/release/image-check.sh "$(BIN)" "$(VERSION)"
+	sh tools/release/image-check.sh "$(BIN)" "$${VERSION}"
 
 verify-release:
-	sh tools/release/verify.sh "$(DIST)" "$(VERSION)"
+	sh tools/release/verify.sh "$(DIST)" "$${VERSION}"
 
 # The image is the documented way to scan an untrusted repository: --network=none
 # (the scan path has no dialer), --read-only and a non-root user bound what the
 # binary may read and write, which a path check alone cannot.
 docker:
-	docker build --build-arg VERSION="$(VERSION)" -t "$(BIN):$(VERSION)" .
+	docker build --build-arg VERSION="$${VERSION}" -t "$(BIN):$${VERSION}" .
 
 vet:
 	$(GO) vet ./...

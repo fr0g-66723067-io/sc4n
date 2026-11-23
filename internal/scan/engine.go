@@ -821,6 +821,23 @@ var skipDirs = map[string]bool{
 	"__pycache__":  true,
 }
 
+// bindRoot binds an entry to the root it was checked against, so it is opened
+// through os.Root: a pathname open follows a link a writer can substitute between
+// the containment check and the read, and os.Root refuses one that leaves the
+// root. A path outside the root keeps its pathname open — the operator named it,
+// and the root policy does not cover it.
+func bindRoot(e Entry, root string) Entry {
+	if root == "" {
+		return e
+	}
+	rel, err := filepath.Rel(root, e.Path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return e
+	}
+	e.RootDir, e.Rel = root, rel
+	return e
+}
+
 // expand turns the configuration into a sorted work list. The first path-expansion
 // error is returned alongside the list so the CLI can exit 3 for a path the user
 // named and could not be opened, while still scanning everything else.
@@ -842,13 +859,13 @@ func expand(cfg Config) ([]Entry, error) {
 			out = append(out, Entry{Path: p, Display: p})
 			continue
 		}
+		root := cfg.Root
 		if lfi.Mode()&os.ModeSymlink != 0 {
 			target, terr := filepath.EvalSymlinks(p)
 			if terr != nil {
 				out = append(out, Entry{Path: p, Display: p, Skip: terr})
 				continue
 			}
-			root := cfg.Root
 			if root == "" {
 				root = filepath.Dir(p)
 			}
@@ -867,7 +884,14 @@ func expand(cfg Config) ([]Entry, error) {
 			continue
 		}
 		if !fi.IsDir() {
-			out = append(out, Entry{Path: p, Display: display})
+			// Only a regular file under the root policy is bound: os.Root.Open
+			// would block on a FIFO, and -symlinks follow deliberately reads where
+			// the link resolves.
+			e := Entry{Path: p, Display: display}
+			if cfg.Symlinks == SymlinkRoot && fi.Mode().IsRegular() {
+				e = bindRoot(e, root)
+			}
+			out = append(out, e)
 			continue
 		}
 		// The root a link must stay inside. EvalSymlinks on the named directory so
@@ -907,7 +931,8 @@ func expand(cfg Config) ([]Entry, error) {
 					return nil
 				}
 				escape := cfg.Symlinks == SymlinkRoot && !withinRoot(root, target)
-				if st, serr := os.Stat(path); serr == nil && st.IsDir() {
+				st, serr := os.Stat(path)
+				if serr == nil && st.IsDir() {
 					// A link that resolves to a directory is not an artifact. The
 					// walk does not descend into it (filepath.WalkDir does not follow
 					// links) and the directory's own contents are scanned through
@@ -927,8 +952,19 @@ func expand(cfg Config) ([]Entry, error) {
 						Skip: symlinkEscape(path, target)})
 					return nil
 				}
-				// Under -symlinks follow, open the resolved target directly: an
-				// os.Root open would still refuse a target outside the root.
+				// A regular in-root target is opened through os.Root at the link's
+				// own spelling: the target was resolved for the containment decision,
+				// but a writer can replace the link between that check and the open,
+				// and os.Root refuses a link that leaves the root. A non-regular
+				// target keeps the pathname open so scanOne rejects it by mode —
+				// os.Root.Open would block on a FIFO — and -symlinks follow keeps the
+				// resolved target, which is the policy the operator asked for.
+				if cfg.Symlinks == SymlinkRoot && serr == nil && st.Mode().IsRegular() {
+					if rel, rerr := filepath.Rel(root, path); rerr == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+						out = append(out, Entry{Path: path, Display: path, RootDir: root, Rel: rel})
+						return nil
+					}
+				}
 				out = append(out, Entry{Path: target, Display: path})
 				return nil
 			}

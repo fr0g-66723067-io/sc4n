@@ -130,6 +130,34 @@ func ScanJSONFile(sink *report.Sink, base int64, path string, data []byte) {
 		walkJSONStrings(doc, func(s string) {
 			ScanMetadata(sink, base+idx.locate(data, s), path, s)
 		})
+		walkJSONSecretPairs(doc, func(key, value string) {
+			stringscan.EmitJSONSecretValue(sink, base+idx.locate(data, value), key, value)
+		})
+	}
+}
+
+// walkJSONSecretPairs calls fn for every key/value pair whose value is a string,
+// in the same deterministic order walkJSONStrings uses. The pair is passed
+// together because the secret rule needs the property name and its value, and
+// the decoded walk otherwise hands each string over on its own.
+func walkJSONSecretPairs(v any, fn func(key, value string)) {
+	switch x := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if s, ok := x[k].(string); ok {
+				fn(k, s)
+			}
+			walkJSONSecretPairs(x[k], fn)
+		}
+	case []any:
+		for _, it := range x {
+			walkJSONSecretPairs(it, fn)
+		}
 	}
 }
 

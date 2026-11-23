@@ -87,10 +87,11 @@ type Stream struct {
 	// RequiresUnsafeLoader reports whether any opcode outside the weights-only
 	// accepted set appeared.
 	RequiresUnsafeLoader bool
-	// FirstOpLineOverflow records that the first opcode's newline argument ran
-	// past the probe budget. It is evidence that the stream is one, not that the
-	// candidate is byte soup, and the sniffer uses it for a no-PROTO slice.
-	FirstOpLineOverflow bool
+	// LineOverflow records that a newline-terminated argument ran past its cap
+	// (MaxStringBlob for a string payload, the name scan for a name). It is
+	// evidence that the stream is one, not that the candidate is byte soup, and
+	// the sniffer uses it for a no-PROTO slice.
+	LineOverflow bool
 }
 
 // Walk analyses the whole window at off 0 of s.
@@ -453,7 +454,7 @@ func (w *walker) probePickle(off int, needEvidence bool) bool {
 	// every Python source file. This is the gate that kept source, tar and zip
 	// artifacts out of this parser before the protocol path was loosened, and it
 	// stays exactly as strict for them.
-	if !hasProto && probe.stream.StructErrors > 0 && !probe.stream.FirstOpLineOverflow {
+	if !hasProto && probe.stream.StructErrors > 0 && !probe.stream.LineOverflow {
 		return false
 	}
 	// A byte that is not an opcode is decisive: a pickle contains only opcodes, so a
@@ -525,7 +526,7 @@ func (w *walker) probePickle(off int, needEvidence bool) bool {
 	if hasProto {
 		return probe.stream.Ops >= minSniffOps || truncatedByBudget
 	}
-	return truncatedByBudget || probe.stream.FirstOpLineOverflow
+	return truncatedByBudget || probe.stream.LineOverflow
 }
 
 // segment walks one pickle, from start to its STOP. It returns the offset just
@@ -565,12 +566,24 @@ func (w *walker) segment(start int) (int, bool) {
 		arg, next, err := w.decodeArg(info, pos)
 		if err != nil {
 			kind := errKind(err)
-			if pos == start && (kind == "no-newline" || kind == "line-over-blob-cap") {
-				w.stream.FirstOpLineOverflow = true
+			// A newline argument past MaxStringBlob cannot be read, but the
+			// loader reads it: skip the line and keep walking, because stopping
+			// here hid every opcode after one padded constant. A protocol-0 stream
+			// was then dispatched "unknown" (no parser, no indicator pass), or was
+			// claimed and truncated before its REDUCE. The skip is bounded by the
+			// artifact — each byte is visited once — and readNewline already
+			// reported the cap with SC4N-LIMIT-STRING.
+			if kind == "line-over-blob-cap" {
+				w.stream.LineOverflow = true
 				w.structFinding(kind, err.Error(), int64(pos))
+				if nl := bytes.IndexByte(w.data[pos+1:w.end()], '\n'); nl >= 0 {
+					pos += nl + 2
+					continue
+				}
 				return pos, true
 			}
-			if kind == "line-over-blob-cap" {
+			if pos == start && kind == "no-newline" {
+				w.stream.LineOverflow = true
 				w.structFinding(kind, err.Error(), int64(pos))
 				return pos, true
 			}

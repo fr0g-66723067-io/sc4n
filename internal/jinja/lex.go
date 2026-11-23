@@ -36,6 +36,23 @@ func lex(src string) ([]token, int) {
 	var toks []token
 	n := len(src)
 	textStart := 0
+	// stop reports the truncation point and releases the oversized backing
+	// array. The budget is enforced while tokenising, not after: checking the
+	// length once at the end meant a dense template was fully tokenised into
+	// millions of structs before `toks[:maxJinjaTokens]` threw most of them away,
+	// and the slice kept the whole array alive through analysis.
+	stop := func() ([]token, int) {
+		at := n
+		if len(toks) > maxJinjaTokens {
+			at = toks[maxJinjaTokens].off
+		}
+		if len(toks) >= maxJinjaTokens && cap(toks) > maxJinjaTokens {
+			out := make([]token, maxJinjaTokens)
+			copy(out, toks)
+			toks = out
+		}
+		return toks, at
+	}
 	flush := func(end int) {
 		if end > textStart {
 			toks = append(toks, token{kind: kindText, off: textStart, end: end, val: src[textStart:end]})
@@ -53,6 +70,9 @@ func lex(src string) ([]token, int) {
 			continue
 		}
 		flush(i)
+		if len(toks) >= maxJinjaTokens {
+			return stop()
+		}
 		switch open {
 		case '#':
 			start := i + 2
@@ -80,7 +100,7 @@ func lex(src string) ([]token, int) {
 			j := strings.Index(src[lo:], "}}")
 			if j < 0 {
 				toks = append(toks, token{kind: kindTag, off: i, end: i + 2, val: "{{"})
-				toks = append(toks, lexExpr(src, lo, n)...)
+				toks = append(toks, lexExpr(src, lo, n, maxJinjaTokens-len(toks))...)
 				i = n
 				break
 			}
@@ -89,7 +109,7 @@ func lex(src string) ([]token, int) {
 				hi--
 			}
 			toks = append(toks, token{kind: kindTag, off: i, end: i + 2, val: "{{"})
-			toks = append(toks, lexExpr(src, lo, hi)...)
+			toks = append(toks, lexExpr(src, lo, hi, maxJinjaTokens-len(toks))...)
 			toks = append(toks, token{kind: kindTagEnd, off: hi, end: hi + 2, val: "}}"})
 			i = lo + j + 2
 
@@ -99,12 +119,12 @@ func lex(src string) ([]token, int) {
 			j := strings.Index(src[lo:], "%}")
 			if j < 0 {
 				toks = append(toks, token{kind: kindTag, off: i, end: i + 2, val: "{%"})
-				toks = append(toks, lexExpr(src, lo, n)...)
+				toks = append(toks, lexExpr(src, lo, n, maxJinjaTokens-len(toks))...)
 				i = n
 				break
 			}
 			hi := trimMarkEnd(src, lo, lo+j)
-			inner := lexExpr(src, lo, hi)
+			inner := lexExpr(src, lo, hi, maxJinjaTokens-len(toks))
 			toks = append(toks, token{kind: kindTag, off: i, end: i + 2, val: "{%"})
 			toks = append(toks, inner...)
 			toks = append(toks, token{kind: kindTagEnd, off: hi, end: hi + 2, val: "%}"})
@@ -128,17 +148,19 @@ func lex(src string) ([]token, int) {
 				}
 				chi := trimMarkEnd(src, clo, clo+cj)
 				toks = append(toks, token{kind: kindTag, off: closeStart, end: closeStart + 2, val: "{%"})
-				toks = append(toks, lexExpr(src, clo, chi)...)
+				toks = append(toks, lexExpr(src, clo, chi, maxJinjaTokens-len(toks))...)
 				toks = append(toks, token{kind: kindTagEnd, off: chi, end: chi + 2, val: "%}"})
 				i = clo + cj + 2
 			}
 		}
 		textStart = i
+		if len(toks) >= maxJinjaTokens {
+			return stop()
+		}
 	}
 	flush(n)
 	if len(toks) > maxJinjaTokens {
-		at := toks[maxJinjaTokens].off
-		return toks[:maxJinjaTokens], at
+		return stop()
 	}
 	return toks, 0
 }
@@ -193,11 +215,12 @@ func findEndBlock(src string, from int, kw string) (int, bool) {
 }
 
 // lexExpr tokenises src[lo:hi] on the off chance it is an expression, recording
-// offsets relative to the full template so a finding points at real bytes.
-func lexExpr(src string, lo, hi int) []token {
+// offsets relative to the full template so a finding points at real bytes. limit
+// is the tokens this expression may still add to the template's budget.
+func lexExpr(src string, lo, hi, limit int) []token {
 	var toks []token
 	i := lo
-	for i < hi && len(toks) < maxJinjaTokens {
+	for i < hi && len(toks) < limit {
 		c := src[i]
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',':
@@ -385,6 +408,7 @@ func asciiUnicodeName(name string) (rune, bool) {
 	}
 	return 0, false
 }
+
 func isNameStart(c byte) bool {
 	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }

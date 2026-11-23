@@ -57,8 +57,12 @@ const (
 	// The harness keeps a bounded tail so a hostile load cannot exhaust the
 	// host's memory before it is graded.
 	maxDockerOutput = 64 << 10
-	maxTraceBytes   = 8 << 20
-	maxResultBytes  = 1 << 20
+	// The tail is what the parser reads; the head is where the harness's own
+	// exec is, and it is read on its own so the pid is known even when a payload
+	// has pushed that line out of the tail.
+	maxTraceBytes     = 8 << 20
+	maxTraceHeadBytes = 64 << 10
+	maxResultBytes    = 1 << 20
 )
 
 // cappedBuffer accepts every write (so the child never blocks on a full pipe)
@@ -266,8 +270,17 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 		r.Error = res.Error
 		r.MissingModules = res.MissingModules
 	}
-	if trace, terr := readTail(filepath.Join(outDir, "trace"), maxTraceBytes); terr == nil {
-		applyTrace(r, trace)
+	// The harness exec is identified by pid, so the head of the trace is read
+	// separately from the tail the parser sees: a payload can push the harness's
+	// own exec out of the last 8 MiB, and position alone would then drop a payload
+	// exec that copied the loader's command line.
+	tracePath := filepath.Join(outDir, "trace")
+	harness := ""
+	if head, _, herr := readCappedFile(tracePath, maxTraceHeadBytes); herr == nil {
+		harness = harnessExecPID(string(head))
+	}
+	if trace, terr := readTail(tracePath, maxTraceBytes); terr == nil {
+		applyTrace(r, trace, harness)
 	} else if r.Error == "" {
 		r.Error = "trace: " + terr.Error()
 	}

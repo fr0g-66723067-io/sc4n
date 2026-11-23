@@ -43,10 +43,16 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+      - name: the tag is release grammar
+        env:
+          TAG: ${{ github.ref_name }}
+        run: sh tools/release/tag-check.sh "$TAG"
       - name: build and verify the artifacts
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          make release-binaries VERSION="$GITHUB_REF_NAME"
-          sh tools/release/verify.sh dist "$GITHUB_REF_NAME"
+          make release-binaries
+          sh tools/release/verify.sh dist "$VERSION"
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}

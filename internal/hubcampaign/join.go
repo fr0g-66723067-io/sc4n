@@ -168,10 +168,30 @@ func (a *agg) topRules(n int) []string {
 // key is the join key: one repo's one file.
 func key(repoID, rel string) string { return repoID + "\x00" + rel }
 
-// topPath is the artifact path with any member chain and any fetch-slice suffix
-// removed: `o/n/pytorch_model.bin:archive/data.pkl` and `o/n/big.bin.slice` both
-// name a file on disk.
-func topPath(artifact string) string {
+// topPath is the artifact path with any member chain removed:
+// `o/n/pytorch_model.bin:archive/data.pkl` names the file on disk.
+//
+// A fetched file may itself contain ':', so the whole artifact is tried first
+// against the fetched set and a member chain is only cut when the whole path
+// names nothing. Cutting unconditionally detached such a file from its findings:
+// its row reported `sc4n: none` and the finding was attributed to a top path that
+// was never fetched.
+func topPath(artifact string, exact map[string]bool) string {
+	if repoID, rel, ok := splitTop(artifact); ok && exact[key(repoID, rel)] {
+		return artifact
+	}
+	for i := 0; i < len(artifact); i++ {
+		if artifact[i] != ':' {
+			continue
+		}
+		top := artifact[:i]
+		if repoID, rel, ok := splitTop(top); ok && exact[key(repoID, rel)] {
+			return top
+		}
+	}
+	// No fetched file matches. Keep the previous rule, so a finding on a file the
+	// fetch stage never listed (the recall extras) is still attributed to the path
+	// its artifact names.
 	top, _, _ := strings.Cut(artifact, ":")
 	return top
 }
@@ -227,6 +247,15 @@ func Join(o Options) (*CampaignReport, error) {
 		formats[a.Path] = a.Format
 	}
 
+	// exact names every fetched file, so a finding's artifact path is attributed to
+	// the file it came from even when that file's own name contains ':'.
+	exact := map[string]bool{}
+	for _, rf := range fd.Repos {
+		for _, ff := range rf.Files {
+			exact[key(rf.ID, ff.Path)] = true
+		}
+	}
+
 	byFile := map[string]*agg{}
 	byRepo := map[string]*agg{}
 	filesOf := map[string][]string{}
@@ -252,7 +281,7 @@ func Join(o Options) (*CampaignReport, error) {
 		if sev > worst {
 			worst = sev
 		}
-		top := topPath(f.Artifact)
+		top := topPath(f.Artifact, exact)
 		repoID, rel, ok := splitTop(top)
 		if !ok {
 			// A finding outside repos/<owner>/<name>/ is not attributable to a

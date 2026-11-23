@@ -488,3 +488,64 @@ func TestSubFormatReportsBothFailures(t *testing.T) {
 		t.Fatalf("a clean row carried a sub-format: %q", got)
 	}
 }
+
+// TestExpandBindsAnInRootSymlinkToTheRoot pins the entry shape the root-bound
+// open depends on: a symlink whose target is inside the root is opened through
+// os.Root at the link's spelling, so a replacement between the containment check
+// and the open is refused rather than followed.
+func TestExpandBindsAnInRootSymlinkToTheRoot(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.bin")
+	if err := os.WriteFile(target, []byte("plain text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "weights.bin")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	entries, err := expand(Config{Paths: []string{dir}, Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	for _, e := range entries {
+		if e.Display != link {
+			continue
+		}
+		if e.RootDir == "" || e.Rel != "weights.bin" {
+			t.Fatalf("symlink entry = %+v, want RootDir set and Rel weights.bin", e)
+		}
+		return
+	}
+	t.Fatalf("the symlink produced no entry: %+v", entries)
+}
+
+// TestRootBoundEntryRefusesAnEscapingLink is the other half of the TOCTOU pair:
+// an entry the walk resolved while the target was inside is opened through
+// os.Root, so a link that now leaves the root is refused instead of reading the
+// outside file. The post-scan mutation check alone reported this only after the
+// out-of-root bytes had been read.
+func TestRootBoundEntryRefusesAnEscapingLink(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("token=ghp_0123456789abcdefghij\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "leak.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	res, err := Run(context.Background(), Config{
+		Entries: []Entry{{Path: link, Display: "leak.txt", RootDir: root, Rel: "leak.txt"}},
+		Limits:  limits.Default(),
+		Jobs:    1,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Artifacts) != 1 || res.Artifacts[0].Error == "" {
+		t.Fatalf("summaries = %+v, want one refused by the root open", res.Artifacts)
+	}
+	if len(res.Collector.Findings()) != 0 {
+		t.Fatalf("the escaping target was scanned: %v", res.Collector.Findings())
+	}
+}

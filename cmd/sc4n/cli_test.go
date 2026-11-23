@@ -580,3 +580,18 @@ func TestHandWrittenAttestationMerges(t *testing.T) {
 		t.Fatalf("no SC4N-MALICE-DEMONSTRATED for the attested artifact: %s", out.String())
 	}
 }
+
+// TestCollectorCapDoesNotDependOnBaseline pins the -hf-cache contract: that path
+// creates the collector before the walk and hands it to scan.Run as-is, so it is
+// the one caller where the cap decision is made outside the engine. Returning 0
+// (unlimited) whenever a baseline was loaded meant a crafted cache could retain
+// every non-baselined finding it emitted; suppression runs before the cap, so a
+// capped collector is correct with a baseline.
+func TestCollectorCapDoesNotDependOnBaseline(t *testing.T) {
+	if got := collectorLimit(1, 100); got != 1 {
+		t.Fatalf("collectorLimit(1, 100) = %d, want 1", got)
+	}
+	if got := collectorLimit(0, 100); got != 100 {
+		t.Fatalf("collectorLimit(0, 100) = %d, want the default 100", got)
+	}
+}
