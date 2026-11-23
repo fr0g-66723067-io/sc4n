@@ -47,8 +47,9 @@ var homeNoisePrefixes = []string{
 	"/home/worker/.cache/huggingface/transformers",
 }
 
-// applyTrace fills the effect lists from a strace log.
-func applyTrace(r *malice.Run, trace string) {
+// applyTrace fills the effect lists from a strace log. harnessPID is the pid the
+// first exec in the trace's head belongs to, or "" when the head was unavailable.
+func applyTrace(r *malice.Run, trace, harnessPID string) {
 	seen := map[string]bool{}
 	firstExec := true
 	for _, line := range strings.Split(trace, "\n") {
@@ -59,7 +60,19 @@ func applyTrace(r *malice.Run, trace string) {
 		switch call {
 		case "execve", "execveat":
 			parts := quotedStrings(rest)
-			if !(firstExec && harnessExec(parts)) {
+			drop := false
+			if harnessExec(parts) {
+				// The harness exec is identified by pid. Position alone is not
+				// enough: only the last 8 MiB of the trace are parsed, so a payload
+				// that floods quiet reads and then execs the loader's exact command
+				// line was the "first exec" of the parsed text and was dropped.
+				if harnessPID != "" {
+					drop = linePID(line) == harnessPID
+				} else {
+					drop = firstExec
+				}
+			}
+			if !drop {
 				if argv := execArgv(rest); argv != "" {
 					addEffect(&r.Exec, seen, argv)
 				}
@@ -192,6 +205,35 @@ func execArgv(body string) string {
 		return prog
 	}
 	return prog + " " + strings.Join(rest, " ")
+}
+
+// linePID returns the pid column of a strace line, or "" when it has none. Both
+// `1234  execve(...)` and the older `[pid 1234] execve(...)` forms are handled.
+func linePID(line string) string {
+	t := strings.TrimSpace(line)
+	if strings.HasPrefix(t, "[pid ") {
+		rest := t[len("[pid "):]
+		if i := strings.IndexByte(rest, ']'); i > 0 {
+			return strings.TrimSpace(rest[:i])
+		}
+		return ""
+	}
+	if i := strings.IndexAny(t, " \t"); i > 0 && isDigits(t[:i]) {
+		return t[:i]
+	}
+	return ""
+}
+
+// harnessExecPID returns the pid of the first exec in the head of a trace: the
+// entrypoint starts load.py under the tracer, and that exec is the harness. It is
+// read from the file's head, which readTail never returns.
+func harnessExecPID(head string) string {
+	for _, line := range strings.Split(head, "\n") {
+		if call, _ := splitCall(line); call == "execve" || call == "execveat" {
+			return linePID(line)
+		}
+	}
+	return ""
 }
 
 // harnessExec reports whether the first exec is the harness loading the

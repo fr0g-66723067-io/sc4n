@@ -87,8 +87,13 @@ SHAs, with the tag in a trailing comment, and both checkouts set
 `persist-credentials: false` so the job token is not stored in `.git/config`.
 `tools/release/tag-check.sh` accepts only `vMAJOR.MINOR.PATCH[-PRE]` and runs
 before any release value reaches a shell, a path or `awk`; a tag is otherwise an
-attacker-chosen string in the privileged publish job. `make release-binaries`,
-`notes.sh`, `publish.sh` and `verify.sh` all call it.
+attacker-chosen string in the privileged publish job. The tag reaches every
+recipe through the environment and the recipes reference it as `$${VERSION}`: a
+make expansion into a shell line is executed while the shell parses it, so a ref
+name carrying a backtick ran before the gate could reject it.
+`tools/release/tag-check_test.sh` proves the hostile tag is rejected without
+executing anything, and `make release-gate` runs it.
+`make release-binaries`, `notes.sh`, `publish.sh` and `verify.sh` all call it.
 
 ## Before tagging
 

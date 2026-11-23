@@ -1131,3 +1131,100 @@ func TestListLabelRecordsHowTheUniverseWasGiven(t *testing.T) {
 		t.Errorf("the label change forced a recompute (value is now %q)", after.Queries[0].Value)
 	}
 }
+
+// TestDeclaredEmptyFileIsProvenEmpty pins the zero-byte plan. Download treats a
+// max of 0 as "no cap", so a sibling declared as 0 bytes took the copy-to-EOF
+// branch: the transfer was unbounded, the budget was charged nothing, and a Hub
+// that declared 0 while serving a payload was stored and reported as a clean
+// zero-byte file. The file is now proved empty with a one-byte probe, and a
+// lied-about size is reported instead of stored.
+func TestDeclaredEmptyFileIsProvenEmpty(t *testing.T) {
+	hub := &fakeHub{
+		repos: []string{"o/evil"},
+		scans: map[string]string{
+			"o/evil": `{"scansDone":true,"filesWithIssues":[{"path":"evil.pkl","level":"unsafe"}]}`,
+		},
+		siblings: map[string][]map[string]any{"o/evil": {
+			sibling("evil.pkl", 64),
+			sibling("lied.txt", 0),
+			sibling("empty.txt", 0),
+		}},
+		files: map[string][]byte{
+			"o/evil/evil.pkl":  []byte(pickleOSSystem),
+			"o/evil/lied.txt":  bytes.Repeat([]byte("A"), 1<<16),
+			"o/evil/empty.txt": {},
+		},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.Level = LevelAny // a list campaign reviews every fetched file
+	rep := runAll(t, o)
+	byPath := map[string]FileReport{}
+	for _, f := range rep.Repos[0].Files {
+		byPath[f.Path] = f
+	}
+	if got := byPath["lied.txt"].Fetch; got != "size-mismatch" {
+		t.Fatalf("lied.txt fetch = %q, want size-mismatch", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, dirRepos, "o", "evil", "lied.txt")); err == nil {
+		t.Fatal("a file the Hub declared empty but served content for was stored")
+	}
+	if got := byPath["empty.txt"].Fetch; got != "full" {
+		t.Fatalf("empty.txt fetch = %q, want full", got)
+	}
+	st, err := os.Stat(filepath.Join(dir, dirRepos, "o", "evil", "empty.txt"))
+	if err != nil || st.Size() != 0 {
+		t.Fatalf("empty.txt: stat=%v err=%v, want a zero-byte file", st, err)
+	}
+}
+
+// TestJoinAttributesAColonNamedFile pins the attribution for a fetched file whose
+// own name contains ':'. The artifact path was cut at the first ':' before the
+// fetched set was consulted, so the finding landed on a top path that was never
+// fetched and the real row reported sc4n: none — a false clean for exactly the
+// file that had the finding.
+func TestJoinAttributesAColonNamedFile(t *testing.T) {
+	dir := t.TempDir()
+	o := Options{
+		Dir:   dir,
+		Tool:  report.Tool{Name: "sc4n", Version: "test"},
+		Level: "unsafe",
+		Limit: 10,
+	}
+	must := func(name string, v any) {
+		t.Helper()
+		if err := writeJSON(filepath.Join(dir, name), v); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	const file = "a:b.bin"
+	must(fileVerdicts, VerdictsFile{Version: Version, Level: "unsafe", Repos: []RepoVerdict{{
+		ID: "o/evil", Status: "ok", ScansDone: true,
+		Files: []hubapi.FileIssue{{Path: file, Level: "unsafe"}},
+	}}})
+	must(fileFetch, FetchDoc{Version: Version, Level: "unsafe", Repos: []RepoFetch{{
+		ID: "o/evil", Status: "ok", Bytes: 10,
+		Files: []FetchFile{{Path: file, Status: "full", Bytes: 10}},
+	}}})
+	must(fileScan, map[string]any{
+		"findings": []map[string]any{
+			{"artifact": "o/evil/a:b.bin:archive/data.pkl", "ruleId": "SC4N-PICKLE-REDUCE", "severity": "critical"},
+		},
+		"artifacts": []map[string]any{{"path": file, "format": "zip"}},
+	})
+
+	rep, err := Join(o)
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	if len(rep.Repos[0].Files) != 1 {
+		t.Fatalf("rows = %+v, want the one fetched file", rep.Repos[0].Files)
+	}
+	f := rep.Repos[0].Files[0]
+	if f.Path != file || f.Sc4n != "critical" || f.Member != "o/evil/a:b.bin:archive/data.pkl" {
+		t.Fatalf("file = %+v", f)
+	}
+}
