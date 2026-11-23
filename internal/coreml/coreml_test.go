@@ -235,3 +235,17 @@ func TestOversizedCustomClassNameIsCappedAndReported(t *testing.T) {
 		t.Fatalf("class name cap was silent; findings=%v", ids(c.Findings()))
 	}
 }
+
+// TestMalformedNestedLayerRecordIsReported pins the fail-closed contract for a
+// nested record the walker cannot parse. The wire-valid group reproducer was
+// fixed by consuming the group, but a group that never terminates still stopped
+// findBytesField, and its nil return read as "the layer has no custom block": the
+// layer produced no custom-layer finding and no structural one either.
+func TestMalformedNestedLayerRecordIsReported(t *testing.T) {
+	layer := protowire.AppendTag(nil, 1, protowire.StartGroupType) // never closed
+	model := cat(pvar(fieldSpecVersion, 1), pbytes(fieldNeuralNetwork, pbytes(nnFieldLayers, layer)))
+	fs := parse(t, "bad.mlmodel", model)
+	if !hasRule(fs, RuleStruct.ID) {
+		t.Fatalf("an unterminated group in a layer was silent; findings=%v", ids(fs))
+	}
+}
