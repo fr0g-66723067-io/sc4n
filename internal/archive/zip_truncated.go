@@ -147,8 +147,11 @@ func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMembe
 			// Zip64: the real compressed size is in the local extra field. The
 			// declared value is only usable when it stays inside the source and
 			// ends on container framing; otherwise a truncated record would make
-			// the walk read past its member and hide the next one.
-			if _, c, _, okC := localZip64Sizes(s, off, nameLen, extraLen, false, true); okC && c > 0 && dataOff+int64(c) <= size {
+			// the walk read past its member and hide the next one. The bound is
+			// checked in uint64: int64(c) is negative for a size above MaxInt64,
+			// which passed the old `dataOff+int64(c) <= size` test.
+			if _, c, _, okC := localZip64Sizes(s, off, nameLen, extraLen, false, true); okC && c > 0 &&
+				dataOff <= size && c <= uint64(size-dataOff) {
 				claimEnd := dataOff + int64(c)
 				if claimEnd == size || descriptorLen(s, dataOff, claimEnd) > 0 || nextZipSig(s, claimEnd, size) == claimEnd {
 					dataEnd = claimEnd
@@ -276,7 +279,9 @@ func scanRecovered(ctx *artifact.Ctx, s source.Source, members []recoveredMember
 			scanned++
 		case 8:
 			fr := flate.NewReader(io.NewSectionReader(s, m.dataOff, span))
-			r := capReader(truncatingReader{r: fr}, ctx.Limits, span, "member "+snippet(m.name))
+			l := ctx.Limits
+			l.MaxDecompressedBytes = ctx.RemainingDecompressed()
+			r := capReader(truncatingReader{r: fr}, l, span, "member "+snippet(m.name))
 			n = processReader(ctx, m.name, -1, span, r, nil)
 			_ = fr.Close()
 			scanned++

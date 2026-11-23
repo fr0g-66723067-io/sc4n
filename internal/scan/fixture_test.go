@@ -2,6 +2,7 @@ package scan_test
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"io/fs"
@@ -316,5 +317,27 @@ func TestFixtureEvidenceIsValidUTF8(t *testing.T) {
 				t.Errorf("%s on %s has invalid UTF-8 in extra[%s]: %q", f.RuleID, f.Artifact, k, v)
 			}
 		}
+	}
+}
+
+// TestZlibStreamWithATrailingTemplateIsScanned pins the second half of the
+// zlib-claim path end to end, where every parser is registered: the sniffer
+// accepts a short valid stream, the decompressor yields its payload, and the
+// bytes after the stream were previously dropped. A template after a one-byte
+// zlib stream therefore produced a clean scan while the same bytes in a plain
+// file were a high finding.
+func TestZlibStreamWithATrailingTemplateIsScanned(t *testing.T) {
+	var framed bytes.Buffer
+	zw := zlib.NewWriter(&framed)
+	_, _ = zw.Write([]byte("A"))
+	_ = zw.Close()
+	data := append(framed.Bytes(), []byte(`{{ ''.__class__.__mro__ }}`)...)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "model.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fs := scanPaths(t, path); !ids(fs)["SC4N-JINJA-PY-OBJECT"] {
+		t.Fatalf("the template after the zlib stream was not scanned; findings=%v", fs)
 	}
 }

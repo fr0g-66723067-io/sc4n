@@ -362,6 +362,10 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 			// the failure.
 			continue
 		}
+		if ctx.RemainingDecompressed() == 0 {
+			reportDecompressed(ctx)
+			return
+		}
 		if m.Method == 0 && m.Size > max {
 			src, err := source.Section(s, m.dataOff, m.CompressedSize, m.Name)
 			if err != nil {
@@ -383,10 +387,6 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 			}
 			continue
 		}
-		if ctx.RemainingDecompressed() == 0 {
-			reportDecompressed(ctx)
-			return
-		}
 		l := ctx.Limits
 		l.MaxDecompressedBytes = ctx.RemainingDecompressed()
 		rc, err := Open(s, l, m)
@@ -406,7 +406,12 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 }
 
 // countingReader counts the bytes read through it, so scanTarMembers can bound a
-// member's declared size by the archive bytes it has left.
+// member's declared size by the archive bytes it has left. It also offers
+// ReadByte: compress/flate reads a byte at a time only from a reader with that
+// method, and from any other reader it inserts a 4 KiB bufio.Reader, which
+// swallows the bytes after a compression stream and makes its end unknowable —
+// the count is what separates "the artifact is this stream" from "this stream is
+// the artifact's prefix".
 type countingReader struct {
 	r io.Reader
 	n int64
@@ -416,6 +421,20 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
 	return n, err
+}
+
+func (c *countingReader) ReadByte() (byte, error) {
+	var one [1]byte
+	for {
+		n, err := c.r.Read(one[:])
+		if n == 1 {
+			c.n++
+			return one[0], nil
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
 }
 
 // scanTarMembers walks a tar in one pass, so a tar with many members is O(n).
@@ -474,7 +493,17 @@ func scanTarMembers(ctx *artifact.Ctx, s source.Source) {
 			reportDecompressed(ctx)
 			return
 		}
-		n := processReader(ctx, hdr.Name, hdr.Size, stretch, tr, nil)
+		// The member reader draws from the same scan-wide budget as every other
+		// container: the accounting below happens after the read, so a member
+		// larger than what is left would otherwise be read in full first.
+		var r io.Reader = tr
+		if rem := ctx.RemainingDecompressed(); rem < hdr.Size {
+			r = &limitReader{
+				r: tr, remaining: rem, rule: limits.RuleDecompressed,
+				limit: "MaxDecompressedBytes", cap: rem, detail: "tar member " + snippet(hdr.Name),
+			}
+		}
+		n := processReader(ctx, hdr.Name, hdr.Size, stretch, r, nil)
 		if chargeDecompressed(ctx, n) {
 			return
 		}
@@ -730,7 +759,8 @@ func scanCompressed(ctx *artifact.Ctx, s source.Source) error {
 		emitUnsupportedFormat(ctx, s, ctx.Format)
 		return nil
 	}
-	r, closer, err := decompressor(s, ctx.Limits, c)
+	cr := &countingReader{r: s.Reader(0)}
+	r, closer, err := decompressorReader(cr, s.Size(), ctx.Limits, c)
 	if err != nil {
 		EmitOpenError(ctx, ctx.Sink.Artifact(), err)
 		return nil
@@ -746,30 +776,45 @@ func scanCompressed(ctx *artifact.Ctx, s source.Source) error {
 		}
 	})
 	chargeDecompressed(ctx, n)
+	// The stream need not end the artifact. A short valid stream followed by a
+	// payload used to be scanned as the stream alone, so the payload after it —
+	// a template, a pickle, another archive — produced no finding at all.
+	// Whatever the decoder did not consume is the artifact's remainder and is
+	// dispatched like any other member.
+	if tail := s.Size() - cr.n; tail > 0 {
+		processReader(ctx, ctx.Sink.Artifact()+" tail", tail, -1, s.Reader(cr.n), nil)
+	}
 	return nil
+}
+
+// decompressorReader opens a supported single-stream compressor over an already
+// positioned reader, applying the same MaxDecompressedBytes/MaxRatio caps while
+// it is read.
+func decompressorReader(r io.Reader, compressed int64, l limits.Limits, c Compressor) (io.Reader, io.Closer, error) {
+	switch c {
+	case CompressorGzip:
+		zr, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return capReader(zr, l, compressed, "gzip layer"), zr, nil
+	case CompressorZlib:
+		zr, err := zlib.NewReader(r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return capReader(zr, l, compressed, "zlib layer"), zr, nil
+	case CompressorBzip2:
+		return capReader(bzip2.NewReader(r), l, compressed, "bzip2 layer"), nil, nil
+	default:
+		return nil, nil, ErrUnsupportedCompression
+	}
 }
 
 // decompressor opens a supported single-stream compressor, applying the same
 // MaxDecompressedBytes/MaxRatio caps while it is read.
 func decompressor(s source.Source, l limits.Limits, c Compressor) (io.Reader, io.Closer, error) {
-	switch c {
-	case CompressorGzip:
-		zr, err := gzip.NewReader(s.Reader(0))
-		if err != nil {
-			return nil, nil, err
-		}
-		return capReader(zr, l, s.Size(), "gzip layer"), zr, nil
-	case CompressorZlib:
-		zr, err := zlib.NewReader(s.Reader(0))
-		if err != nil {
-			return nil, nil, err
-		}
-		return capReader(zr, l, s.Size(), "zlib layer"), zr, nil
-	case CompressorBzip2:
-		return capReader(bzip2.NewReader(s.Reader(0)), l, s.Size(), "bzip2 layer"), nil, nil
-	default:
-		return nil, nil, ErrUnsupportedCompression
-	}
+	return decompressorReader(s.Reader(0), s.Size(), l, c)
 }
 
 func capReader(r io.Reader, l limits.Limits, compressed int64, detail string) io.Reader {

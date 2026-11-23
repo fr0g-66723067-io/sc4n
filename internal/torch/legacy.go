@@ -190,7 +190,13 @@ func readMemberBounded(ctx *artifact.Ctx, s source.Source, m archive.Member) ([]
 		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", m.Size, max, "torch tar member "+m.Name)
 		return nil, false
 	}
-	rc, err := archive.Open(s, ctx.Limits, m)
+	if ctx.RemainingDecompressed() == 0 {
+		ctx.ReportDecompressedLimit(m.Size, ctx.Limits.MaxDecompressedBytes)
+		return nil, false
+	}
+	l := ctx.Limits
+	l.MaxDecompressedBytes = ctx.RemainingDecompressed()
+	rc, err := archive.Open(s, l, m)
 	if err != nil {
 		// The generic archive walker reports exactly this condition; a legacy tar
 		// member that cannot be opened must not be dropped in silence, or a .pth
@@ -209,5 +215,6 @@ func readMemberBounded(ctx *artifact.Ctx, s source.Source, m archive.Member) ([]
 		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", int64(len(data)), max, "torch tar member "+m.Name)
 		return nil, false
 	}
+	ctx.ChargeDecompressed(int64(len(data)))
 	return data, true
 }
