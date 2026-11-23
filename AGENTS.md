@@ -151,8 +151,8 @@ Behaviour changes land with the document that describes them:
   because neither reached 1.5x on its own kernel; that is the bar a new special
   path has to clear, measured, or it does not ship.
 - `make test-simd` must keep passing under `GOEXPERIMENT=simd` and
-  `GODEBUG=simd=0`. Never add `GODEBUG=simd=256`: it bypasses the CPU feature
-  check and can SIGILL.
+  `GODEBUG=simd=0`: the emulated pass takes the experiment's portable code paths,
+  which is where a future kernel would first break.
 - Allocation, copy and decompression are the cost centres (`internal/bytescan`,
   `internal/stringscan`, `internal/source`). A change to a hot kernel is
   reported with `make bench` numbers before and after, not with an adjective.

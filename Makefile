@@ -102,8 +102,7 @@ test:
 
 # Both passes are required: the emulated one (GODEBUG=simd=0) takes the
 # experiment's portable code paths, which is where a future SIMD kernel would
-# first break. Do not add GODEBUG=simd=256: it bypasses the CPU feature check and
-# can SIGILL.
+# first break.
 test-simd:
 	GOEXPERIMENT=simd $(GO) test ./...
 	GODEBUG=simd=0 GOEXPERIMENT=simd $(GO) test ./...
