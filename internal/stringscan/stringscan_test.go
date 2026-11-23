@@ -1033,3 +1033,24 @@ func TestJSONCredentialPropertyIsReported(t *testing.T) {
 		t.Fatalf("JSON credential property was not reported: %+v", hits)
 	}
 }
+
+// TestJSONCredentialPropertyKeySpellings pins the key match: a JSON property is
+// written in the document's own spelling, and the policy is keyed on the
+// normalised credential name, so `apiKey` and `API_KEY` are the same decision as
+// `api_key`.
+func TestJSONCredentialPropertyKeySpellings(t *testing.T) {
+	for _, doc := range []string{
+		`{"apiKey": "correct-Horse-battery9"}`,
+		`{"API_KEY": "correct-Horse-battery9"}`,
+	} {
+		var found bool
+		for _, h := range hitsFor(t, doc) {
+			if h.Rule.ID == "SC4N-STRING-SECRET-VALUE" && h.Extra["kind"] == "secret-json" && h.Redacted {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s: a credential property in another spelling was not reported", doc)
+		}
+	}
+}

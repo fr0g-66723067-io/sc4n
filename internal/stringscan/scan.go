@@ -913,7 +913,10 @@ func scanJSONSecretProps(b []byte, hits []Hit) []Hit {
 			break
 		}
 		key := string(b[i+1 : keyEnd])
-		if !jsonSecretNames[key] {
+		// The key is matched through the same normalisation as an assignment
+		// name, so `apiKey` and `API_KEY` reach the same policy as `api_key`.
+		// The finding still names the spelling the document used.
+		if !jsonSecretNames[normaliseCredential(key)] {
 			i = keyEnd
 			continue
 		}
@@ -981,7 +984,7 @@ const minJSONSecretValue = 8
 // plain .json produced the high finding. The masking contract is the raw
 // scanner's: the finding names the shape and never the value.
 func EmitJSONSecretValue(sink *report.Sink, off int64, name, value string) {
-	if !jsonSecretNames[name] || len(value) < minJSONSecretValue {
+	if !jsonSecretNames[normaliseCredential(name)] || len(value) < minJSONSecretValue {
 		return
 	}
 	probe := make([]byte, 0, len(name)+1+len(value))

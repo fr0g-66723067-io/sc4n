@@ -129,9 +129,9 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	// The baseline is loaded before the scan because it changes how the finding
-	// cap is applied: with a baseline the scan runs uncapped and the cap applies
-	// to what survives suppression.
+	// The baseline is loaded before the scan: suppression runs inside
+	// Collector.Add, before the finding cap, so a baselined finding neither fills
+	// a slot nor evicts a new one.
 	var baseline map[string]bool
 	if f.baseline != "" {
 		base, err := policy.LoadBaseline(f.baseline)
@@ -187,7 +187,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		// The expander runs before the walk and reports its own structural
 		// findings (an escaping symlink, a missing blob), so it needs the
 		// collector the report will be built from.
-		collector := report.NewCollector(collectorLimit(f.maxFindings, l.MaxFindings, baseline))
+		collector := report.NewCollector(collectorLimit(f.maxFindings, l.MaxFindings))
 		entries, err := hfcache.Expand(dir, collector)
 		if err != nil {
 			fmt.Fprintf(stderr, "sc4n: -hf-cache: %v\n", err)
@@ -356,12 +356,12 @@ func warnInertFlags(f scanFlags, w io.Writer) {
 	}
 }
 
-// collectorLimit is the finding cap the collector is created with. With a baseline
-// it is unlimited, because suppression has to run before the cap.
-func collectorLimit(maxFindings, limitsDefault int, baseline map[string]bool) int {
-	if len(baseline) > 0 {
-		return 0
-	}
+// collectorLimit is the finding cap the collector is created with. It does not
+// depend on -baseline: suppression runs before the cap inside Collector.Add, so a
+// capped collector suppresses correctly, and returning 0 for a baseline made the
+// -hf-cache collector unlimited — a crafted cache could then retain every
+// non-baselined finding it produced.
+func collectorLimit(maxFindings, limitsDefault int) int {
 	if maxFindings > 0 {
 		return maxFindings
 	}
