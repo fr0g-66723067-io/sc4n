@@ -1,12 +1,15 @@
 package imgmeta
 
 import (
+	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
+	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
 func TestMetadataSummaryUsesOneAllocation(t *testing.T) {
@@ -31,5 +34,52 @@ func TestOversizedPngTextIsCappedAndReported(t *testing.T) {
 	}
 	if len(c.Findings()) == 0 {
 		t.Fatal("cap was silent")
+	}
+}
+
+// pngChunk builds one PNG chunk: length, type, body, and a zero CRC (the parser
+// skips CRCs, because an integrity value is not a security signal).
+func pngChunk(typ string, body []byte) []byte {
+	out := make([]byte, 8+len(body)+4)
+	binary.BigEndian.PutUint32(out, uint32(len(body)))
+	copy(out[4:], typ)
+	copy(out[8:], body)
+	return out
+}
+
+// TestPngTextValueIsCappedBeforeItIsScanned pins the order the cap must have:
+// the value is truncated as bytes and only then converted. The token past
+// maxMetaBlob is therefore not analysed, and the limit finding says the value
+// was cut — the earlier code converted the whole chunk first, copied it again to
+// apply the cap, and scanned the truncated string, so the memory saving did not
+// exist and the boundary was invisible.
+func TestPngTextValueIsCappedBeforeItIsScanned(t *testing.T) {
+	var value []byte
+	value = append(value, bytes.Repeat([]byte{'a'}, maxMetaBlob)...)
+	value = append(value, "token=ghp_0123456789abcdefghij"...)
+	data := append([]byte{}, pngMagic...)
+	data = append(data, pngChunk("tEXt", append([]byte("k\x00"), value...))...)
+	data = append(data, pngChunk("IEND", nil)...)
+
+	l := limits.Default()
+	c := report.NewCollector(0)
+	sess := artifact.NewSession(c, "", l)
+	if err := (parser{}).Parse(sess.NewCtx("big.png", l), source.Mem("big.png", data)); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var capped, leaked bool
+	for _, f := range c.Findings() {
+		switch f.RuleID {
+		case "SC4N-LIMIT-STRING":
+			capped = true
+		case "SC4N-STRING-SECRET-VALUE":
+			leaked = true
+		}
+	}
+	if !capped {
+		t.Fatalf("the tEXt cap was silent; findings=%v", c.Findings())
+	}
+	if leaked {
+		t.Fatal("a token past maxMetaBlob was scanned: the value was not capped before conversion")
 	}
 }

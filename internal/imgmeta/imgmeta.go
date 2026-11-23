@@ -127,10 +127,6 @@ func (im *image) capBytes(off int64, what string, b []byte) []byte {
 	return b[:maxMetaBlob]
 }
 
-func (im *image) capString(off int64, what, s string) string {
-	return string(im.capBytes(off, what, []byte(s)))
-}
-
 // text hands one metadata string to the indicator engine and the invisible
 // character pass, at its absolute offset in the file.
 func (im *image) text(off int64, s string) {
@@ -168,8 +164,12 @@ func (im *image) png() {
 		switch typ {
 		case "tEXt":
 			im.kinds = append(im.kinds, "tEXt")
-			if k, v, ok := splitNUL(body); ok {
-				im.text(base+int64(k)+1, im.capString(base+int64(k)+1, "PNG tEXt value", v))
+			if k, ok := splitNUL(body); ok {
+				// The value is capped as bytes: converting the chunk first copies
+				// the attacker's whole value, which is what the cap exists to
+				// prevent.
+				voff := base + int64(k) + 1
+				im.text(voff, string(im.capBytes(voff, "PNG tEXt value", body[k+1:])))
 			}
 		case "zTXt":
 			im.kinds = append(im.kinds, "zTXt")
@@ -233,7 +233,7 @@ func (im *image) pngInternational(base int64, body []byte) {
 	off := base + int64(len(body)) - int64(len(text))
 	switch flag {
 	case 0:
-		im.text(off, im.capString(off, "PNG iTXt value", string(text)))
+		im.text(off, string(im.capBytes(off, "PNG iTXt value", text)))
 	case 1:
 		if method != 0 {
 			im.structFinding(off, "iTXt chunk uses compression method %d, only 0 (deflate) is defined", method)
@@ -245,13 +245,14 @@ func (im *image) pngInternational(base int64, body []byte) {
 	}
 }
 
-// splitNUL splits keyword NUL text.
-func splitNUL(b []byte) (int, string, bool) {
+// splitNUL splits keyword NUL text, returning the keyword length; the caller
+// slices the value so it can be capped before it is copied.
+func splitNUL(b []byte) (int, bool) {
 	k := bytes.IndexByte(b, 0)
 	if k < 0 || k+1 > len(b) {
-		return 0, "", false
+		return 0, false
 	}
-	return k, string(b[k+1:]), true
+	return k, true
 }
 
 // splitAt splits b at the first NUL, returning the part before it and the part
@@ -342,11 +343,11 @@ func (im *image) jpeg() {
 			case bytes.HasPrefix(body, []byte("http://ns.adobe.com/xap/1.0/\x00")):
 				im.kinds = append(im.kinds, "XMP")
 				xoff := base + int64(len("http://ns.adobe.com/xap/1.0/\x00"))
-				im.text(xoff, im.capString(xoff, "JPEG XMP", string(body[len("http://ns.adobe.com/xap/1.0/\x00"):])))
+				im.text(xoff, string(im.capBytes(xoff, "JPEG XMP", body[len("http://ns.adobe.com/xap/1.0/\x00"):])))
 			}
 		case 0xfe: // COM
 			im.kinds = append(im.kinds, "COM")
-			im.text(base, im.capString(base, "JPEG COM", string(body)))
+			im.text(base, string(im.capBytes(base, "JPEG COM", body)))
 		}
 		off = end
 	}
