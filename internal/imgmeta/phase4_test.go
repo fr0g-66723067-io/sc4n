@@ -3,6 +3,7 @@ package imgmeta
 import (
 	"bytes"
 	"encoding/binary"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -54,8 +55,11 @@ func pngChunk(typ string, body []byte) []byte {
 // apply the cap, and scanned the truncated string, so the memory saving did not
 // exist and the boundary was invisible.
 func TestPngTextValueIsCappedBeforeItIsScanned(t *testing.T) {
+	// Three times the cap: the pre-fix path copied the value to a string and then
+	// again to []byte before truncating, so a 3x value allocated ~6x the cap.
+	const factor = 3
 	var value []byte
-	value = append(value, bytes.Repeat([]byte{'a'}, maxMetaBlob)...)
+	value = append(value, bytes.Repeat([]byte{'a'}, factor*maxMetaBlob)...)
 	value = append(value, "token=ghp_0123456789abcdefghij"...)
 	data := append([]byte{}, pngMagic...)
 	data = append(data, pngChunk("tEXt", append([]byte("k\x00"), value...))...)
@@ -64,8 +68,15 @@ func TestPngTextValueIsCappedBeforeItIsScanned(t *testing.T) {
 	l := limits.Default()
 	c := report.NewCollector(0)
 	sess := artifact.NewSession(c, "", l)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
 	if err := (parser{}).Parse(sess.NewCtx("big.png", l), source.Mem("big.png", data)); err != nil {
 		t.Fatalf("parse: %v", err)
+	}
+	runtime.ReadMemStats(&after)
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 3*maxMetaBlob {
+		t.Fatalf("parsing a %dx-capped value allocated %d bytes; the cap was applied after the copies", factor, alloc)
 	}
 	var capped, leaked bool
 	for _, f := range c.Findings() {
