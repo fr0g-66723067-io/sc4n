@@ -27,6 +27,20 @@ func TestEmbeddedNativeAtWindowBoundaryIsReported(t *testing.T) {
 	}
 }
 
+// TestEmbeddedNativeStraddlingAWindowBoundaryIsReported pins the half the
+// boundary test above could not see: a signature that *starts* in the last bytes
+// of a window was probed on a truncated slice, so MagicAt compared a prefix of
+// the magic, matched nothing, and neither window reported it. segBase is
+// attacker-controlled, so aligning a header to the window edge was free.
+func TestEmbeddedNativeStraddlingAWindowBoundaryIsReported(t *testing.T) {
+	segment := make([]byte, nativeWindow+128)
+	copy(segment[nativeWindow-3:], tinyELF())
+	fs := parse(t, "m.pte", build("ET12", "eh12", 0, segment))
+	if !hasRule(fs, RuleNative.ID) {
+		t.Fatalf("an ELF straddling a window boundary was not reported; findings=%v", fs)
+	}
+}
+
 func TestSegmentScanIsBounded(t *testing.T) {
 	segment := make([]byte, maxSegmentScanBytes+64)
 	fs := parse(t, "m.pte", build("ET12", "eh12", 0, segment))

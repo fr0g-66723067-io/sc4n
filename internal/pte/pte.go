@@ -151,6 +151,14 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	return nil
 }
 
+// nativeMagicOverlap is the longest signature bytescan.MagicAt matches
+// ("!<arch>\n", "MZqFpD='", "jartsr='" are eight bytes). A signature may start in
+// the last bytes of a window, so each window is read with this many extra bytes:
+// probing a truncated slice made MagicAt compare a prefix of the signature and
+// match nothing, and segBase is attacker-controlled, so alignment to the window
+// edge was free.
+const nativeMagicOverlap = 8
+
 // scanNative walks the segment region in windows and reports a validated native
 // header. The universal polyglot layer only looks at the first and last MiB of an
 // artifact, so a payload in the middle of a large segment region would otherwise
@@ -167,14 +175,29 @@ func scanNative(ctx *artifact.Ctx, s source.Source, base, size int64) {
 		if n > nativeWindow {
 			n = nativeWindow
 		}
-		b, err := s.Bytes(base+off, n)
+		// read covers this window plus the overlap the next window's first
+		// signatures need, but only this window's start positions are probed, so
+		// no signature is counted twice.
+		read := n
+		if rest := size - off - n; rest > 0 {
+			add := int64(nativeMagicOverlap - 1)
+			if rest < add {
+				add = rest
+			}
+			read += add
+		}
+		b, err := s.Bytes(base+off, read)
 		if len(b) == 0 {
 			if err != nil {
 				return
 			}
 			continue
 		}
-		for i := 0; i < len(b); i++ {
+		starts := int(n)
+		if starts > len(b) {
+			starts = len(b)
+		}
+		for i := 0; i < starts; i++ {
 			if bytescan.MagicAt(b[i:]) == bytescan.NativeNone {
 				continue
 			}
