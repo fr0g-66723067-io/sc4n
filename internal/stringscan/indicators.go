@@ -194,6 +194,18 @@ func Scan(b []byte) []Hit { return scan(b) }
 // ScanString is Scan for a string, without copying it.
 func ScanString(s string) []Hit { return scan(unsafeBytes(s)) }
 
+// ScanStringKind returns the hits in s that are in scope for k.
+func ScanStringKind(s string, k Kind) []Hit {
+	hits := ScanString(s)
+	out := hits[:0]
+	for _, h := range hits {
+		if k.allows(h) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // Emit scans b and reports every hit through the sink at absolute offsets derived
 // from base.
 func Emit(sink *report.Sink, base int64, b []byte) { EmitKind(sink, base, b, KindText) }
@@ -453,9 +465,13 @@ func buildIndicatorTable() []indicator {
 		ruleSecretValue, "secret-assignment", true,
 		"AWS_SECRET_ACCESS_KEY=", "AWS_ACCESS_KEY_ID=", "GITHUB_TOKEN=",
 		"OPENAI_API_KEY=", "ANTHROPIC_API_KEY=", "HF_TOKEN=",
-		"SLACK_TOKEN=", "NPM_TOKEN=", "PYPI_TOKEN=", "PRIVATE KEY-----",
+		"SLACK_TOKEN=", "NPM_TOKEN=", "PYPI_TOKEN=",
 		"password=", "passwd=", "secret=", "api_key=",
 	)
+	// A PEM private-key header is a direct secret marker, not an assignment:
+	// the body follows on the next line, so running placeholder-assignment
+	// filtering on the rest of the header line would drop real multi-line keys.
+	add(ruleSecretValue, "secret-pem", true, "PRIVATE KEY-----")
 
 	// Shell and process payloads. The chains carry their own context — `curl | sh`
 	// and `wget -qO-` include the pipe — so they are reported wherever they
@@ -515,6 +531,7 @@ func buildIndicatorTable() []indicator {
 	add(
 		ruleLoaderFlag, "loader-flag", false,
 		"trust_remote_code=true", "trust_remote_code=True",
+		"trust_remote_code: true",
 		"allow_pickle=true", "allow_pickle=True",
 		"weights_only=false", "weights_only=False", "safe_mode=false",
 		"yaml.unsafe_load", "yaml.load(", "load_in_8bit",
@@ -551,11 +568,13 @@ func buildIndicatorTable() []indicator {
 	)
 
 	// Code-execution keywords inside metadata values, which is the tensorguard
-	// TG06-TG10 shape.
+	// TG06-TG10 shape. Bare `trust_remote_code` is intentionally excluded here
+	// because `"trust_remote_code": false` disables remote code; truthful
+	// spellings are covered by ruleLoaderFlag and HF config rules.
 	add(
 		ruleMetadataCode, "metadata-code", false,
 		"os.system", "subprocess", "__import__", "exec(", "eval(",
-		"trust_remote_code", "pickle.load", "marshal.loads", "socket.socket",
+		"pickle.load", "marshal.loads", "socket.socket",
 		"urllib.request", "requests.post", "base64.b64decode",
 	)
 	return out

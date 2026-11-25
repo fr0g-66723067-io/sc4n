@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
+	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
 func newTestCtx(t *testing.T, depth int) (*artifact.Ctx, *report.Collector) {
@@ -216,4 +218,122 @@ func TestSetupHookInTopLevelIfSuiteIsReported(t *testing.T) {
 func TestBackendPathShadowingAllowlistedBackendIsReported(t *testing.T) {
 	got := run(t, "pyproject.toml", "[build-system]\nrequires = []\nbuild-backend = \"setuptools.build_meta\"\nbackend-path = [\"src\"]\n")
 	want(t, got, "SC4N-REPO-BACKEND-PATH")
+}
+
+func TestUniversalSkipsBinaryPthCheckpoints(t *testing.T) {
+	// A >4 MiB PyTorch checkpoint named .pth must NOT emit SC4N-REPO-TRUNCATED.
+	big := bytes.Repeat([]byte{0x50, 0x4b, 0x03, 0x04}, (repoMaxBytes/4)+16)
+	for _, f := range []artifact.Format{
+		artifact.FormatTorchNew, artifact.FormatTorchLegacy,
+		artifact.FormatPickle, artifact.FormatZip, artifact.FormatSevenZip,
+	} {
+		c := report.NewCollector(0)
+		l := limits.Default()
+		sess := artifact.NewSession(c, "", l)
+		ctx := sess.NewCtx("weights.pth", l)
+		src := source.Mem("weights.pth", big)
+		universal(ctx, src, f)
+		src.Close()
+		for _, finding := range c.Findings() {
+			if finding.RuleID == "SC4N-REPO-TRUNCATED" || finding.RuleID == "SC4N-REPO-PTH" {
+				t.Errorf("binary .pth format %s falsely emitted %s", f, finding.RuleID)
+			}
+		}
+	}
+	// A text .pth file still runs pthRule.
+	c := report.NewCollector(0)
+	l := limits.Default()
+	sess := artifact.NewSession(c, "", l)
+	ctx := sess.NewCtx("evil.pth", l)
+	src := source.Mem("evil.pth", []byte("import os; os.system('id')\n"))
+	universal(ctx, src, artifact.FormatPython)
+	src.Close()
+	found := false
+	for _, f := range c.Findings() {
+		if f.RuleID == "SC4N-REPO-PTH" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("text .pth did not emit SC4N-REPO-PTH via universal")
+	}
+}
+
+func TestSetupHookClassBodyAndNestedDef(t *testing.T) {
+	// Class body executes at setup/import time.
+	want(t, run(t, "setup.py", "import os\nclass Evil:\n    os.system('id')\n"), "SC4N-REPO-SETUP-HOOK")
+	// Control-flow nested inside a def does NOT run at module scope.
+	got := run(t, "setup.py", "import os\ndef helper():\n    if True:\n        os.system('id')\n")
+	if got["SC4N-REPO-SETUP-HOOK"] {
+		t.Fatal("call inside def -> if was falsely reported as module-scope setup hook")
+	}
+}
+
+func TestBuildBackendTOMLEdgeCases(t *testing.T) {
+	cases := []string{
+		"[build-system] # PEP 517\nbuild-backend = \"evil.build\"\n",
+		"[ build-system ]\n\"build-backend\" = 'evil.build'\n",
+		"build-system.build-backend = \"evil.build\"\n",
+		"\"build-system\".\"build-backend\" = \"evil.build\"\n",
+	}
+	for _, toml := range cases {
+		want(t, run(t, "pyproject.toml", toml), "SC4N-REPO-BUILD-BACKEND")
+	}
+}
+
+func TestWorkflowPRTFlexibleExpressions(t *testing.T) {
+	cases := []string{
+		"on:\n  pull_request_target:\nsteps:\n  - run: echo \"${{github.event.issue.title}}\"\n",
+		"on:\n  pull_request_target:\nsteps:\n  - run: echo \"${{ toJSON(github.event.pull_request.title) }}\"\n",
+		"on:\n  pull_request_target:\nsteps:\n  - run: echo \"${{ github.head_ref }}\"\n",
+	}
+	for _, yml := range cases {
+		want(t, run(t, ".github/workflows/ci.yml", yml), "SC4N-REPO-WORKFLOW-PRT")
+	}
+}
+
+func TestPycOrphanPEP3147AndWindowsDriveColon(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "__pycache__")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "foo.py"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// PEP 3147 bytecode with parent ../foo.py must NOT be reported as orphan.
+	cached := filepath.Join(cacheDir, "foo.cpython-312.pyc")
+	if err := os.WriteFile(cached, []byte{0x00}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, c := newTestCtx(t, 0)
+	AnalyzeFile(ctx, cached, []byte{0x00})
+	for _, f := range c.Findings() {
+		if f.RuleID == "SC4N-REPO-PYC-ORPHAN" {
+			t.Fatal("PEP 3147 __pycache__/foo.cpython-312.pyc with ../foo.py falsely flagged as orphan")
+		}
+	}
+	// PEP 3147 bytecode with NO parent ../ghost.py MUST be reported as orphan.
+	ghost := filepath.Join(cacheDir, "ghost.cpython-312.pyc")
+	if err := os.WriteFile(ghost, []byte{0x00}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx2, c2 := newTestCtx(t, 0)
+	AnalyzeFile(ctx2, ghost, []byte{0x00})
+	found := false
+	for _, f := range c2.Findings() {
+		if f.RuleID == "SC4N-REPO-PYC-ORPHAN" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("orphan PEP 3147 __pycache__/ghost.cpython-312.pyc was not reported")
+	}
+	// Windows drive colons are not container separators; archive chains are.
+	if hasContainerColon(`C:\models\__pycache__\foo.cpython-312.pyc`) {
+		t.Fatal("Windows drive colon treated as container separator")
+	}
+	if !hasContainerColon("archive.zip:foo.pyc") {
+		t.Fatal("container separator colon not detected")
+	}
 }

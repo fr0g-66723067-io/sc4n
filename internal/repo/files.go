@@ -3,6 +3,7 @@ package repo
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -35,6 +36,13 @@ func universal(ctx *artifact.Ctx, s source.Source, f artifact.Format) {
 	if !caresAbout(name) {
 		return
 	}
+	// A `.pth` file can be either a Python site.py path-configuration text file
+	// or a PyTorch binary checkpoint (zip/pickle/torch-legacy/archive). Skip
+	// binary/archive/model formats before the 4 MiB truncation check so large
+	// PyTorch checkpoints named `.pth` never emit false SC4N-REPO-TRUNCATED.
+	if strings.HasSuffix(baseName(name), ".pth") && !isTextPthFormat(f) {
+		return
+	}
 	// Several rules need only the name (the wheel pointer, the startup-module
 	// names, the .pyc sibling stat); reading their bytes would be wasted work and,
 	// for a wheel, megabytes of it.
@@ -62,6 +70,16 @@ func universal(ctx *artifact.Ctx, s source.Source, f artifact.Format) {
 		return
 	}
 	AnalyzeFile(ctx, name, data)
+}
+
+// isTextPthFormat reports whether a sniffed format can be a Python site.py
+// `.pth` text file rather than a binary PyTorch checkpoint or archive.
+func isTextPthFormat(f artifact.Format) bool {
+	switch f {
+	case artifact.FormatPython, artifact.FormatText, artifact.FormatUTF16, artifact.FormatUnknown:
+		return true
+	}
+	return false
 }
 
 // needsBytes reports whether a rule for path reads the file's contents.
@@ -249,8 +267,16 @@ func setupHookRule(ctx *artifact.Ctx, data []byte) {
 		for len(stack) > 0 && indent <= stack[len(stack)-1].indent {
 			stack = stack[:len(stack)-1]
 		}
-		moduleScope := len(stack) == 0 || (stack[len(stack)-1].kind != "def" && stack[len(stack)-1].kind != "class")
-		if moduleScope {
+		// Class bodies execute at module scope during import/setup; only def
+		// bodies (including any nested control-flow inside a def) are deferred.
+		inDef := false
+		for _, fr := range stack {
+			if fr.kind == "def" {
+				inDef = true
+				break
+			}
+		}
+		if !inDef {
 			for _, sink := range []string{
 				"os.system", "os.popen", "subprocess.", "urllib.request", "requests.",
 				"socket.", "shutil.rmtree", "exec(", "eval(", "__import__(", "compile(",
@@ -260,9 +286,13 @@ func setupHookRule(ctx *artifact.Ctx, data []byte) {
 				}
 			}
 		}
-		for _, kw := range []string{"def ", "class ", "if ", "try:", "for ", "while ", "with "} {
+		if strings.HasPrefix(t, "async def ") {
+			stack = append(stack, block{indent: indent, kind: "def"})
+			continue
+		}
+		for _, kw := range []string{"def ", "class ", "if ", "elif ", "else:", "try:", "except", "finally:", "for ", "while ", "with ", "async with ", "async for "} {
 			if strings.HasPrefix(t, kw) {
-				kind := strings.TrimSuffix(strings.TrimSpace(kw), " ")
+				kind := strings.TrimRight(strings.TrimSpace(kw), ":")
 				stack = append(stack, block{indent: indent, kind: kind})
 				break
 			}
@@ -300,80 +330,191 @@ var allowedBackends = map[string]bool{
 	"scikit_build_core.build":          true,
 }
 
-// buildSystemKey finds a key under [build-system] and returns its value.
+// buildSystemKey finds a key under [build-system] (or a top-level dotted key
+// `build-system.<key>`) and returns its unquoted value and byte offset.
 func buildSystemKey(data []byte, key string) (string, int, bool) {
 	section := ""
 	for _, ln := range lines(data) {
-		t := strings.TrimSpace(string(ln.text))
-		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
-			section = t
+		t := stripTOMLComment(string(ln.text))
+		if t == "" {
 			continue
 		}
-		if section != "[build-system]" {
+		if sec, ok := parseTOMLSection(t); ok {
+			section = sec
 			continue
 		}
 		k, val, ok := splitTOMLKeyValue(t)
-		if !ok || k != key {
+		if !ok {
 			continue
 		}
-		return val, int(ln.off) + strings.Index(string(ln.text), val), true
+		if (section == "build-system" && k == key) || (section == "" && k == "build-system."+key) {
+			idx := strings.Index(string(ln.text), val)
+			if idx < 0 {
+				idx = 0
+			}
+			return val, int(ln.off) + idx, true
+		}
 	}
 	return "", 0, false
 }
 
-// buildBackendValue finds `build-backend` under `[build-system]` and returns its
-// value, the offset of the value, and whether it was found.
+// buildBackendValue finds `build-backend` under `[build-system]` (or top-level
+// `build-system.build-backend`) and returns its value, offset and whether found.
 func buildBackendValue(data []byte) (string, int, bool) {
-	ls := lines(data)
-	section := ""
-	for _, ln := range ls {
-		t := strings.TrimSpace(string(ln.text))
-		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
-			section = t
-			continue
-		}
-		if section != "[build-system]" {
-			continue
-		}
-		key, val, ok := splitTOMLKeyValue(t)
-		if !ok || key != "build-backend" {
-			continue
-		}
-		valOffset := int(ln.off) + strings.Index(string(ln.text), val)
-		return val, valOffset, true
-	}
-	return "", 0, false
+	return buildSystemKey(data, "build-backend")
 }
 
-// splitTOMLKeyValue splits `key = "value"` (the only form the rule needs) and
-// unquotes the value.
+// stripTOMLComment removes an unquoted `# ...` comment from a TOML line and
+// trims surrounding whitespace.
+func stripTOMLComment(s string) string {
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if quote == '"' && c == '\\' && i+1 < len(s) {
+				i++
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+			continue
+		}
+		if c == '#' {
+			s = s[:i]
+			break
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+// parseTOMLSection parses a `[section]` header (allowing interior whitespace
+// and quoted segments) and returns its canonical dotted name.
+func parseTOMLSection(t string) (string, bool) {
+	if !strings.HasPrefix(t, "[") || !strings.HasSuffix(t, "]") {
+		return "", false
+	}
+	inner := strings.TrimSpace(t[1 : len(t)-1])
+	if strings.HasPrefix(inner, "[") && strings.HasSuffix(inner, "]") {
+		inner = strings.TrimSpace(inner[1 : len(inner)-1])
+	}
+	key, ok := parseTOMLKey(inner)
+	if !ok {
+		return "", false
+	}
+	return key, true
+}
+
+// parseTOMLKey normalises a bare, quoted or dotted TOML key (`build-system`,
+// `"build-backend"`, `'build-system'.build-backend`).
+func parseTOMLKey(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	var parts []string
+	var cur strings.Builder
+	var quote byte
+	flush := func() bool {
+		p := strings.TrimSpace(cur.String())
+		cur.Reset()
+		if p == "" {
+			return false
+		}
+		parts = append(parts, unquoteTOML(p))
+		return true
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if quote != 0 {
+			if quote == '"' && c == '\\' && i+1 < len(raw) {
+				cur.WriteByte(c)
+				cur.WriteByte(raw[i+1])
+				i++
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			cur.WriteByte(c)
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+			cur.WriteByte(c)
+			continue
+		}
+		if c == '.' {
+			if !flush() {
+				return "", false
+			}
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	if quote != 0 || !flush() {
+		return "", false
+	}
+	return strings.Join(parts, "."), true
+}
+
+func unquoteTOML(s string) string {
+	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// splitTOMLKeyValue splits `key = "value"` (with bare, quoted or dotted keys)
+// and unquotes the value.
 func splitTOMLKeyValue(t string) (key, val string, ok bool) {
-	eq := strings.IndexByte(t, '=')
+	eq := -1
+	var quote byte
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		if quote != 0 {
+			if quote == '"' && c == '\\' && i+1 < len(t) {
+				i++
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+			continue
+		}
+		if c == '=' {
+			eq = i
+			break
+		}
+	}
 	if eq < 0 {
 		return "", "", false
 	}
-	key = strings.TrimSpace(t[:eq])
+	key, ok = parseTOMLKey(t[:eq])
+	if !ok {
+		return "", "", false
+	}
 	val = strings.TrimSpace(t[eq+1:])
-	// Drop a trailing comment outside quotes.
-	if i := strings.IndexByte(val, '#'); i >= 0 {
-		val = strings.TrimSpace(val[:i])
-	}
-	if len(val) >= 2 {
-		if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
-			return key, val[1 : len(val)-1], true
-		}
-	}
+	val = unquoteTOML(val)
 	return key, val, true
 }
 
-// workflowRule matches the pull_request_target + `${{ github.event.* }}` in a
-// `run:` pattern textually. There is no YAML library linked by design, so the
-// finding states the co-occurrence it saw.
+// workflowRule matches the pull_request_target + `${{ ... github.event.* / github.head_ref ... }}`
+// in a `run:` pattern textually. There is no YAML library linked by design, so
+// the finding states the co-occurrence it saw.
 func workflowRule(ctx *artifact.Ctx, data []byte) {
 	if indexFrom(data, "pull_request_target", 0) < 0 {
 		return
 	}
-	evOff := indexFrom(data, "${{ github.event.", 0)
+	evOff := findUntrustedWorkflowExpr(data)
 	if evOff < 0 {
 		return
 	}
@@ -385,11 +526,38 @@ func workflowRule(ctx *artifact.Ctx, data []byte) {
 		"pull_request_target workflow interpolates ${{ github.event.* }} into a run: step (textual match; no YAML parser)")
 }
 
+// findUntrustedWorkflowExpr locates the first `${{ ... }}` interpolation that
+// references `github.event.` or `github.head_ref`, tolerating arbitrary
+// whitespace and wrapping expressions (e.g. `toJSON(github.event.issue.title)`).
+func findUntrustedWorkflowExpr(data []byte) int {
+	pos := 0
+	for pos < len(data) {
+		open := indexFrom(data, "${{", pos)
+		if open < 0 {
+			return -1
+		}
+		close := indexFrom(data, "}}", open+3)
+		if close < 0 {
+			close = len(data)
+		}
+		expr := data[open+3 : close]
+		if bytes.Contains(expr, []byte("github.event.")) || bytes.Contains(expr, []byte("github.head_ref")) {
+			return open
+		}
+		if close >= len(data) {
+			break
+		}
+		pos = close + 2
+	}
+	return -1
+}
+
 // pycOrphanRule reports a .pyc with no .py sibling. It only fires for a real path
 // (never for an archive member), and only when the .pyc itself is on disk, so it
-// cannot misfire on a synthetic or stdin name.
+// cannot misfire on a synthetic or stdin name. PEP 3147 bytecode files under
+// `__pycache__/<name>.<tag>.pyc` resolve their source at `../<name>.py`.
 func pycOrphanRule(ctx *artifact.Ctx, path string) {
-	if strings.Contains(path, ":") {
+	if hasContainerColon(path) {
 		return
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -399,7 +567,27 @@ func pycOrphanRule(ctx *artifact.Ctx, path string) {
 	if _, err := os.Stat(sibling); err == nil {
 		return
 	}
+	dir := filepath.Dir(path)
+	if filepath.Base(dir) == "__pycache__" {
+		stem := strings.TrimSuffix(filepath.Base(path), ".pyc")
+		if dot := strings.IndexByte(stem, '.'); dot > 0 {
+			parentPy := filepath.Join(filepath.Dir(dir), stem[:dot]+".py")
+			if _, err := os.Stat(parentPy); err == nil {
+				return
+			}
+		}
+	}
 	ctx.Sink.Emit(rulePycOrphan, 0, "no .py source beside this .pyc, so its bytecode was not analysed")
+}
+
+// hasContainerColon reports whether path carries a container-member `:` rather
+// than a Windows drive prefix (`C:...`).
+func hasContainerColon(path string) bool {
+	start := 0
+	if len(path) >= 2 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' {
+		start = 2
+	}
+	return strings.IndexByte(path[start:], ':') >= 0
 }
 
 type line struct {

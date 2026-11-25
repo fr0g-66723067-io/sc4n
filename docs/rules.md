@@ -823,7 +823,7 @@ A base64- or hex-shaped literal of at least 32 characters appears in a statement
 
 References:
 
-- https://cwe.mitre.org/data/definitions/1336.html
+- https://cwe.mitre.org/data/definitions/506.html
 
 
 ### SC4N-CODE-NOTEBOOK-MAGIC
@@ -845,7 +845,7 @@ The statement builds a string from obfuscated pieces: a chain of chr() calls, a 
 
 References:
 
-- https://cwe.mitre.org/data/definitions/1336.html
+- https://cwe.mitre.org/data/definitions/506.html
 
 
 ### SC4N-CODE-REDUCE-BUILDER

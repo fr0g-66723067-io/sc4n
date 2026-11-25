@@ -53,7 +53,7 @@ func parseFrontmatter(text string) (*frontmatter, bool) {
 			fm.lists[curKey] = append(fm.lists[curKey], unquoteYAML(strings.TrimSpace(strings.TrimPrefix(t, "-"))))
 			continue
 		}
-		if line != t {
+		if line[0] == ' ' || line[0] == '\t' {
 			// Indented and not a list item: the value of the current key is a
 			// nested mapping, which this subset does not model. The line is skipped
 			// rather than fatal: every model card with evaluation results carries a

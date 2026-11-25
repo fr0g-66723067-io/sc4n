@@ -20,6 +20,7 @@ package utf16text
 import (
 	"errors"
 	"fmt"
+	"unicode"
 	"unicode/utf16"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -93,9 +94,15 @@ func detect(head []byte) (Order, bool) {
 		if len(head) >= 4 && head[2] == 0 && head[3] == 0 {
 			return 0, false
 		}
+		if !plausibleUTF16Body(LittleEndian, head[2:]) {
+			return 0, false
+		}
 		return LittleEndian, true
 	}
 	if head[0] == 0xFE && head[1] == 0xFF {
+		if !plausibleUTF16Body(BigEndian, head[2:]) {
+			return 0, false
+		}
 		return BigEndian, true
 	}
 	// Without a BOM the only shape worth claiming is Latin text: every code unit
@@ -151,6 +158,73 @@ func detect(head []byte) (Order, bool) {
 	return 0, false
 }
 
+// plausibleUTF16Body validates the code units following a BOM so a binary file
+// that happens to begin with 0xFF 0xFE or 0xFE 0xFF is not claimed blindly.
+// Printable Unicode runes, standard whitespace, and format/invisible controls
+// (unicode.Cf, including zero-width/bidi/Tags characters used in adversarial
+// cards) are accepted; NUL, C0/C1 control codes, unpaired surrogates, private-use
+// and unassigned code points count as implausible.
+func plausibleUTF16Body(order Order, body []byte) bool {
+	if len(body) == 0 {
+		return true
+	}
+	if len(body) == 1 {
+		return false
+	}
+	nUnits := len(body) / 2
+	total, bad := 0, 0
+	for i := 0; i < nUnits; i++ {
+		var u uint16
+		if order == LittleEndian {
+			u = uint16(body[2*i]) | uint16(body[2*i+1])<<8
+		} else {
+			u = uint16(body[2*i])<<8 | uint16(body[2*i+1])
+		}
+		total++
+		if u >= 0xD800 && u <= 0xDBFF {
+			if i+1 < nUnits {
+				var u2 uint16
+				if order == LittleEndian {
+					u2 = uint16(body[2*(i+1)]) | uint16(body[2*(i+1)+1])<<8
+				} else {
+					u2 = uint16(body[2*(i+1)])<<8 | uint16(body[2*(i+1)+1])
+				}
+				if u2 >= 0xDC00 && u2 <= 0xDFFF {
+					r := utf16.DecodeRune(rune(u), rune(u2))
+					i++
+					if !isPlausibleUTF16Rune(r) {
+						bad++
+					}
+					continue
+				}
+			}
+			bad++
+			continue
+		}
+		if u >= 0xDC00 && u <= 0xDFFF {
+			bad++
+			continue
+		}
+		if !isPlausibleUTF16Rune(rune(u)) {
+			bad++
+		}
+	}
+	if total < 20 {
+		return bad == 0
+	}
+	return bad*20 <= total
+}
+
+func isPlausibleUTF16Rune(r rune) bool {
+	if r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v' {
+		return true
+	}
+	if r == 0 || r == 0xFFFE || r == 0xFFFF {
+		return false
+	}
+	return unicode.IsPrint(r) || unicode.Is(unicode.Cf, r)
+}
+
 // isLetter reports an ASCII letter, the byte that separates text from a binary
 // table whose interleaved bytes happen to be whitespace.
 func isLetter(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
@@ -190,7 +264,12 @@ type parser struct{}
 func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	size := s.Size()
 	n := size
-	if cap := ctx.Limits.MaxArtifactBytes; cap > 0 && n > cap {
+	cap := ctx.Limits.MaxStringBlob
+	if cap <= 0 {
+		cap = limits.Default().MaxStringBlob
+	}
+	if n > cap {
+		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", size, cap, "UTF-16 text artifact truncated before decoding")
 		n = cap
 	}
 	if n < 2 {

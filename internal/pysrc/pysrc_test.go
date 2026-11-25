@@ -622,3 +622,154 @@ func TestObfuscationNeedsAnOpaquePayload(t *testing.T) {
 		t.Error("an eight-fragment opaque join was not reported")
 	}
 }
+
+func TestStringValueTripleQuotedAndRaw(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{`"""abc"""`, "abc"},
+		{`""""""`, ""},
+		{`'''hello\nworld'''`, "hello\nworld"},
+		{`r"\n\x41"`, `\n\x41`},
+		{`R"""a\nb"""`, `a\nb`},
+	}
+	for _, tc := range cases {
+		b := []byte(tc.src)
+		toks := Lex(b)
+		if len(toks) == 0 || toks[0].Kind != TokString {
+			t.Fatalf("%s: expected TokString, got %v", tc.src, kinds(toks))
+		}
+		if got := StringValue(toks[0], b, 0); got != tc.want {
+			t.Errorf("StringValue(%s) = %q, want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
+func TestScanNumberStopsBeforeAttribute(t *testing.T) {
+	for _, src := range []string{"1.0.__class__", "1.__class__"} {
+		b := []byte(src)
+		toks := Lex(b)
+		if len(toks) < 3 || toks[0].Kind != TokNumber || toks[1].Text(b) != "." || toks[2].Text(b) != "__class__" {
+			t.Fatalf("%s mis-lexed: %v", src, kinds(toks))
+		}
+	}
+}
+
+func TestParserCapsReadToMaxStringBlob(t *testing.T) {
+	c := report.NewCollector(0)
+	l := limits.Default()
+	l.MaxStringBlob = 64
+	sess := artifact.NewSession(c, "", l)
+	ctx := sess.NewCtx("big.py", l)
+	src := source.Mem("big.py", []byte(strings.Repeat("x = 1\n", 40)))
+	defer src.Close()
+	if err := (pythonParser{}).Parse(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, f := range c.Findings() {
+		if f.RuleID == "SC4N-LIMIT-STRING" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("got %d SC4N-LIMIT-STRING findings, want 1", count)
+	}
+}
+
+func TestNotebookStructuralParsingAndCellCap(t *testing.T) {
+	// Metadata decoy containing "\"cells\": []" and \u0063ode escape in cell_type.
+	raw := `{
+  "metadata": {"note": "\"cells\": []"},
+  "cells": [
+    {"cell_type": "\u0063ode", "source": ["!id\n"]}
+  ]
+}`
+	ctx, c := newTestCtx(t)
+	AnalyzeNotebook(ctx, []byte(raw))
+	wantRule(t, ids(c), "SC4N-CODE-NOTEBOOK-MAGIC")
+
+	// Oversized cell (> 1 MiB) emits SC4N-LIMIT-STRING.
+	bigCell := `{"cells":[{"cell_type":"code","source":["` + strings.Repeat("a", maxNotebookCellBytes+100) + `"]}]}`
+	ctx2, c2 := newTestCtx(t)
+	AnalyzeNotebook(ctx2, []byte(bigCell))
+	wantRule(t, ids(c2), "SC4N-LIMIT-STRING")
+}
+
+func TestYAMLSafeLoaderTightening(t *testing.T) {
+	// "SafeLoader" inside the first data string argument must NOT bypass the rule.
+	wantRule(t, analyzeOK(t, `import yaml
+yaml.load("SafeLoader: !!python/object/apply:os.system ['id']")
+`), "SC4N-LOADER-YAML-UNSAFE")
+	wantRule(t, analyzeOK(t, "import yaml\nyaml.load_all(stream)\n"), "SC4N-LOADER-YAML-UNSAFE")
+	wantRule(t, analyzeOK(t, "import yaml\nyaml.unsafe_load_all(stream)\n"), "SC4N-LOADER-YAML-UNSAFE")
+
+	// Legitimate safe loaders stay clean.
+	for _, src := range []string{
+		"import yaml\nyaml.load(stream, Loader=yaml.SafeLoader)\n",
+		"import yaml\nyaml.load(stream, yaml.BaseLoader)\n",
+		"import yaml\nyaml.load_all(stream, Loader=yaml.CSafeLoader)\n",
+	} {
+		if got := analyzeOK(t, src); got["SC4N-LOADER-YAML-UNSAFE"] {
+			t.Errorf("safe loader flagged: %q", src)
+		}
+	}
+}
+
+func TestOpenIsWriteAndKerasSafeMode(t *testing.T) {
+	// An identifier mode name containing 'a' (like read_mode) is not a write mode.
+	if got := analyzeOK(t, "p = input()\nopen(p, read_mode)\n"); got["SC4N-CODE-TAINT-FILE"] {
+		t.Fatal("open(p, read_mode) falsely flagged as write")
+	}
+	// Read-write modes ("r+", "w+", "a+") are write modes.
+	for _, mode := range []string{`"r+"`, `"w+"`, `"a+"`, `mode="r+b"`} {
+		if got := analyzeOK(t, "p = input()\nopen(p, "+mode+")\n"); !got["SC4N-CODE-TAINT-FILE"] {
+			t.Errorf("open(p, %s) missed SC4N-CODE-TAINT-FILE", mode)
+		}
+	}
+	// safe_mode=True alongside compile=False must not fire SC4N-LOADER-KERAS-SAFE-MODE.
+	if got := analyzeOK(t, `tf.keras.models.load_model("m.keras", safe_mode=True, compile=False)`+"\n"); got["SC4N-LOADER-KERAS-SAFE-MODE"] {
+		t.Fatal("safe_mode=True with compile=False falsely fired SC4N-LOADER-KERAS-SAFE-MODE")
+	}
+}
+
+func TestWithAsTaintAndNestedDefScope(t *testing.T) {
+	withSrc := "import urllib.request, pickle\nwith urllib.request.urlopen(url) as resp:\n    pickle.load(resp)\n"
+	got := analyzeOK(t, withSrc)
+	wantRule(t, got, "SC4N-CODE-TAINT-DESERIALIZE")
+	wantRule(t, got, "SC4N-LOADER-PICKLE-REMOTE")
+
+	// Outer scope taint survives a nested def helper.
+	nestedSrc := "import os\ndef outer():\n    cmd = os.getenv('CMD')\n    def helper():\n        return 1\n    os.system(cmd)\n"
+	wantRule(t, analyzeOK(t, nestedSrc), "SC4N-CODE-TAINT-SHELL")
+
+	// Sibling functions remain isolated.
+	siblingSrc := "import os\ndef f():\n    cmd = os.getenv('CMD')\ndef g():\n    os.system(cmd)\n"
+	if got := analyzeOK(t, siblingSrc); got["SC4N-CODE-TAINT-SHELL"] {
+		t.Fatal("taint leaked between sibling functions")
+	}
+}
+
+func TestImportAliasResolution(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{"from os import system\nv = input()\nsystem(v)\n", "SC4N-CODE-TAINT-SHELL"},
+		{"import subprocess as sp\nv = input()\nsp.run(v)\n", "SC4N-CODE-TAINT-SHELL"},
+		{"import torch as t\nt.load('m.pt')\n", "SC4N-LOADER-TORCH-UNSAFE"},
+		{"from yaml import load\nload(stream)\n", "SC4N-LOADER-YAML-UNSAFE"},
+	}
+	for _, tc := range cases {
+		wantRule(t, analyzeOK(t, tc.src), tc.want)
+	}
+}
+
+func TestObfuscationAndEncodedPayloadCWE506URL(t *testing.T) {
+	for _, r := range []*report.Rule{ruleObfuscation, ruleEncodedPayload} {
+		if len(r.Refs) == 0 || !strings.HasSuffix(r.Refs[0], "/506.html") {
+			t.Errorf("%s Refs = %v, want CWE-506 URL", r.ID, r.Refs)
+		}
+	}
+}

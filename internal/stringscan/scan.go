@@ -82,14 +82,58 @@ func dropUncomposedPipes(b []byte, hits []Hit) []Hit {
 }
 
 // hasDownloadSource reports whether a download command precedes the pipe on the
-// same line. The line bound is what keeps a card that shows a curl example in one
-// paragraph and a shell table in another from composing into a payload.
+// same logical shell line (honouring `\` line continuations and matching
+// commands case-insensitively). The line bound is what keeps a card that shows
+// a curl example in one paragraph and a shell table in another from composing
+// into a payload.
 func hasDownloadSource(prefix []byte) bool {
-	if i := bytes.LastIndexByte(prefix, '\n'); i >= 0 {
-		prefix = prefix[i+1:]
+	start := len(prefix)
+	for start > 0 {
+		nl := bytes.LastIndexByte(prefix[:start], '\n')
+		if nl < 0 {
+			start = 0
+			break
+		}
+		esc := nl - 1
+		if esc >= 0 && prefix[esc] == '\r' {
+			esc--
+		}
+		if esc >= 0 && prefix[esc] == '\\' {
+			start = esc
+			continue
+		}
+		start = nl + 1
+		break
 	}
+	line := prefix[start:]
 	for _, s := range downloadSources {
-		if bytes.Contains(prefix, s) {
+		if containsFold(line, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsFold reports whether haystack contains needle (an already-lowercased
+// ASCII slice) case-insensitively without allocating.
+func containsFold(haystack, needle []byte) bool {
+	nlen := len(needle)
+	if nlen == 0 || len(haystack) < nlen {
+		return false
+	}
+	first := needle[0]
+	for i := 0; i <= len(haystack)-nlen; i++ {
+		if lowerASCII(haystack[i]) != first {
+			continue
+		}
+		match := true
+		for j := 1; j < nlen; j++ {
+			if lowerASCII(haystack[i+j]) != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}
@@ -205,7 +249,19 @@ func scanURLsAnchored(b []byte, anchor byte, hits []Hit) []Hit {
 			i++
 			continue
 		}
-		host := rest[after:]
+		hostOffset := after
+		host := rest[hostOffset:]
+		// Skip URL userinfo (`user:pass@host`) within the authority component so
+		// `http://user:pass@192.0.2.1/x` and `http://example.com@198.51.100.1/x`
+		// inspect the actual host literal.
+		authEnd := indexAny(host, "/?# \t\r\n\"'`,;)")
+		if authEnd < 0 {
+			authEnd = len(host)
+		}
+		if at := bytes.LastIndexByte(host[:authEnd], '@'); at >= 0 {
+			hostOffset += at + 1
+			host = rest[hostOffset:]
+		}
 		var hostEnd int
 		bracket := len(host) > 0 && host[0] == '['
 		if bracket {
@@ -271,10 +327,10 @@ func scanURLsAnchored(b []byte, anchor byte, hits []Hit) []Hit {
 		hits = append(hits, Hit{
 			Rule:  ruleRawIPURL,
 			Off:   int64(i),
-			Match: string(rest[:after+hostEnd]),
+			Match: string(rest[:hostOffset+hostEnd]),
 			Extra: extra,
 		})
-		i += after + hostEnd
+		i += hostOffset + hostEnd
 	}
 }
 
@@ -580,7 +636,12 @@ func scanSecretTokens(b []byte, hits []Hit) []Hit {
 			if !bytes.HasPrefix(rest, s.prefix) {
 				continue
 			}
-			if tokenRun(rest[len(s.prefix):], s.alphabet) < s.minRun {
+			run := tokenRun(rest[len(s.prefix):], s.alphabet)
+			if run < s.minRun {
+				continue
+			}
+			// Reject lowercase-hyphenated prose such as `sk-learn-classification-model`.
+			if s.alphabet == alphaToken && isLowerHyphenatedBytes(rest[len(s.prefix):len(s.prefix)+run]) {
 				continue
 			}
 			hits = append(hits, secretTokenHit(int64(at), s.shape))
@@ -732,6 +793,29 @@ func isLowerHyphenated(s string) bool {
 		return false
 	}
 	return true
+}
+
+func isLowerHyphenatedBytes(b []byte) bool {
+	if len(b) < 3 || b[0] == '-' || b[len(b)-1] == '-' {
+		return false
+	}
+	hasHyphen := false
+	prevHyphen := false
+	for _, c := range b {
+		if c == '-' {
+			if prevHyphen {
+				return false
+			}
+			hasHyphen = true
+			prevHyphen = true
+			continue
+		}
+		if c < 'a' || c > 'z' {
+			return false
+		}
+		prevHyphen = false
+	}
+	return hasHyphen
 }
 
 // isCredentialByte reports whether c can appear inside an unquoted credential
@@ -892,9 +976,9 @@ const opaqueDecoderWindow = 200
 // automaton matches `password=` but not the quoted-key JSON spelling, so a config
 // object was invisible to the secret-value rule.
 var jsonSecretNames = map[string]bool{
-	"password": true, "passwd": true, "secret": true, "api_key": true,
-	"apikey": true, "client_secret": true, "access_token": true,
-	"auth_token": true, "private_key": true,
+	"password": true, "passwd": true, "secret": true,
+	"apikey": true, "clientsecret": true, "accesstoken": true,
+	"authtoken": true, "privatekey": true,
 }
 
 func scanJSONSecretProps(b []byte, hits []Hit) []Hit {
@@ -1226,6 +1310,12 @@ func scanUnicodeAnomalies(b []byte, hits []Hit) []Hit {
 		}
 		switch {
 		case r == 0x200B || r == 0x200C || r == 0x200D || r == 0x2060 || r == 0xFEFF || r == 0x00AD:
+			// Exempt a single leading UTF-8 BOM at byte 0.
+			if offset == 0 && r == 0xFEFF && zeroWidthRun(b) == 1 {
+				prevWord = false
+				offset += size
+				continue
+			}
 			// A zero-width character inside a word hides a name from a reader; the
 			// same character between two emoji is a ZWJ grapheme join, which is
 			// ordinary text ("😶‍🌫️" is one emoji, not a hidden identifier). A run of

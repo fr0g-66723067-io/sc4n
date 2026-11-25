@@ -16,6 +16,8 @@ import (
 // published Jinja2 SSTI chain.
 var dunderNames = map[string]bool{
 	"__class__":        true,
+	"__base__":         true,
+	"__bases__":        true,
 	"__mro__":          true,
 	"__subclasses__":   true,
 	"__globals__":      true,
@@ -24,9 +26,18 @@ var dunderNames = map[string]bool{
 	"__init__":         true,
 	"__reduce__":       true,
 	"__getattribute__": true,
+	"__getattr__":      true,
+	"__getitem__":      true,
+	"__call__":         true,
+	"__self__":         true,
+	"__func__":         true,
+	"__closure__":      true,
 	"__dict__":         true,
 	"__code__":         true,
 	"__loader__":       true,
+	"gi_frame":         true,
+	"f_globals":        true,
+	"f_builtins":       true,
 }
 
 // dangerousGlobals are the Jinja2 globals whose attribute walk reaches
@@ -40,6 +51,9 @@ var dangerousGlobals = map[string]bool{
 	"namespace": true,
 	"dict":      true,
 	"range":     true,
+	"self":      true,
+	"config":    true,
+	"request":   true,
 }
 
 // knownFilters is the allowlist that lets {% set x = messages | tojson %} stay
@@ -134,6 +148,7 @@ func Analyze(sink *report.Sink, base int64, name, template string) {
 		return
 	}
 	toks, truncatedAt := lex(template)
+	chainMax := 8*len(toks) + 1024
 	a := &analyzer{
 		sink:         sink,
 		base:         base,
@@ -141,7 +156,8 @@ func Analyze(sink *report.Sink, base int64, name, template string) {
 		tmpl:         template,
 		toks:         toks,
 		corroborated: corroborated(template),
-		chainBudget:  8*len(toks) + 1024,
+		chainBudget:  chainMax,
+		chainMax:     chainMax,
 		aliasValue:   map[string]string{},
 		aliasGlobal:  map[string]string{},
 	}
@@ -194,6 +210,7 @@ type analyzer struct {
 	// with a fixed allowance, so a template made of bracket soup cannot turn the
 	// analyzer into quadratic work.
 	chainBudget int
+	chainMax    int
 	chainLimit  bool
 	// aliasValue and aliasGlobal remember a strict {% set NAME = ... %} binding.
 	// They are how `{% set g = '__g' %}{{ g + 'lobals__' }}` and a computed
@@ -348,7 +365,7 @@ func (a *analyzer) structure() {
 				case "include", "import", "extends", "from":
 					a.emit(ruleInclude, toks[i+1].off, "{% "+toks[i+1].val+" %} makes the template load another file")
 				case "set":
-					a.analyzeSet(toks[i+1 : j])
+					a.analyzeSet(i, j)
 				}
 			}
 			i = j
@@ -366,7 +383,8 @@ func (a *analyzer) structure() {
 // a wall of medium findings on every benign repository. What the rule is for is
 // the other shape: '__g' + 'lobals__', which exists only to keep a dunder name
 // out of a literal scanner.
-func (a *analyzer) analyzeSet(inner []token) {
+func (a *analyzer) analyzeSet(openIdx, closeIdx int) {
+	inner := a.toks[openIdx+1 : closeIdx]
 	eq := -1
 	for k := range inner {
 		if inner[k].kind == kindOp && inner[k].val == "=" {
@@ -374,7 +392,22 @@ func (a *analyzer) analyzeSet(inner []token) {
 			break
 		}
 	}
-	if eq < 0 || eq+1 >= len(inner) || len(inner) == 0 {
+	if eq < 0 {
+		// Block-form assignment: {% set name %}body{% endset %} (optionally with
+		// a trailing filter like `| trim`).
+		if len(inner) >= 2 && inner[1].kind == kindName &&
+			(len(inner) == 2 || (inner[2].kind == kindOp && inner[2].val == "|")) {
+			if val, ok := a.foldBlockSet(closeIdx + 1); ok {
+				if len(inner) >= 4 && inner[2].kind == kindOp && inner[2].val == "|" &&
+					inner[3].kind == kindName && inner[3].val == "trim" {
+					val = strings.TrimSpace(val)
+				}
+				a.aliasValue[inner[1].val] = val
+			}
+		}
+		return
+	}
+	if eq+1 >= len(inner) || len(inner) == 0 {
 		return
 	}
 	rhs := inner[eq+1:]
@@ -403,6 +436,91 @@ func (a *analyzer) analyzeSet(inner []token) {
 	}
 	a.emit(ruleDynamicName, inner[0].off,
 		"{% set %} assembles a name out of literal pieces, which hides it from a literal scan")
+}
+
+// foldBlockSet collects the constant text inside a block-form
+// `{% set name %}...{% endset %}` starting at start (just past the opening `%}`).
+func (a *analyzer) foldBlockSet(start int) (string, bool) {
+	toks := a.toks
+	var b strings.Builder
+	for k := start; k < len(toks); k++ {
+		t := toks[k]
+		switch t.kind {
+		case kindText:
+			b.WriteString(t.val)
+		case kindComment:
+			continue
+		case kindTag:
+			j := k + 1
+			for j < len(toks) && toks[j].kind != kindTagEnd {
+				j++
+			}
+			if t.val == "{%" {
+				if k+1 < j && toks[k+1].kind == kindName && toks[k+1].val == "endset" {
+					return b.String(), true
+				}
+				return "", false
+			}
+			// {{ expr }} inside the set body: fold constant string expressions.
+			expr := stripOuterParens(toks[k+1 : j])
+			if s, ok := a.constStringExpr(expr); ok {
+				b.WriteString(s)
+				k = j
+				continue
+			}
+			return "", false
+		default:
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// constStringExpr resolves a token slice that is a single string literal, a
+// single bound alias, or a constant string concatenation of literals/aliases.
+func (a *analyzer) constStringExpr(expr []token) (string, bool) {
+	expr = stripOuterParens(expr)
+	if len(expr) == 0 {
+		return "", false
+	}
+	if len(expr) == 1 {
+		switch expr[0].kind {
+		case kindString:
+			return expr[0].val, true
+		case kindName:
+			v, ok := a.aliasValue[expr[0].val]
+			return v, ok
+		}
+		return "", false
+	}
+	return a.foldStrings(expr)
+}
+
+// stripOuterParens removes balanced wrapping parentheses around toks.
+func stripOuterParens(toks []token) []token {
+	for len(toks) >= 2 && toks[0].kind == kindOp && toks[0].val == "(" &&
+		toks[len(toks)-1].kind == kindOp && toks[len(toks)-1].val == ")" {
+		depth := 0
+		wraps := true
+		for k := 0; k < len(toks)-1; k++ {
+			if toks[k].kind == kindOp {
+				if toks[k].val == "(" {
+					depth++
+				} else if toks[k].val == ")" {
+					depth--
+					if depth == 0 {
+						wraps = false
+						break
+					}
+				}
+			}
+		}
+		if !wraps {
+			break
+		}
+		toks = toks[1 : len(toks)-1]
+	}
+	return toks
 }
 
 // buildsAName reports whether rhs constructs a name rather than computing a
@@ -545,9 +663,18 @@ func (a *analyzer) expressions() {
 				a.calledReach(i, i)
 			}
 			recv := a.resolveAlias(t.val)
-			if dangerousGlobals[recv] && i+1 < len(toks) && toks[i+1].kind == kindOp &&
-				(toks[i+1].val == "." || toks[i+1].val == "[") {
-				a.emit(ruleDangerousGlobal, t.off, t.val+" is used as the receiver of attribute/subscript access")
+			if dangerousGlobals[recv] {
+				next := a.afterGroupingParens(i)
+				if next < len(toks) && toks[next].kind == kindOp {
+					switch toks[next].val {
+					case ".", "[":
+						a.emit(ruleDangerousGlobal, t.off, t.val+" is used as the receiver of attribute/subscript access")
+					case "|":
+						if next+1 < len(toks) && toks[next+1].kind == kindName && toks[next+1].val == "attr" {
+							a.emit(ruleDangerousGlobal, t.off, t.val+" is passed to the attr filter")
+						}
+					}
+				}
 			}
 
 		case kindOp:
@@ -573,6 +700,31 @@ func (a *analyzer) expressions() {
 	}
 }
 
+// afterGroupingParens returns the index of the first token after i that is not
+// a closing parenthesis matching a grouping parenthesis immediately before i.
+// A call's opening parenthesis (e.g. `foo(lipsum).bar`) is not a grouping
+// parenthesis, so `lipsum` as a function argument is not treated as the
+// receiver of `.bar`.
+func (a *analyzer) afterGroupingParens(i int) int {
+	toks := a.toks
+	parens := 0
+	k := i - 1
+	for k >= 0 && toks[k].kind == kindOp && toks[k].val == "(" {
+		parens++
+		k--
+	}
+	if parens > 0 && k >= 0 && (toks[k].kind == kindName || (toks[k].kind == kindOp && (toks[k].val == ")" || toks[k].val == "]"))) {
+		// The innermost '(' is a call opener, so at most parens-1 are grouping.
+		parens--
+	}
+	next := i + 1
+	for parens > 0 && next < len(toks) && toks[next].kind == kindOp && toks[next].val == ")" {
+		next++
+		parens--
+	}
+	return next
+}
+
 // attrFilter handles `|attr(...)`. A leading-underscore argument is either the
 // introspection name (reported by PY-OBJECT) or a private name reached through
 // the filter (reported as the dangerous-global form); a computed argument is
@@ -583,25 +735,46 @@ func (a *analyzer) attrFilter(i int) {
 		toks[i+2].kind != kindOp || toks[i+2].val != "(" {
 		return
 	}
-	if i+3 < len(toks) && (toks[i+3].kind == kindString || toks[i+3].kind == kindName) {
-		s := toks[i+3].val
-		if v, ok := a.aliasValue[s]; ok {
-			s = v
-		}
+	end, ok := a.skipGroup(i+2, "(", ")")
+	if !ok {
+		a.emit(ruleDynamicName, toks[i+1].off, "attr filter is applied to a computed name")
+		return
+	}
+	a.checkAttrArg(toks[i+1].off, i+1, end-1, toks[i+3:end-1])
+}
+
+// checkAttrArg inspects the full argument expression passed to `attr(...)` (or
+// `map('attr', ...)`), including string concatenations, bound aliases and
+// dynamic expressions.
+func (a *analyzer) checkAttrArg(off, fromTok, lastTok int, args []token) {
+	args = stripOuterParens(args)
+	if len(args) == 0 {
+		a.emit(ruleDynamicName, off, "attr filter is applied to a computed name")
+		return
+	}
+	if len(args) == 1 && args[0].kind == kindString {
+		s := args[0].val
 		switch {
-		case strings.HasPrefix(s, "__"):
-			a.emit(rulePyObject, toks[i+1].off, "attr filter selects "+strconv.Quote(s))
-			if end, ok := a.skipGroup(i+2, "(", ")"); ok {
-				a.calledReach(i+1, end-1)
-			}
+		case dunderNames[s] || strings.HasPrefix(s, "__"):
+			a.emit(rulePyObject, off, "attr filter selects "+strconv.Quote(s))
+			a.calledReach(fromTok, lastTok)
 		case strings.HasPrefix(s, "_"):
-			a.emit(ruleDangerousGlobal, toks[i+1].off, "attr filter selects the private name "+strconv.Quote(s))
-		case toks[i+3].kind == kindName:
-			a.emit(ruleDynamicName, toks[i+1].off, "attr filter is applied to a computed name")
+			a.emit(ruleDangerousGlobal, off, "attr filter selects the private name "+strconv.Quote(s))
 		}
 		return
 	}
-	a.emit(ruleDynamicName, toks[i+1].off, "attr filter is applied to a computed name")
+	if s, ok := a.constStringExpr(args); ok {
+		switch {
+		case dunderNames[s] || strings.HasPrefix(s, "__"):
+			a.emit(rulePyObject, off, "attr filter selects "+strconv.Quote(s))
+			a.calledReach(fromTok, lastTok)
+			return
+		case strings.HasPrefix(s, "_"):
+			a.emit(ruleDangerousGlobal, off, "attr filter selects the private name "+strconv.Quote(s))
+			return
+		}
+	}
+	a.emit(ruleDynamicName, off, "attr filter is applied to a computed name")
 }
 
 // concatAt returns the value of a run of string literals joined by + or ~,
@@ -735,6 +908,17 @@ func (a *analyzer) chainCall(last int) (int, bool) {
 				return k, true
 			}
 			return next - 1, true
+		case "|":
+			if k+2 < len(toks) && toks[k+1].kind == kindName && toks[k+1].val == "attr" &&
+				toks[k+2].kind == kindOp && toks[k+2].val == "(" {
+				next, ok := a.skipGroup(k+2, "(", ")")
+				if !ok {
+					return k, false
+				}
+				k = next
+				continue
+			}
+			return k, false
 		default:
 			return k, false
 		}
@@ -796,7 +980,8 @@ func (a *analyzer) chargeChain() bool {
 	if a.chainBudget <= 0 {
 		if !a.chainLimit {
 			a.chainLimit = true
-			limits.Emit(a.sink, limits.RuleEntries, "MaxJinjaChainTokens", 0, 0, "Jinja chain analysis")
+			limit := int64(a.chainMax)
+			limits.Emit(a.sink, limits.RuleEntries, "MaxJinjaChainTokens", limit+1, limit, "Jinja chain analysis")
 		}
 		return false
 	}
@@ -812,7 +997,7 @@ func (a *analyzer) checkComputedIndex(i int, idx token) {
 		return
 	}
 	switch {
-	case strings.HasPrefix(v, "__"):
+	case dunderNames[v] || strings.HasPrefix(v, "__"):
 		a.emit(rulePyObject, idx.off, "computed subscript selects "+strconv.Quote(v))
 		a.calledReach(i, i+2)
 	case strings.HasPrefix(v, "_"):
@@ -840,23 +1025,88 @@ func (a *analyzer) attrPathFilters(i int) {
 	if !ok {
 		return
 	}
-	for k := i + 3; k+2 < end; k++ {
+	filterName := toks[i+1].val
+	for k := i + 3; k+2 < end-1; k++ {
 		if toks[k].kind != kindName || (toks[k].val != "attribute" && toks[k].val != "by") ||
 			toks[k+1].kind != kindOp || toks[k+1].val != "=" {
 			continue
 		}
-		if toks[k+2].kind != kindString {
-			a.emit(ruleDynamicName, toks[k].off, "filter "+toks[i+1].val+" reads a computed attribute name")
+		if s, _, resolved := a.resolveConcatOrSingle(k+2, end-1); resolved {
+			if a.checkPathValue(token{off: toks[k+2].off, val: s}) {
+				a.calledReach(i+1, end-1)
+			}
 			continue
 		}
-		a.checkPathValue(toks[k+2])
+		a.emit(ruleDynamicName, toks[k].off, "filter "+filterName+" reads a computed attribute name")
 	}
 	// selectattr, rejectattr and groupby take the attribute path as their first
 	// positional argument, so `|groupby('__globals__.os.popen')` walked a dunder
 	// path with no finding while the keyword spelling was checked.
-	if positionalAttrFilters[toks[i+1].val] && i+3 < end && toks[i+3].kind == kindString {
-		a.checkPathValue(toks[i+3])
+	isKwFirst := i+4 < end-1 && toks[i+3].kind == kindName && toks[i+4].kind == kindOp && toks[i+4].val == "="
+	if positionalAttrFilters[filterName] && i+3 < end-1 && !isKwFirst {
+		if s, _, resolved := a.resolveConcatOrSingle(i+3, end-1); resolved {
+			if a.checkPathValue(token{off: toks[i+3].off, val: s}) {
+				a.calledReach(i+1, end-1)
+			}
+		} else if toks[i+3].kind == kindName {
+			// Dynamic/computed attribute path passed positionally.
+			a.emit(ruleDynamicName, toks[i+3].off, "filter "+filterName+" reads a computed attribute name")
+		}
 	}
+	// map('attr', '__globals__') applies the attr filter positionally.
+	if filterName == "map" && i+3 < end-1 && !isKwFirst {
+		if first, next, ok := a.resolveConcatOrSingle(i+3, end-1); ok && first == "attr" && next < end-1 {
+			// Remaining positional tokens up to any keyword argument.
+			argEnd := next
+			for argEnd < end-1 {
+				if argEnd+1 < end-1 && toks[argEnd].kind == kindName && toks[argEnd+1].kind == kindOp && toks[argEnd+1].val == "=" {
+					break
+				}
+				argEnd++
+			}
+			if argEnd > next {
+				a.checkAttrArg(toks[i+1].off, i+1, end-1, toks[next:argEnd])
+			}
+		}
+	}
+}
+
+// resolveConcatOrSingle folds a string literal, a bound alias, or a `~`/`+`
+// concatenation of literals/aliases starting at start within [start, limit).
+func (a *analyzer) resolveConcatOrSingle(start, limit int) (string, int, bool) {
+	toks := a.toks
+	if start >= limit {
+		return "", start, false
+	}
+	atom := func(k int) (string, bool) {
+		switch toks[k].kind {
+		case kindString:
+			return toks[k].val, true
+		case kindName:
+			v, ok := a.aliasValue[toks[k].val]
+			return v, ok
+		}
+		return "", false
+	}
+	first, ok := atom(start)
+	if !ok {
+		return "", start, false
+	}
+	k := start + 1
+	if k+1 >= limit || toks[k].kind != kindOp || (toks[k].val != "+" && toks[k].val != "~") {
+		return first, k, true
+	}
+	var b strings.Builder
+	b.WriteString(first)
+	for k+1 < limit && toks[k].kind == kindOp && (toks[k].val == "+" || toks[k].val == "~") {
+		v, ok := atom(k + 1)
+		if !ok {
+			return "", start, false
+		}
+		b.WriteString(v)
+		k += 2
+	}
+	return b.String(), k, true
 }
 
 // positionalAttrFilters are the filters whose attribute path is positional.
@@ -864,17 +1114,20 @@ var positionalAttrFilters = map[string]bool{
 	"selectattr": true, "rejectattr": true, "groupby": true,
 }
 
-func (a *analyzer) checkPathValue(tok token) {
+func (a *analyzer) checkPathValue(tok token) bool {
+	pyObj := false
 	for _, part := range strings.Split(tok.val, ",") {
 		for _, seg := range strings.Split(part, ".") {
 			switch {
-			case dunderNames[seg]:
+			case dunderNames[seg] || strings.HasPrefix(seg, "__"):
 				a.emit(rulePyObject, tok.off, "filter attribute path selects "+strconv.Quote(seg))
+				pyObj = true
 			case strings.HasPrefix(seg, "_"):
 				a.emit(ruleDangerousGlobal, tok.off, "filter attribute path selects the private name "+strconv.Quote(seg))
 			}
 		}
 	}
+	return pyObj
 }
 
 // skipGroup returns the index just past the group that opens at k, and whether

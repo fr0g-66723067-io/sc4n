@@ -47,6 +47,8 @@ func hfMeta(ctx *artifact.Ctx, name, base string, data []byte, truncated bool) {
 		adapterExternalBase(ctx, name, data, doc)
 	case "modules.json":
 		modulesRemote(ctx, name, data, doc)
+	case "model_index.json":
+		modelIndexCustomPipeline(ctx, name, data, doc)
 	}
 	autoMapRule(ctx, name, data, doc)
 	architectureRule(ctx, name, data, doc)
@@ -229,26 +231,28 @@ func moduleOfRef(ref string) string {
 }
 
 // moduleExists reports whether module (a slash path without .py) resolves to a
-// file next to the artifact. It is a non-following existence check used only for
-// evidence: the file's own contents are scanned separately by the Python layer
-// when the whole tree is scanned. Absolute paths and `..` segments are refused
-// before any filesystem call, and the member chain of a nested artifact has no
-// directory on disk, so it yields no answer rather than guessing.
+// file (`<mod>.py`) or package (`<mod>/__init__.py`) next to the artifact. It
+// is a non-following existence check used only for evidence: the file's own
+// contents are scanned separately by the Python layer when the whole tree is
+// scanned. Absolute paths and `..` segments are refused before any filesystem
+// call, and the member chain of a nested artifact has no directory on disk, so
+// it yields no answer rather than guessing.
 func moduleExists(name, module string) (string, bool) {
 	dir := realDir(name)
 	if dir == "" || module == "" {
 		return "", false
 	}
-	rel := module + ".py"
-	if filepath.IsAbs(rel) || strings.Contains(rel, "..") {
+	if filepath.IsAbs(module) || strings.Contains(module, "..") {
 		return "", false
 	}
-	p := filepath.Join(dir, filepath.FromSlash(rel))
-	fi, err := os.Lstat(p)
-	if err != nil || fi.IsDir() {
-		return "", false
+	for _, rel := range []string{module + ".py", module + "/__init__.py"} {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		fi, err := os.Lstat(p)
+		if err == nil && !fi.IsDir() {
+			return p, true
+		}
 	}
-	return p, true
+	return "", false
 }
 
 // architectureRule is informational and only fires for a name outside the set
@@ -342,6 +346,46 @@ func adapterExternalBase(ctx *artifact.Ctx, name string, data []byte, doc any) {
 // paraphrase-multilingual-MiniLM-L12-v2, nomic-embed-text-v1.5). A bare
 // subdirectory name that is absent from the tree is a partial checkout, not a
 // remote module either.
+// modelIndexCustomPipeline reports a diffusers model_index.json that names a
+// custom_pipeline, which instructs DiffusionPipeline to import and execute
+// repository or remote Python code.
+func modelIndexCustomPipeline(ctx *artifact.Ctx, name string, data []byte, doc any) {
+	walkMaps(doc, func(m map[string]any) {
+		v, ok := m["custom_pipeline"]
+		if !ok {
+			return
+		}
+		cp, ok := v.(string)
+		if !ok || cp == "" {
+			return
+		}
+		off := offsetOf(data, cp)
+		extra := map[string]string{"custom_pipeline": cp, "file": baseName(name)}
+		ev := "model_index.json sets custom_pipeline=" + clip(cp, 120) +
+			", which instructs the loader to import and execute custom pipeline code"
+		if mod := customPipelineModule(cp); mod != "" {
+			if p, present := moduleExists(name, mod); present {
+				ev += "; the module file " + p + " exists in the scanned tree"
+				importScopeRule(ctx, name, mod, off)
+			}
+		}
+		ctx.Sink.EmitExtra(ruleAutoMap, off, ev, extra)
+	})
+}
+
+func customPipelineModule(cp string) string {
+	cp = strings.TrimSuffix(cp, ".py")
+	if cp == "" {
+		return ""
+	}
+	for _, part := range strings.Split(cp, ".") {
+		if !isIdent(part) {
+			return ""
+		}
+	}
+	return strings.ReplaceAll(cp, ".", "/")
+}
+
 func modulesRemote(ctx *artifact.Ctx, name string, data []byte, doc any) {
 	arr, ok := doc.([]any)
 	if !ok {
@@ -354,6 +398,21 @@ func modulesRemote(ctx *artifact.Ctx, name string, data []byte, doc any) {
 		}
 		typ, _ := m["type"].(string)
 		path, _ := m["path"].(string)
+		// Inspect "type" for arbitrary dotted import targets outside standard
+		// sentence_transformers.* and torch.nn.* modules.
+		if mod := moduleOfRef(typ); mod != "" &&
+			!strings.HasPrefix(typ, "sentence_transformers.") &&
+			!strings.HasPrefix(typ, "torch.nn.") {
+			off := offsetOf(data, typ)
+			extra := map[string]string{"type": typ, "file": baseName(name)}
+			ev := "modules.json imports custom dotted type " + clip(typ, 120) +
+				" outside sentence_transformers.*/torch.nn.*"
+			if p, present := moduleExists(name, mod); present {
+				ev += "; the module file " + p + " exists in the scanned tree"
+				importScopeRule(ctx, name, mod, off)
+			}
+			ctx.Sink.EmitExtra(ruleAutoMap, off, ev, extra)
+		}
 		if path == "" || path == "." {
 			continue
 		}
@@ -393,7 +452,7 @@ func gitAttributes(ctx *artifact.Ctx, name string, data []byte) {
 			trim--
 		}
 		fields := strings.Fields(string(data[start:trim]))
-		if len(fields) >= 2 {
+		if len(fields) >= 2 && !strings.HasPrefix(fields[0], "#") {
 			for _, attr := range fields[1:] {
 				if attr == "filter=lfs" || attr == "diff=lfs" || attr == "merge=lfs" {
 					ctx.Sink.Emit(ruleGitattributesLFS, int64(start),
@@ -455,16 +514,24 @@ func localDirExists(name, value string) bool {
 }
 
 // realDir returns the directory of a real on-disk artifact path, or "" for an
-// archive member (whose display name carries a `:` chain) or a stdin artifact.
+// archive member (whose display name carries a container `:` chain) or a stdin
+// artifact. CWD-relative paths (`config.json`, `./config.json`) resolve to "."
+// and Windows drive prefixes (`C:\...`, `C:/...`) are preserved.
 func realDir(name string) string {
-	if strings.Contains(name, ":") {
+	if name == "" || name == "-" || strings.HasPrefix(name, "<") || hasContainerColon(name) {
 		return ""
 	}
-	dir := filepath.Dir(name)
-	if dir == "." {
-		return ""
+	return filepath.Dir(name)
+}
+
+// hasContainerColon reports whether name contains a `:` other than a leading
+// Windows drive letter (`C:...`).
+func hasContainerColon(name string) bool {
+	start := 0
+	if len(name) >= 2 && ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z')) && name[1] == ':' {
+		start = 2
 	}
-	return dir
+	return strings.IndexByte(name[start:], ':') >= 0
 }
 
 // walkMaps calls fn for every JSON object in v, in a deterministic order.

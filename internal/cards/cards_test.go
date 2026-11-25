@@ -362,3 +362,41 @@ func TestAboveAnaphoraInACard(t *testing.T) {
 		}
 	}
 }
+
+func TestFrontmatterTrailingWhitespace(t *testing.T) {
+	fm, ok := parseFrontmatter("---\nlicense: mit   \n---\nbody\n")
+	if !ok || fm.scalars["license"] != "mit" {
+		t.Fatalf("trailing whitespace broke valid key: ok=%v fm=%+v", ok, fm)
+	}
+	if _, ok := parseFrontmatter("---\nlicense: mit\nno colon here   \n---\n"); ok {
+		t.Fatal("trailing whitespace hid a malformed frontmatter line")
+	}
+}
+
+func TestScanJSONSkipsFrontmatterParsing(t *testing.T) {
+	got := ids(scanJSON(t, "config.json", `{"separator":"---\nsection"}`))
+	if got["SC4N-CARD-PARSE"] != 0 {
+		t.Fatalf("JSON string starting with --- fired SC4N-CARD-PARSE: %v", got)
+	}
+}
+
+func TestLeadingBOMAndEmojiZWJExempted(t *testing.T) {
+	for _, card := range []string{
+		"\ufeff# Model Card\n\nA normal card with a UTF-8 BOM.\n",
+		"# Model Card\n\nBuilt by \U0001f469\u200d\U0001f4bb engineers \U0001f636\u200d\U0001f32b\ufe0f.\n",
+	} {
+		if got := ids(scanText(t, "README.md", card)); len(got) != 0 {
+			t.Errorf("benign BOM/emoji card %q produced %v", card, got)
+		}
+	}
+}
+
+func TestCommentWithCodeSnippetUsesKindCard(t *testing.T) {
+	got := ids(scanText(t, "README.md", "<!-- example: subprocess.run(['ls']) eval(x) -->\n# Card\n"))
+	if got["SC4N-CARD-COMMENT"] == 0 {
+		t.Fatalf("expected SC4N-CARD-COMMENT, got %v", got)
+	}
+	if got["SC4N-CARD-HIDDEN"] != 0 || got["SC4N-CARD-INJECTION"] != 0 {
+		t.Fatalf("commented-out code snippet upgraded to hidden/injection: %v", got)
+	}
+}

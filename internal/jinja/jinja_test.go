@@ -440,3 +440,140 @@ func TestTokenBudgetBoundsTheBackingArray(t *testing.T) {
 		t.Fatalf("cap(tokens) = %d, want the cap %d (the backing array was kept)", cap(toks), maxJinjaTokens)
 	}
 }
+
+func TestTagCloserRespectsStringLiterals(t *testing.T) {
+	tmpl := `{{ "}}" and lipsum.__globals__['os'].popen('id').read() }}`
+	fs := analyze(t, tmpl)
+	got := ids(fs)
+	for _, want := range []string{"SC4N-JINJA-PY-OBJECT", "SC4N-JINJA-DANGEROUS-GLOBAL", "SC4N-MALICE-CONSTRUCTED"} {
+		if got[want] == 0 {
+			t.Errorf("string-embedded }} hid %s; findings=%v", want, got)
+		}
+	}
+
+	stmtTmpl := `{% set s = "%}" %}{{ lipsum.__globals__ }}`
+	got2 := ids(analyze(t, stmtTmpl))
+	if got2["SC4N-JINJA-PY-OBJECT"] == 0 {
+		t.Errorf("string-embedded %%} hid SC4N-JINJA-PY-OBJECT; findings=%v", got2)
+	}
+}
+
+func TestNumericLiteralStopsBeforeDunderAttribute(t *testing.T) {
+	for _, tmpl := range []string{
+		`{{ 1.0.__class__.__mro__ }}`,
+		`{{ 1.__class__ }}`,
+		`{{ 0x10.__class__ }}`,
+	} {
+		if got := ids(analyze(t, tmpl)); got["SC4N-JINJA-PY-OBJECT"] == 0 {
+			t.Errorf("%s: numeric scanner swallowed .__class__; findings=%v", tmpl, got)
+		}
+	}
+	// Hex digits outside 0x must not be consumed into a number.
+	toks, _ := lex(`{{ 1and2 }}`)
+	sawNum, sawName := false, false
+	for _, tok := range toks {
+		if tok.kind == kindNumber && tok.val == "1" {
+			sawNum = true
+		}
+		if tok.kind == kindName && tok.val == "and2" {
+			sawName = true
+		}
+	}
+	if !sawNum || !sawName {
+		t.Fatalf("1and2 mis-lexed: %+v", toks)
+	}
+}
+
+func TestAttrFilterInspectsFullExpression(t *testing.T) {
+	for _, tc := range []struct {
+		tmpl string
+		want string
+	}{
+		{`{{ x|attr('' ~ '__class__') }}`, "SC4N-JINJA-PY-OBJECT"},
+		{`{{ x|attr('__g' ~ 'lobals__') }}`, "SC4N-JINJA-PY-OBJECT"},
+		{`{{ x|attr('a' ~ dyn) }}`, "SC4N-JINJA-DYNAMIC-NAME"},
+		{`{{ x|attr(('__globals__')) }}`, "SC4N-JINJA-PY-OBJECT"},
+	} {
+		if got := ids(analyze(t, tc.tmpl)); got[tc.want] == 0 {
+			t.Errorf("%s: missing %s; findings=%v", tc.tmpl, tc.want, got)
+		}
+	}
+	// Plain non-dunder string remains clean.
+	if fs := analyze(t, `{{ x|attr('role') }}`); len(fs) != 0 {
+		t.Errorf("plain |attr('role') produced %v", ids(fs))
+	}
+}
+
+func TestBlockFormSetTracksAlias(t *testing.T) {
+	tmpl := `{% set g %}__globals__{% endset %}{{ lipsum[g]['os'].popen('id').read() }}`
+	got := ids(analyze(t, tmpl))
+	if got["SC4N-JINJA-PY-OBJECT"] == 0 || got["SC4N-MALICE-CONSTRUCTED"] == 0 {
+		t.Fatalf("block-form set alias not tracked: %v", got)
+	}
+}
+
+func TestDangerousGlobalsParensAttrChainAndExpandedNames(t *testing.T) {
+	// Dangerous globals in grouping parens or piped into |attr(...).
+	for _, tmpl := range []string{
+		`{% set g = '__globals__' %}{{ (lipsum)[g] }}`,
+		`{{ lipsum|attr('__globals__') }}`,
+		`{{ (lipsum)|attr('__globals__') }}`,
+		`{{ config.SECRET_KEY }}`,
+		`{{ request.application }}`,
+		`{{ self.__init__ }}`,
+	} {
+		if got := ids(analyze(t, tmpl)); got["SC4N-JINJA-DANGEROUS-GLOBAL"] == 0 {
+			t.Errorf("%s: missing SC4N-JINJA-DANGEROUS-GLOBAL; findings=%v", tmpl, got)
+		}
+	}
+	// A global passed as a call argument must not be treated as receiver of `.bar`.
+	if got := ids(analyze(t, `{{ foo(lipsum).bar }}`)); got["SC4N-JINJA-DANGEROUS-GLOBAL"] != 0 {
+		t.Errorf("call argument lipsum falsely flagged: %v", got)
+	}
+	// Newly added introspection dunders/frame attrs.
+	for _, tmpl := range []string{
+		`{{ ''.__class__.__base__.__subclasses__() }}`,
+		`{{ x.__bases__ }}`,
+		`{{ x.__self__ }}`,
+		`{{ x.__func__ }}`,
+		`{{ x.__closure__ }}`,
+		`{{ x.__getitem__('a') }}`,
+		`{{ x.__getattr__('a') }}`,
+		`{{ x.__call__() }}`,
+		`{{ gen.gi_frame.f_globals }}`,
+		`{{ f.f_builtins }}`,
+	} {
+		if got := ids(analyze(t, tmpl)); got["SC4N-JINJA-PY-OBJECT"] == 0 {
+			t.Errorf("%s: missing SC4N-JINJA-PY-OBJECT; findings=%v", tmpl, got)
+		}
+	}
+	// chainCall must cross |attr(...) chains to grade as constructed execution.
+	attrChain := `{{ ''|attr('__class__')|attr('__base__')|attr('__subclasses__')() }}`
+	if got := ids(analyze(t, attrChain)); got["SC4N-MALICE-CONSTRUCTED"] == 0 {
+		t.Errorf("attr chain call missing SC4N-MALICE-CONSTRUCTED; findings=%v", got)
+	}
+	// Positional map('attr', '__globals__') and concatenated groupby.
+	for _, tmpl := range []string{
+		`{{ [lipsum]|map('attr', '__globals__')|list }}`,
+		`{{ [lipsum]|groupby('__g' ~ 'lobals__') }}`,
+	} {
+		if got := ids(analyze(t, tmpl)); got["SC4N-JINJA-PY-OBJECT"] == 0 {
+			t.Errorf("%s: missing SC4N-JINJA-PY-OBJECT; findings=%v", tmpl, got)
+		}
+	}
+}
+
+func TestChargeChainReportsActualLimit(t *testing.T) {
+	c := report.NewCollector(0)
+	a := &analyzer{sink: c.For("x"), chainBudget: 0, chainMax: 2048}
+	if a.chargeChain() {
+		t.Fatal("exhausted chain budget allowed step")
+	}
+	fs := c.Findings()
+	if len(fs) != 1 || fs[0].RuleID != "SC4N-LIMIT-ENTRIES" {
+		t.Fatalf("findings = %+v", fs)
+	}
+	if fs[0].Extra["cap"] != "2048" || fs[0].Extra["value"] != "2049" || fs[0].Extra["limit"] != "MaxJinjaChainTokens" {
+		t.Fatalf("limit extras = %v, want cap=2048 value=2049 limit=MaxJinjaChainTokens", fs[0].Extra)
+	}
+}

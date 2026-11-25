@@ -58,23 +58,27 @@ var decodedDirectives = []string{
 // ScanText runs the card and metadata detectors over arbitrary text: a README, a
 // dataset card, or one metadata value. what labels the source in evidence.
 func ScanText(sink *report.Sink, base int64, what, text string) {
-	scanWithKind(sink, base, what, text, stringscan.KindCard)
+	scanWithKind(sink, base, what, text, stringscan.KindCard, true)
 }
 
 // ScanMetadata runs the same detectors over a *metadata* value, with the full
 // indicator tier. The difference is the document's role, not its bytes: a
 // configuration value that says `subprocess` or `trust_remote_code` is what the
 // loader will do, while the same words in a card are an example in a code block.
+// YAML frontmatter parsing is skipped because metadata values are strings from
+// structured documents (such as JSON), not Markdown files with frontmatter.
 func ScanMetadata(sink *report.Sink, base int64, what, text string) {
-	scanWithKind(sink, base, what, text, stringscan.KindText)
+	scanWithKind(sink, base, what, text, stringscan.KindText, false)
 }
 
-func scanWithKind(sink *report.Sink, base int64, what, text string, kind stringscan.Kind) {
+func scanWithKind(sink *report.Sink, base int64, what, text string, kind stringscan.Kind, checkFrontmatter bool) {
 	if text == "" {
 		return
 	}
-	if _, ok := parseFrontmatter(text); !ok {
-		sink.Emit(ruleCardParse, base, "unparseable YAML frontmatter in "+what+"; the document is scanned as raw text")
+	if checkFrontmatter {
+		if _, ok := parseFrontmatter(text); !ok {
+			sink.Emit(ruleCardParse, base, "unparseable YAML frontmatter in "+what+"; the document is scanned as raw text")
+		}
 	}
 	// The shared engine already owns the injection phrases, chat pseudo-tags,
 	// webhooks, credential paths and unicode anomalies. Do not duplicate them.
@@ -276,7 +280,7 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 			} else {
 				sink.Emit(ruleCardHidden, base+int64(start), ev)
 			}
-			if len(stringscan.ScanString(body)) > 0 {
+			if len(stringscan.ScanStringKind(body, stringscan.KindCard)) > 0 {
 				if secret {
 					sink.EmitRedacted(ruleCardInjection, base+int64(start),
 						"instruction-like content hidden in an HTML comment in "+what+" and a masked secret", nil)
@@ -302,9 +306,19 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 
 	var hiddenRuns, hiddenChars, invisibleRuns, invisibleChars int
 	var hiddenAt, invisibleAt int64 = -1, -1
-	for i := 0; i < len(text); {
+	startIdx := 0
+	// Exempt a single leading UTF-8 BOM (U+FEFF) at the very start of the text.
+	if strings.HasPrefix(text, "\ufeff") {
+		startIdx = len("\ufeff")
+	}
+	for i := startIdx; i < len(text); {
 		r, size := utf8.DecodeRuneInString(text[i:])
 		if !invisible(r) {
+			i += size
+			continue
+		}
+		// Exempt a standalone ZWJ (U+200D) joining emoji code points (e.g. 👨‍💻).
+		if r == 0x200D && isEmojiZWJ(text, i, size) {
 			i += size
 			continue
 		}
@@ -352,11 +366,36 @@ func hidden(sink *report.Sink, base int64, what, text string) {
 	}
 }
 
+// isEmojiZWJ reports whether the U+200D at text[i:i+size] is a standalone emoji
+// grapheme joiner bridging two emoji/variation-selector code points.
+func isEmojiZWJ(text string, i, size int) bool {
+	if i <= 0 || i+size >= len(text) {
+		return false
+	}
+	prevR, _ := utf8.DecodeLastRuneInString(text[:i])
+	nextR, _ := utf8.DecodeRuneInString(text[i+size:])
+	return isEmojiRune(prevR) && isEmojiRune(nextR)
+}
+
+func isEmojiRune(r rune) bool {
+	switch {
+	case r == 0x20E3, r == 0xFE0E, r == 0xFE0F:
+		return true
+	case r >= 0x2300 && r <= 0x23FF,
+		r >= 0x2600 && r <= 0x27BF,
+		r >= 0x2B00 && r <= 0x2BFF,
+		r >= 0x1F000 && r <= 0x1FAFF:
+		return true
+	}
+	return false
+}
+
 // hasInstruction reports whether a comment body is shaped like an instruction: a
-// shared indicator (the phrase and pseudo-tag table) or one of the card-specific
+// card-tier shared indicator (the phrase and secret/unicode tables, excluding
+// documentation-only code/loader/decoder tokens) or one of the card-specific
 // directives. Both tables already exist; this is the one place that asks either.
 func hasInstruction(body string) bool {
-	if len(stringscan.ScanString(body)) > 0 {
+	if len(stringscan.ScanStringKind(body, stringscan.KindCard)) > 0 {
 		return true
 	}
 	low := strings.ToLower(body)

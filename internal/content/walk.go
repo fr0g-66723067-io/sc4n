@@ -89,10 +89,26 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if err != nil && len(head) == 0 {
 		return artifact.FormatUnknown, false
 	}
-	if !texty(head) {
-		return artifact.FormatUnknown, false
-	}
 	base := baseName(s.Name())
+	if base == ".gitattributes" {
+		return artifact.FormatText, true
+	}
+	if !texty(head) {
+		if !(validUTF8(head) && mostlyText(head)) {
+			return artifact.FormatUnknown, false
+		}
+		goTmpl := looksLikeGoTemplate(head)
+		if isJinjaName(base) || (!goTmpl && looksLikeJinja(head)) {
+			return artifact.FormatJinja, true
+		}
+		if len(head) < 64 && !isMarkdown(base) && !isYAML(base) && !isJSONLines(base) && !isJSONName(base) {
+			return artifact.FormatUnknown, false
+		}
+		// Valid UTF-8 containing embedded NUL bytes (e.g. a NUL-padded JSON
+		// document) dispatches as FormatText so Parse reports SC4N-CONTENT-NOT-UTF8
+		// while still scanning the bytes.
+		return artifact.FormatText, true
+	}
 	switch {
 	case isMarkdown(base):
 		return artifact.FormatMarkdown, true
@@ -120,6 +136,13 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	}
 	if !goTmpl && looksLikeJinja(head) {
 		return artifact.FormatJinja, true
+	}
+	if bytes.IndexByte(head, 0) >= 0 {
+		// Valid UTF-8 that is predominantly text but carries an embedded NUL
+		// byte would be dropped as unknown by the built-in fallback sniffer.
+		// Claim it as FormatText so Parse emits SC4N-CONTENT-NOT-UTF8 and still
+		// runs the text analysers.
+		return artifact.FormatText, true
 	}
 	// Not specific: return false so the built-in classifier records FormatText.
 	return artifact.FormatUnknown, false
@@ -149,14 +172,17 @@ func sniffTemplate(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if err != nil && len(head) == 0 {
 		return artifact.FormatUnknown, false
 	}
-	if !texty(head) {
+	if !isJinjaName(baseName(s.Name())) {
+		return artifact.FormatUnknown, false
+	}
+	if !validUTF8(head) {
 		// A binary file named .jinja is still not a template.
 		return artifact.FormatUnknown, false
 	}
-	if isJinjaName(baseName(s.Name())) {
-		return artifact.FormatJinja, true
+	if bytes.IndexByte(head, 0) >= 0 && !mostlyText(head) && !looksLikeJinja(head) {
+		return artifact.FormatUnknown, false
 	}
-	return artifact.FormatUnknown, false
+	return artifact.FormatJinja, true
 }
 
 type parser struct{}
@@ -175,7 +201,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	if data == nil {
 		return nil
 	}
-	if !texty(data) && base != ".gitattributes" {
+	if !validUTF8(data) && base != ".gitattributes" {
 		// The fallback classifier called it text, but it is not valid UTF-8.
 		// Analysing arbitrary binary as prose would manufacture findings from
 		// random bytes — a NUL-free symbol table such as cscope.out yields dozens
@@ -206,6 +232,26 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		}
 		return nil
 	}
+	if nulAt := bytes.IndexByte(data, 0); nulAt >= 0 {
+		// Valid UTF-8 containing embedded NUL bytes (for example a NUL smuggled
+		// into a Jinja template, card, config or .gitattributes). Half-binary
+		// buffers (!mostlyText) stay on the byte-safe tier so random binary
+		// tails do not trigger prose or Unicode-shape findings; mostly-text
+		// UTF-8, Jinja templates, and .gitattributes emit SC4N-CONTENT-NOT-UTF8
+		// and still run their analysers so a NUL byte can never hide a payload.
+		if !mostlyText(data) && !isJinjaName(base) && ctx.Format != artifact.FormatJinja && base != ".gitattributes" {
+			stringscan.EmitKind(ctx.Sink, 0, data, stringscan.KindSecrets)
+			if opensAsText(data) {
+				ctx.Sink.EmitExtra(ruleNotUTF8, 0,
+					"the artifact is not valid UTF-8, so the text-only layers did not run",
+					map[string]string{"invalidAt": strconv.Itoa(nulAt)})
+			}
+			return nil
+		}
+		ctx.Sink.EmitExtra(ruleNotUTF8, 0,
+			"the text artifact contains an embedded NUL byte",
+			map[string]string{"invalidAt": strconv.Itoa(nulAt)})
+	}
 
 	switch {
 	case isJinjaName(base) || ctx.Format == artifact.FormatJinja:
@@ -233,6 +279,15 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	case base == "tokenizer_config.json" || base == "special_tokens_map.json":
 		if !truncated {
 			tokenizer.AnalyzeJSON(ctx.Sink, 0, name, data)
+			if base == "tokenizer_config.json" {
+				var doc any
+				dec := json.NewDecoder(bytes.NewReader(data))
+				dec.UseNumber()
+				if err := dec.Decode(&doc); err == nil {
+					autoMapRule(ctx, name, data, doc)
+					trustRemoteCodeRule(ctx, name, data, doc)
+				}
+			}
 		}
 		chatTemplateRule(ctx, name, data)
 		emitTokenizerDocument(ctx, data)
@@ -252,9 +307,9 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		// applies. Its tokens are ordinary words, including `subprocess`; reading
 		// them as prose reported code execution on Qwen3-0.6B and Qwen3-14B.
 		stringscan.EmitKind(ctx.Sink, 0, data, stringscan.KindSecrets)
-	case base == "unigram.json":
-		// A sentencepiece unigram vocabulary: a "type"/"unk_id" header and the
-		// table itself, which VocabSpans locates.
+	case base == "unigram.json" || base == "tekken.json":
+		// SentencePiece unigram (unigram.json) and Mistral tekken (tekken.json)
+		// vocabularies: metadata header plus a vocab table that VocabSpans locates.
 		emitTokenizerDocument(ctx, data)
 	case isHFMetaName(base):
 		hfMeta(ctx, name, base, data, truncated)
@@ -262,7 +317,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		gitAttributes(ctx, name, data)
 		stringscan.Emit(ctx.Sink, 0, data)
 	default:
-		emitTokenizerDocument(ctx, data)
+		stringscan.Emit(ctx.Sink, 0, data)
 	}
 	return nil
 }
@@ -309,12 +364,9 @@ func readText(ctx *artifact.Ctx, s source.Source) ([]byte, bool) {
 	return data, truncated
 }
 
-// texty reports whether b is plausibly text: no NUL byte and valid UTF-8. The
-// trailing-bytes tolerance covers a multi-byte rune cut by a truncation boundary.
-func texty(b []byte) bool {
-	if bytes.IndexByte(b, 0) >= 0 {
-		return false
-	}
+// validUTF8 reports whether b is valid UTF-8, tolerating a multi-byte rune cut
+// by a truncation boundary.
+func validUTF8(b []byte) bool {
 	if utf8.Valid(b) {
 		return true
 	}
@@ -322,6 +374,15 @@ func texty(b []byte) bool {
 		return true
 	}
 	return false
+}
+
+// texty reports whether b is plausibly text: no NUL byte and valid UTF-8. The
+// trailing-bytes tolerance covers a multi-byte rune cut by a truncation boundary.
+func texty(b []byte) bool {
+	if bytes.IndexByte(b, 0) >= 0 {
+		return false
+	}
+	return validUTF8(b)
 }
 
 // mostlyText reports whether b is predominantly printable ASCII, the condition
@@ -590,7 +651,11 @@ func isJinjaName(base string) bool {
 func isHFMetaName(base string) bool {
 	switch base {
 	case "config.json", "adapter_config.json", "modules.json",
-		"model_index.json", "dataset_info.json":
+		"model_index.json", "dataset_info.json",
+		"processor_config.json", "preprocessor_config.json",
+		"image_processor_config.json", "feature_extractor_config.json",
+		"video_processor_config.json", "generation_config.json",
+		"config_sentence_transformers.json":
 		return true
 	}
 	return false

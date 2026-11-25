@@ -114,7 +114,7 @@ func (e *emitter) off(s string) int64 {
 		return e.base
 	}
 	if off, ok := e.offsets[s]; ok {
-		return off
+		return e.base + off
 	}
 	return e.base
 }
@@ -407,34 +407,67 @@ func findRedos(re string) []redosHit {
 			prevWasGroup, prevGroupQuant = false, false
 
 		case '(':
+			stack = append(stack, group{})
 			if i+1 < len(re) && re[i+1] == '?' {
 				rest := re[i+2:]
 				switch {
 				case strings.HasPrefix(rest, "<="):
 					add("lookbehind", "(?<=", i)
+					i += 3
 				case strings.HasPrefix(rest, "<!"):
 					add("negative lookbehind", "(?<!", i)
+					i += 3
 				case strings.HasPrefix(rest, "="):
 					add("lookahead", "(?=", i)
+					i += 2
 				case strings.HasPrefix(rest, "!"):
 					add("negative lookahead", "(?!)", i)
+					i += 2
 				case strings.HasPrefix(rest, ">"):
 					add("atomic group", "(?>", i)
+					i += 2
 				case strings.HasPrefix(rest, "R)"):
 					add("recursion", "(?R)", i)
+					i += 2
 				case strings.HasPrefix(rest, "0)"):
 					add("recursion", "(?0)", i)
+					i += 2
 				case strings.HasPrefix(rest, "&"):
 					add("subroutine call", "(?&", i)
+					i += 2
 				case strings.HasPrefix(rest, "P>"):
 					add("subroutine call", "(?P>", i)
+					i += 3
 				case strings.HasPrefix(rest, "P="):
 					add("named backreference", "(?P=", i)
+					i += 3
 				case strings.HasPrefix(rest, "("):
 					add("conditional group", "(?(", i)
+					i++ // skip '?' only so the inner '(' balances with its ')'
+				case strings.HasPrefix(rest, "P<"):
+					// Named capture group `(?P<name>...)`.
+					i += 3
+					if gt := indexByteWithin(re, i+1, '>', 128); gt >= 0 {
+						i += 1 + gt
+					}
+				case strings.HasPrefix(rest, "<"):
+					// Named capture group `(?<name>...)`.
+					i += 2
+					if gt := indexByteWithin(re, i+1, '>', 128); gt >= 0 {
+						i += 1 + gt
+					}
+				default:
+					// Non-capturing `(?:...)` or flag group `(?i:...)` / `(?i)`:
+					// advance past `?`, any flag letters/hyphens, and optional `:`.
+					i++ // at '?'
+					for i+1 < len(re) && isFlagByte(re[i+1]) {
+						i++
+					}
+					if i+1 < len(re) && re[i+1] == ':' {
+						i++
+					}
 				}
 			}
-			stack = append(stack, group{})
 			prevWasGroup, prevGroupQuant = false, false
 
 		case ')':
@@ -455,11 +488,15 @@ func findRedos(re string) []redosHit {
 			} else if i+1 < len(re) && re[i+1] == '?' {
 				i++ // lazy, which RE2 also supports
 			}
-			if prevWasGroup && prevGroupQuant {
-				add("nested quantifier", "a group containing a quantifier is itself quantified", i)
-			}
-			if len(stack) > 0 {
-				stack[len(stack)-1].hasQuant = true
+			// Optional `?` matches at most once and cannot cause exponential
+			// nested-quantifier blowup as an outer trigger.
+			if c != '?' {
+				if prevWasGroup && prevGroupQuant {
+					add("nested quantifier", "a group containing a quantifier is itself quantified", i)
+				}
+				if len(stack) > 0 {
+					stack[len(stack)-1].hasQuant = true
+				}
 			}
 			prevWasGroup, prevGroupQuant = false, false
 
@@ -472,11 +509,13 @@ func findRedos(re string) []redosHit {
 			if i+end+1 < len(re) && re[i+end+1] == '+' {
 				add("possessive quantifier", re[i:i+end+2], i)
 			}
-			if prevWasGroup && prevGroupQuant {
-				add("nested quantifier", "a group containing a quantifier is itself quantified", i)
-			}
-			if len(stack) > 0 {
-				stack[len(stack)-1].hasQuant = true
+			if isRepeatingQuantifier(re[i+1 : i+end]) {
+				if prevWasGroup && prevGroupQuant {
+					add("nested quantifier", "a group containing a quantifier is itself quantified", i)
+				}
+				if len(stack) > 0 {
+					stack[len(stack)-1].hasQuant = true
+				}
 			}
 			i += end
 			prevWasGroup, prevGroupQuant = false, false
@@ -507,16 +546,44 @@ func indexByteWithin(s string, i int, c byte, max int) int {
 	return -1
 }
 
+// isFlagByte reports whether c can appear inside a `(?imsxU-...)` flag prefix.
+func isFlagByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-'
+}
+
 // isQuantifierBody reports whether a `{...}` body is a repetition count
 // (`2`, `2,`, `2,5`) rather than a literal brace group such as `{x}`.
 func isQuantifierBody(s string) bool {
 	if s == "" {
 		return false
 	}
+	commas := 0
 	for i := 0; i < len(s); i++ {
-		if s[i] != ',' && (s[i] < '0' || s[i] > '9') {
+		if s[i] == ',' {
+			commas++
+			if commas > 1 {
+				return false
+			}
+			continue
+		}
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}
 	return true
+}
+
+// isRepeatingQuantifier reports whether a valid `{...}` quantifier body can
+// match more than once. `{0}`, `{1}`, `{0,1}` and `{1,1}` are bounded at most
+// once and cannot trigger exponential nested-quantifier backtracking.
+func isRepeatingQuantifier(s string) bool {
+	if lo, hi, hasComma := strings.Cut(s, ","); hasComma {
+		if hi == "" {
+			return lo != "" // `{n,}` is unbounded
+		}
+		v, err := strconv.Atoi(hi)
+		return err != nil || v > 1
+	}
+	v, err := strconv.Atoi(s)
+	return err != nil || v > 1
 }

@@ -97,7 +97,7 @@ func lex(src string) ([]token, int) {
 			if lo < n && src[lo] == '-' {
 				lo++
 			}
-			j := strings.Index(src[lo:], "}}")
+			j := findTagClose(src, lo, "}}")
 			if j < 0 {
 				toks = append(toks, token{kind: kindTag, off: i, end: i + 2, val: "{{"})
 				toks = append(toks, lexExpr(src, lo, n, maxJinjaTokens-len(toks))...)
@@ -116,7 +116,7 @@ func lex(src string) ([]token, int) {
 		case '%':
 			lo := i + 2
 			lo = skipMark(src, lo, n)
-			j := strings.Index(src[lo:], "%}")
+			j := findTagClose(src, lo, "%}")
 			if j < 0 {
 				toks = append(toks, token{kind: kindTag, off: i, end: i + 2, val: "{%"})
 				toks = append(toks, lexExpr(src, lo, n, maxJinjaTokens-len(toks))...)
@@ -141,7 +141,7 @@ func lex(src string) ([]token, int) {
 				}
 				toks = append(toks, token{kind: kindRaw, off: bodyStart, end: closeStart, val: src[bodyStart:closeStart]})
 				clo := skipMark(src, closeStart+2, n)
-				cj := strings.Index(src[clo:], "%}")
+				cj := findTagClose(src, clo, "%}")
 				if cj < 0 {
 					i = n
 					break
@@ -169,6 +169,35 @@ func lex(src string) ([]token, int) {
 // template is metadata, not a program; a million tokens is already far above a
 // real chat template and keeps the analyzer's quadratic-looking walks bounded.
 const maxJinjaTokens = 1 << 20
+
+// findTagClose returns the index of closer relative to lo, ignoring occurrences
+// inside single- or double-quoted string literals (respecting backslash escapes).
+func findTagClose(src string, lo int, closer string) int {
+	var quote byte
+	n := len(src)
+	clen := len(closer)
+	for i := lo; i < n; i++ {
+		c := src[i]
+		if quote != 0 {
+			if c == '\\' && i+1 < n {
+				i++
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			continue
+		}
+		if i+clen <= n && src[i:i+clen] == closer {
+			return i - lo
+		}
+	}
+	return -1
+}
 
 // skipMark advances over a whitespace-control mark after a block opener or
 // closer. Jinja accepts both '-' and '+'.
@@ -233,10 +262,7 @@ func lexExpr(src string, lo, hi, limit int) []token {
 
 		case c >= '0' && c <= '9':
 			start := i
-			for i < hi && (src[i] >= '0' && src[i] <= '9' || src[i] == '.' || src[i] == '_' ||
-				src[i] == 'x' || src[i] == 'X' || isHex(src[i])) {
-				i++
-			}
+			i = scanNumber(src, i, hi)
 			toks = append(toks, token{kind: kindNumber, off: start, end: i, val: src[start:i]})
 
 		case isNameStart(c):
@@ -407,6 +433,61 @@ func asciiUnicodeName(name string) (rune, bool) {
 		}
 	}
 	return 0, false
+}
+
+// scanNumber consumes a Jinja numeric literal starting at i < hi. It stops
+// before a '.' followed by a non-digit (so `1.0.__class__` leaves `.__class__`
+// intact) and accepts hex digits only after a `0x`/`0X` prefix.
+func scanNumber(src string, i, hi int) int {
+	if i+1 < hi && src[i] == '0' {
+		switch src[i+1] {
+		case 'x', 'X':
+			j := i + 2
+			for j < hi && (isHex(src[j]) || (src[j] == '_' && j+1 < hi && isHex(src[j+1]))) {
+				j++
+			}
+			return j
+		case 'o', 'O':
+			j := i + 2
+			for j < hi && ((src[j] >= '0' && src[j] <= '7') || (src[j] == '_' && j+1 < hi && src[j+1] >= '0' && src[j+1] <= '7')) {
+				j++
+			}
+			return j
+		case 'b', 'B':
+			j := i + 2
+			for j < hi && ((src[j] == '0' || src[j] == '1') || (src[j] == '_' && j+1 < hi && (src[j+1] == '0' || src[j+1] == '1'))) {
+				j++
+			}
+			return j
+		}
+	}
+	j := i
+	for j < hi && (isDigit(src[j]) || (src[j] == '_' && j+1 < hi && isDigit(src[j+1]))) {
+		j++
+	}
+	if j+1 < hi && src[j] == '.' && isDigit(src[j+1]) {
+		j++
+		for j < hi && (isDigit(src[j]) || (src[j] == '_' && j+1 < hi && isDigit(src[j+1]))) {
+			j++
+		}
+	}
+	if j < hi && (src[j] == 'e' || src[j] == 'E') {
+		k := j + 1
+		if k < hi && (src[k] == '+' || src[k] == '-') {
+			k++
+		}
+		if k < hi && isDigit(src[k]) {
+			j = k
+			for j < hi && (isDigit(src[j]) || (src[j] == '_' && j+1 < hi && isDigit(src[j+1]))) {
+				j++
+			}
+		}
+	}
+	return j
+}
+
+func isDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }
 
 func isNameStart(c byte) bool {
