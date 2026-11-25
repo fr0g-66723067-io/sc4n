@@ -15,6 +15,8 @@
 package gguf
 
 import (
+	"encoding/binary"
+
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
@@ -35,22 +37,27 @@ func init() {
 			"chat-template introspection or instruction-override text are reported too. The tensor data " +
 			"itself is not read or decoded; string metadata is scanned at a sampled cap.",
 	})
-	artifact.RegisterSniffer("gguf-header", 96, sniff)
+	artifact.RegisterSniffer("gguf-header", 100, sniff)
 	artifact.RegisterParser(artifact.FormatGGUF, parser{})
 }
 
-// sniff claims a file whose first four bytes are the GGUF magic. The structural
-// work is the parser's job: the magic is the whole of what makes a file a GGUF
-// candidate, and a header that does not hold up becomes SC4N-GGUF-STRUCT.
+// sniff claims a file whose first four bytes are the GGUF magic AND whose
+// 4-byte version field is 2 or 3 in little- or big-endian. Checking the version
+// keeps a source file starting with "GGUF=1" from being hijacked as GGUF.
 func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
-	if s.Size() < 4 {
+	if s.Size() < 8 {
 		return artifact.FormatUnknown, false
 	}
-	b, err := s.Bytes(0, 4)
-	if err != nil && len(b) < 4 {
+	b, err := s.Bytes(0, 8)
+	if err != nil && len(b) < 8 {
 		return artifact.FormatUnknown, false
 	}
-	if string(b) != Magic {
+	if string(b[:4]) != Magic {
+		return artifact.FormatUnknown, false
+	}
+	le := binary.LittleEndian.Uint32(b[4:8])
+	be := binary.BigEndian.Uint32(b[4:8])
+	if le != 2 && le != 3 && be != 2 && be != 3 {
 		return artifact.FormatUnknown, false
 	}
 	return artifact.FormatGGUF, true

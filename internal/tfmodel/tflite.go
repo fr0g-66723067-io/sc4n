@@ -24,6 +24,7 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
+	"github.com/fr0g-66723067-io/sc4n/internal/polyglot"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
@@ -268,6 +269,40 @@ func (v fbVector) bytes() []byte {
 	return b
 }
 
+// sniffTFLite validates that s carries "TFL3" at offset 4 AND a valid
+// FlatBuffers root table offset and vtable inside the file, so a pickle, JSON,
+// or Python file containing "TFL3" at offset 4 is not hijacked as TFLite.
+func sniffTFLite(s source.Source, _ limits.Limits) (artifact.Format, bool) {
+	size := s.Size()
+	if size < 12 {
+		return artifact.FormatUnknown, false
+	}
+	head, err := s.Bytes(0, 8)
+	if err != nil && len(head) < 8 {
+		return artifact.FormatUnknown, false
+	}
+	if string(head[4:8]) != "TFL3" {
+		return artifact.FormatUnknown, false
+	}
+	root := binary.LittleEndian.Uint32(head[0:4])
+	if root < 8 || int64(root)+4 > size {
+		return artifact.FormatUnknown, false
+	}
+	f := fb{s: s, size: size}
+	t, ok := f.table(int64(root))
+	if !ok {
+		return artifact.FormatUnknown, false
+	}
+	if t.vtsize < 4 || t.vtsize%2 != 0 || t.vt+int64(t.vtsize) > size {
+		return artifact.FormatUnknown, false
+	}
+	ts, ok := f.u16(t.vt + 2)
+	if !ok || ts < 4 || t.pos+int64(ts) > size {
+		return artifact.FormatUnknown, false
+	}
+	return artifact.FormatTFLite, true
+}
+
 // Parse walks the flatbuffer root table and applies the rule set.
 func (tfliteParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	if s.Size() < 8 {
@@ -378,12 +413,15 @@ func (w *tfliteWalk) parseOperatorCodes(model fbTable) {
 		}
 		custom, _ := code.stringField(1)
 		builtin, hasBuiltin := code.u32Field(3)
+		depBuiltin, hasDepBuiltin := code.byteField(0)
+		isCustomBuiltin := (hasBuiltin && int32(builtin) == builtinOperatorCustom) ||
+			(!hasBuiltin && hasDepBuiltin && int8(depBuiltin) == builtinOperatorCustom)
 		switch {
 		case custom != "":
 			w.ctx.Sink.EmitExtra(ruleTFLiteCustomOp, 0,
 				"custom operator code "+clip(custom, 120),
 				map[string]string{"custom_code": clip(custom, 120), "index": itoa(i)})
-		case hasBuiltin && int32(builtin) == builtinOperatorCustom:
+		case isCustomBuiltin:
 			w.ctx.Sink.EmitExtra(ruleTFLiteCustomOp, 0,
 				"operator code with BuiltinOperator.CUSTOM",
 				map[string]string{"builtin_code": "CUSTOM", "index": itoa(i)})
@@ -474,21 +512,32 @@ func (w *tfliteWalk) parseBuffers(model fbTable) {
 
 // scanTFLiteBuffer inspects one buffer payload.
 func (w *tfliteWalk) scanTFLiteBuffer(data fbVector) {
-	// Native magic: a validated header in the first 4 KiB of the buffer.
+	// Native magic: check start and any candidate magic in the first 4 KiB of
+	// the buffer, validating against the full source so large ELF/PE/Mach-O
+	// binaries whose section headers sit past 4 KiB still validate.
 	start := data.data
-	probe := int64(data.n)
-	if probe > 4096 {
-		probe = 4096
-	}
-	if b, err := data.f.s.Bytes(start, probe); err == nil && len(b) > 0 {
-		if kind, ok := bytescan.ValidNative(b); ok {
-			w.ctx.Sink.EmitExtra(ruleTFLiteNativeMagic, start,
-				"validated "+kind.String()+" header in a TFLite buffer",
-				map[string]string{"kind": kind.String(), "buffer_offset": itoa64(start)})
-		} else if k, off, ok := bytescan.FindNative(b); ok {
-			w.ctx.Sink.EmitExtra(ruleTFLiteNativeMagic, start+int64(off),
-				"embedded "+k.String()+" magic in a TFLite buffer",
-				map[string]string{"kind": k.String(), "buffer_offset": itoa64(start)})
+	if kind, ok := polyglot.ValidateNativeHeader(data.f.s, data.f.s.Size(), start); ok {
+		w.ctx.Sink.EmitExtra(ruleTFLiteNativeMagic, start,
+			"validated "+kind.String()+" header in a TFLite buffer",
+			map[string]string{"kind": kind.String(), "buffer_offset": itoa64(start)})
+	} else {
+		probe := int64(data.n)
+		if probe > 4096 {
+			probe = 4096
+		}
+		if b, err := data.f.s.Bytes(start, probe); err == nil && len(b) > 0 {
+			for i := 1; i+4 <= len(b); i++ {
+				if bytescan.MagicAt(b[i:]) == bytescan.NativeNone {
+					continue
+				}
+				abs := start + int64(i)
+				if kind, ok := polyglot.ValidateNativeHeader(data.f.s, data.f.s.Size(), abs); ok {
+					w.ctx.Sink.EmitExtra(ruleTFLiteNativeMagic, abs,
+						"embedded "+kind.String()+" header in a TFLite buffer",
+						map[string]string{"kind": kind.String(), "buffer_offset": itoa64(start)})
+					break
+				}
+			}
 		}
 	}
 

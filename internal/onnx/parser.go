@@ -79,7 +79,7 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	selfPartial := ctx.Session != nil && ctx.Session.IsPartial(ctx.Sink.Artifact())
 	w := &walker{
 		s:           s,
-		l:           ctx.Limits,
+		l:           defaultLimits(ctx.Limits),
 		sink:        ctx.Sink,
 		root:        base,
 		contain:     contain,
@@ -858,19 +858,23 @@ func (w *walker) walkTensor(r *reader) {
 		dataLocation int64
 		ext          externalRef
 		hasExternal  bool
+		aborted      bool
 	)
 	for r.remaining() > 0 {
 		if !w.count() {
-			return
+			aborted = true
+			break
 		}
 		num, typ, off, ok := r.next()
 		if !ok {
 			w.badWire(off, "TensorProto")
-			return
+			aborted = true
+			break
 		}
 		if !w.checkField(tensorFields, num, typ, off, "TensorProto") {
 			if !r.skipValue(typ) {
-				return
+				aborted = true
+				break
 			}
 			continue
 		}
@@ -881,14 +885,16 @@ func (w *walker) walkTensor(r *reader) {
 				v, ok := r.varintValue()
 				if !ok {
 					w.badWire(off, "dims")
-					return
+					aborted = true
+					break
 				}
 				w.addDim(off, int64(v), &dims, &rankHit)
 			case protowire.BytesType:
 				bo, n, ok := r.bytesValue()
 				if !ok {
 					w.badWire(off, "dims")
-					return
+					aborted = true
+					break
 				}
 				b := r.view(bo, n)
 				for len(b) > 0 && len(dims) < maxRank {
@@ -908,42 +914,52 @@ func (w *walker) walkTensor(r *reader) {
 					rankHit = true
 				}
 			}
+			if aborted {
+				break
+			}
 		case 2: // data_type
 			v, ok := r.varintValue()
 			if !ok {
 				w.badWire(off, "data_type")
-				return
+				aborted = true
+				break
 			}
 			dataType = int64(v)
 		case 3: // segment: a chunked tensor, deprecated
 			if _, _, ok := r.bytesValue(); !ok {
 				w.badWire(off, "segment")
-				return
+				aborted = true
+				break
 			}
 		case 4, 5, 6, 7, 10, 11: // typed element data; not interpreted
 			if !r.skipValue(typ) {
-				return
+				aborted = true
+				break
 			}
 		case 8: // name
 			if !w.scanStringField(r, off, "tensor name") {
-				return
+				aborted = true
+				break
 			}
 		case 9: // raw_data: length only, never read
 			_, n, ok := r.bytesValue()
 			if !ok {
 				w.badWire(off, "raw_data")
-				return
+				aborted = true
+				break
 			}
 			hasRaw = true
 			rawLen = n
 		case 12: // doc_string
 			if !w.scanStringField(r, off, "tensor doc_string") {
-				return
+				aborted = true
+				break
 			}
 		case 13: // external_data
 			key, val, unreadable, ok := w.readEntry(r, off, false)
 			if !ok {
-				return
+				aborted = true
+				break
 			}
 			if key != "" {
 				if ext.vals == nil {
@@ -965,20 +981,30 @@ func (w *walker) walkTensor(r *reader) {
 			v, ok := r.varintValue()
 			if !ok {
 				w.badWire(off, "data_location")
-				return
+				aborted = true
+				break
 			}
 			dataLocation = int64(v)
 		case 16: // metadata_props
 			if !w.walkEntry(r, off, true) {
-				return
+				aborted = true
+				break
 			}
 		default:
 			if !r.skipValue(typ) {
-				return
+				aborted = true
+				break
 			}
 		}
+		if aborted {
+			break
+		}
 	}
-	w.checkTensor(start, dims, dataType, hasRaw, rawLen, dataLocation, hasExternal, ext)
+	if !aborted {
+		w.checkTensor(start, dims, dataType, hasRaw, rawLen, dataLocation, hasExternal, ext)
+	} else if hasExternal {
+		w.checkExternalData(start, ext)
+	}
 }
 
 // addDim records one dimension, reporting a negative dimension and a rank above
@@ -1258,8 +1284,12 @@ func (w *walker) walkFunction(r *reader) {
 			continue
 		}
 		switch num {
-		case 1, 8, 10, 13: // name, doc_string, domain, overload
+		case 1, 8, 13: // name, doc_string, overload
 			if !w.scanStringField(r, off, "function string") {
+				return
+			}
+		case 10: // domain
+			if !w.checkDomain(r, off, "function") {
 				return
 			}
 		case 7: // node
@@ -1324,9 +1354,10 @@ func (w *walker) readEntry(r *reader, off int64, scan bool) (key, val string, un
 		return "", "", false, false
 	}
 	sub := newReader(w.s, bo, bo+n)
+	var valUnreadable bool
 	for sub.remaining() > 0 {
 		if !w.count() {
-			return "", "", unreadable, true
+			return key, val, valUnreadable, true
 		}
 		num, typ, foff, ok := sub.next()
 		if !ok {
@@ -1342,21 +1373,23 @@ func (w *walker) readEntry(r *reader, off int64, scan bool) (key, val string, un
 		switch num {
 		case 1, 2:
 			var v string
+			var u bool
 			if scan {
 				if !w.scanStringField(sub, foff, "map entry value") {
 					return "", "", false, false
 				}
 			} else {
 				var okv bool
-				v, unreadable, okv = w.readString(sub, foff, "map entry")
+				v, u, okv = w.readString(sub, foff, "map entry")
 				if !okv {
-					return "", "", unreadable, false
+					return "", "", valUnreadable, false
 				}
 			}
 			if num == 1 {
 				key = v
 			} else {
 				val = v
+				valUnreadable = u
 			}
 		default:
 			if !sub.skipValue(typ) {
@@ -1364,7 +1397,7 @@ func (w *walker) readEntry(r *reader, off int64, scan bool) (key, val string, un
 			}
 		}
 	}
-	return key, val, unreadable, true
+	return key, val, valUnreadable, true
 }
 
 // scanStringField reads a length-delimited string field and hands it to the
@@ -1432,7 +1465,11 @@ func (w *walker) checkDomain(r *reader, off int64, what string) bool {
 		w.badWire(off, "domain")
 		return false
 	}
-	if n == 0 || n > w.l.MaxStringBlob {
+	if n == 0 {
+		return true
+	}
+	if n > w.l.MaxStringBlob {
+		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "onnx "+what+" domain")
 		return true
 	}
 	b := r.view(bo, n)
@@ -1513,8 +1550,24 @@ func resolutionPaths(ctx *artifact.Ctx, s source.Source) (base, contain string) 
 		base = filepath.Clean(dir)
 	case contain != "":
 		base = filepath.Join(contain, dir)
+	default:
+		base = filepath.Clean(dir)
 	}
 	return base, contain
+}
+
+func defaultLimits(l limits.Limits) limits.Limits {
+	d := limits.Default()
+	if l.MaxEntries <= 0 {
+		l.MaxEntries = d.MaxEntries
+	}
+	if l.MaxDepth <= 0 {
+		l.MaxDepth = d.MaxDepth
+	}
+	if l.MaxStringBlob <= 0 {
+		l.MaxStringBlob = d.MaxStringBlob
+	}
+	return l
 }
 
 // pathEscapeReason reports why a declared external-data path cannot be a
@@ -1630,8 +1683,10 @@ func (w *walker) checkExternalData(off int64, ref externalRef) {
 	} else {
 		locSafe = w.checkExternalPath(off, "location", loc)
 	}
-	if bp, ok := ref.get("basepath"); ok && bp != "" {
-		w.checkExternalPath(off, "basepath", bp)
+	bpSafe := true
+	bp, hasBP := ref.get("basepath")
+	if hasBP && bp != "" {
+		bpSafe = w.checkExternalPath(off, "basepath", bp)
 	}
 
 	for _, k := range ref.keys {
@@ -1664,8 +1719,12 @@ func (w *walker) checkExternalData(off int64, ref externalRef) {
 	// A value that already failed the path-shape checks is reported by
 	// SC4N-ONNX-EXTERNAL-TRAVERSAL; resolving it would only add a second finding
 	// for the same bytes.
-	if hasLoc && locSafe {
-		w.resolveExternal(off, loc, offset, hasOffset, length, hasLen)
+	if hasLoc && locSafe && bpSafe {
+		target := loc
+		if hasBP && bp != "" {
+			target = path.Join(bp, loc)
+		}
+		w.resolveExternal(off, target, offset, hasOffset, length, hasLen)
 	}
 }
 

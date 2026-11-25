@@ -48,3 +48,21 @@ func TestSegmentScanIsBounded(t *testing.T) {
 		t.Fatalf("segment scan cap was silent; findings=%v", fs)
 	}
 }
+
+func TestDummyMZPairsDoNotExhaustNativeCandidates(t *testing.T) {
+	// 100 dummy "MZ" coincidences followed by a real ELF must not exhaust
+	// maxNativeCandidates = 64 and hide the ELF.
+	segment := make([]byte, 100*64+len(tinyELF()))
+	for i := range 100 {
+		segment[i*64] = 'M'
+		segment[i*64+1] = 'Z'
+	}
+	copy(segment[100*64:], tinyELF())
+	fs := parse(t, "mz_spray.pte", build("ET12", "eh12", 0, segment))
+	if !hasRule(fs, RuleNative.ID) {
+		t.Fatalf("dummy MZ pairs hid the trailing ELF; findings=%v", fs)
+	}
+	if hasRule(fs, "SC4N-LIMIT-ENTRIES") {
+		t.Fatalf("dummy MZ pairs exhausted MaxNativeCandidates; findings=%v", fs)
+	}
+}

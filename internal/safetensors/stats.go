@@ -156,6 +156,7 @@ func computeStats(ei elementInfo, b []byte) weightStats {
 	}
 	seen := make(map[uint64]struct{}, n)
 	var sumAbs float64
+	var finiteCount int64
 	for i := range n {
 		el := b[i*ei.size : (i+1)*ei.size]
 		st.elements++
@@ -170,13 +171,13 @@ func computeStats(ei elementInfo, b []byte) weightStats {
 		}
 		if !finite {
 			st.nonFinite++
-		}
-		if ei.numeric {
+		} else if ei.numeric {
 			sumAbs += math.Abs(v)
+			finiteCount++
 		}
 	}
-	if st.elements > 0 && ei.numeric {
-		st.meanAbs = sumAbs / float64(st.elements)
+	if finiteCount > 0 && ei.numeric {
+		st.meanAbs = sumAbs / float64(finiteCount)
 	}
 	if ei.numeric && st.meanAbs > 0 {
 		limit := outlierRatio * st.meanAbs

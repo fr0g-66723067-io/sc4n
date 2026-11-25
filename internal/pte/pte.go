@@ -198,7 +198,16 @@ func scanNative(ctx *artifact.Ctx, s source.Source, base, size int64) {
 			starts = len(b)
 		}
 		for i := 0; i < starts; i++ {
-			if bytescan.MagicAt(b[i:]) == bytescan.NativeNone {
+			magicKind := bytescan.MagicAt(b[i:])
+			if magicKind == bytescan.NativeNone {
+				continue
+			}
+			abs := base + off + int64(i)
+			// Bare "MZ" is a 2-byte coincidence that appears ~16 times per MiB of
+			// random weights; check the PE signature at e_lfanew before spending
+			// the candidate budget so random weights or dummy "MZ" pairs cannot
+			// exhaust maxNativeCandidates and hide a real executable.
+			if magicKind == bytescan.NativePE && !peSignaturePlausible(s, s.Size(), abs) {
 				continue
 			}
 			attempts++
@@ -207,7 +216,6 @@ func scanNative(ctx *artifact.Ctx, s source.Source, base, size int64) {
 					int64(attempts), maxNativeCandidates, "ExecuTorch segment native candidates")
 				return
 			}
-			abs := base + off + int64(i)
 			kind, ok := polyglot.ValidateNativeHeader(s, s.Size(), abs)
 			if !ok {
 				continue
@@ -218,6 +226,27 @@ func scanNative(ctx *artifact.Ctx, s source.Source, base, size int64) {
 				map[string]string{"kind": kind.String(), "offset": strconv.FormatInt(abs, 10)})
 		}
 	}
+}
+
+// peSignaturePlausible checks that a candidate "MZ" header at off carries a
+// plausible e_lfanew pointing to a "PE\x00\x00" signature within the file.
+func peSignaturePlausible(s source.Source, size, off int64) bool {
+	if off < 0 || size-off < 64 {
+		return false
+	}
+	lb, err := s.Bytes(off+60, 4)
+	if err != nil && len(lb) < 4 {
+		return false
+	}
+	lfanew := uint64(binary.LittleEndian.Uint32(lb))
+	if lfanew < 64 || lfanew > uint64(size-off-4) {
+		return false
+	}
+	sig, err := s.Bytes(off+int64(lfanew), 4)
+	if err != nil && len(sig) < 4 {
+		return false
+	}
+	return sig[0] == 'P' && sig[1] == 'E' && sig[2] == 0 && sig[3] == 0
 }
 
 // sniff implements the documented test: the file magic at byte offset 4, plus a

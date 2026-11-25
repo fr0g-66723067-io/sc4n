@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -120,11 +121,15 @@ func joinKinds(kinds []string) string {
 const maxMetaBlob = 16 << 20
 
 func (im *image) capBytes(off int64, what string, b []byte) []byte {
-	if int64(len(b)) <= maxMetaBlob {
+	cap := im.ctx.Limits.MaxStringBlob
+	if cap <= 0 {
+		cap = maxMetaBlob
+	}
+	if int64(len(b)) <= cap {
 		return b
 	}
-	limits.Emit(im.ctx.Sink, limits.RuleString, "MaxStringBlob", int64(len(b)), maxMetaBlob, what)
-	return b[:maxMetaBlob]
+	limits.Emit(im.ctx.Sink, limits.RuleString, "MaxStringBlob", int64(len(b)), cap, what)
+	return b[:cap]
 }
 
 // text hands one metadata string to the indicator engine and the invisible
@@ -265,13 +270,46 @@ func splitAt(b []byte) (before, after []byte) {
 	return b[:k], b[k+1:]
 }
 
-// inflate decompresses a zlib stream, bounded by MaxStringBlob. The limit is
-// reported rather than silently truncating, and the prefix is still scanned.
+// inflate decompresses a zlib stream, bounded by MaxStringBlob, MaxRatio, and
+// the scan-wide MaxDecompressedBytes budget. Any limit that fires is reported
+// rather than silently truncating, and the decoded prefix is still scanned.
 func (im *image) inflate(off int64, stream []byte) string {
-	max := im.ctx.Limits.MaxStringBlob
-	if max <= 0 {
-		max = 16 << 20
+	maxBlob := im.ctx.Limits.MaxStringBlob
+	if maxBlob <= 0 {
+		maxBlob = maxMetaBlob
 	}
+	maxDecomp := im.ctx.Limits.MaxDecompressedBytes
+	if maxDecomp <= 0 {
+		maxDecomp = limits.Default().MaxDecompressedBytes
+	}
+	maxRatio := im.ctx.Limits.MaxRatio
+	if maxRatio <= 0 {
+		maxRatio = limits.Default().MaxRatio
+	}
+
+	limit := maxBlob
+	hitKind := "blob"
+	if len(stream) > 0 {
+		if ratioCap := mulCap(int64(len(stream)), maxRatio); ratioCap < limit {
+			limit = ratioCap
+			hitKind = "ratio"
+		}
+	}
+	if im.ctx.Session != nil {
+		rem := im.ctx.RemainingDecompressed()
+		if rem <= 0 {
+			im.ctx.ReportDecompressedLimit(im.ctx.ChargeDecompressed(0), maxDecomp)
+			return ""
+		}
+		if rem < limit {
+			limit = rem
+			hitKind = "decomp"
+		}
+	} else if maxDecomp < limit {
+		limit = maxDecomp
+		hitKind = "decomp"
+	}
+
 	r, err := zlib.NewReader(bytes.NewReader(stream))
 	if err != nil {
 		im.structFinding(off, "compressed metadata at offset %d does not start a zlib stream: %v", off, err)
@@ -279,16 +317,44 @@ func (im *image) inflate(off int64, stream []byte) string {
 	}
 	defer r.Close()
 	var buf bytes.Buffer
-	n, err := io.Copy(&buf, io.LimitReader(r, max+1))
+	n, err := io.Copy(&buf, io.LimitReader(r, limit+1))
 	if err != nil {
 		im.structFinding(off, "compressed metadata at offset %d fails to inflate: %v", off, err)
 	}
-	if n > max {
-		limits.Emit(im.ctx.Sink, limits.RuleString, "MaxStringBlob", n, max,
-			fmt.Sprintf("compressed metadata at offset %d", off))
-		return buf.String()[:max]
+	charged := n
+	if charged > limit {
+		charged = limit
+	}
+	total := im.ctx.ChargeDecompressed(charged)
+	if n > limit {
+		switch hitKind {
+		case "ratio":
+			limits.Emit(im.ctx.Sink, limits.RuleRatio, "MaxRatio", n, limit,
+				fmt.Sprintf("compressed metadata at offset %d", off))
+		case "decomp":
+			if im.ctx.Session != nil {
+				im.ctx.ReportDecompressedLimit(total+1, maxDecomp)
+			} else {
+				limits.Emit(im.ctx.Sink, limits.RuleDecompressed, "MaxDecompressedBytes", n, maxDecomp,
+					fmt.Sprintf("compressed metadata at offset %d", off))
+			}
+		default:
+			limits.Emit(im.ctx.Sink, limits.RuleString, "MaxStringBlob", n, maxBlob,
+				fmt.Sprintf("compressed metadata at offset %d", off))
+		}
+		return buf.String()[:limit]
 	}
 	return buf.String()
+}
+
+func mulCap(a, b int64) int64 {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	if a > math.MaxInt64/b {
+		return math.MaxInt64
+	}
+	return a * b
 }
 
 // jpeg walks the marker segments. Entropy-coded data after SOS is never read.
@@ -433,8 +499,11 @@ func (im *image) ifd(base int64, tiff []byte, off int64, bo binary.ByteOrder, le
 		case 0x9c9b: // XPTitle, UTF-16LE
 			im.kinds = append(im.kinds, "XPTitle")
 			im.xp(base+valueOff, val)
-		case 0x9c9e: // XPComment, UTF-16LE
+		case 0x9c9c: // XPComment, UTF-16LE
 			im.kinds = append(im.kinds, "XPComment")
+			im.xp(base+valueOff, val)
+		case 0x9c9e: // XPKeywords, UTF-16LE
+			im.kinds = append(im.kinds, "XPKeywords")
 			im.xp(base+valueOff, val)
 		case 0x8769: // Exif sub-IFD pointer
 			if n == 1 && (typ == 4 || typ == 13) {
@@ -453,7 +522,7 @@ func exifValueSize(typ uint16, count uint32) int64 {
 		unit = 1
 	case 3, 8: // SHORT, SSHORT
 		unit = 2
-	case 4, 9, 11: // LONG, SLONG, FLOAT
+	case 4, 9, 11, 13: // LONG, SLONG, FLOAT, IFD
 		unit = 4
 	case 5, 10, 12: // RATIONAL, SRATIONAL, DOUBLE
 		unit = 8

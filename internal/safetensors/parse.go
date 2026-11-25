@@ -277,6 +277,9 @@ func decodeEntry(dec *json.Decoder, name string, keyOff int64, viol *[]string) (
 			s, ok := vt.(string)
 			if !ok {
 				*viol = append(*viol, fmt.Sprintf("tensor %q: dtype is not a string", name))
+				if dd, is := vt.(json.Delim); is && (dd == '{' || dd == '[') {
+					skipContainer(dec, dd)
+				}
 				continue
 			}
 			e.dtype = s

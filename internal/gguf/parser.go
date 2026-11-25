@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -351,10 +352,13 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 	if tensorCount == 0 {
 		// A vocabulary-only GGUF (llama.cpp ships one per tokenizer) has no tensor
 		// data section at all, so there is no alignment padding to require: the
-		// metadata simply ends inside the file. Requiring the padding reported
-		// every one of those files as structurally broken.
+		// metadata simply ends inside the file. Still check any trailing bytes so
+		// non-zero data appended to a 0-tensor GGUF is reported (all-zero alignment
+		// padding is ignored by st.trailing).
 		if endInfos > size {
 			st.structf(endInfos, "the metadata section ends at %d, past EOF (%d)", endInfos, size)
+		} else if size > endInfos {
+			st.trailing(endInfos, size-endInfos)
 		}
 		return st.meta, nil
 	}
@@ -374,14 +378,19 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 	}
 
 	// Tensor geometry. Every check here is deliberately fail-open in exactly one
-	// way: an unverified extent suppresses the overlap and trailing-data checks
+	// way: an unverified extent suppresses the gap and trailing-data checks
 	// rather than risking a fabricated one.
+	type extent struct {
+		name    string
+		infoOff int64
+		start   uint64
+		end     uint64
+	}
+	extents := make([]extent, 0, len(tensors))
 	var (
-		maxEnd       uint64
-		allVerified        = true
-		prevOff      int64 = -1
-		prevEnd      int64
-		prevVerified bool
+		maxEnd      uint64
+		allVerified       = true
+		prevOff     int64 = -1
 		// One truncation is one fact. In a truncated file (a partial download,
 		// or the 2 MiB header slices of a download campaign) every tensor that
 		// starts inside the file but extends past it lands in this branch, and
@@ -407,12 +416,12 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 		if t.off > math.MaxInt64 {
 			st.structf(t.infoOff, "tensor %q offset %d is beyond int64", t.name, t.off)
 			allVerified = false
-			prevOff, prevVerified = int64(t.off), false
 			continue
 		}
 		if prevOff >= 0 && int64(t.off) < prevOff {
 			st.structf(t.infoOff, "tensor %q offset %d is out of declaration order (previous %d)", t.name, t.off, prevOff)
 		}
+		prevOff = int64(t.off)
 
 		nelem, prodOK := product(t.dims)
 		nbytes, verified := tensorBytes(t.typ, nelem)
@@ -421,7 +430,6 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 			// The tensor-info pass already reported the retired/out-of-range
 			// type as SC4N-GGUF-STRUCT; its extent is meaningless.
 			allVerified = false
-			prevOff, prevVerified = int64(t.off), false
 			continue
 		}
 		if !prodOK || !verified {
@@ -429,23 +437,23 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 				fmt.Sprintf("tensor %q (type %s, %d element(s)) extent could not be computed; geometry checks skipped", t.name, typeName(t.typ), nelem),
 				map[string]string{"tensor": t.name, "type": typeName(t.typ)})
 			allVerified = false
-			if !prevVerified {
-				prevEnd = int64(t.off)
-			}
-			prevOff, prevVerified = int64(t.off), false
 			continue
 		}
 		if t.off > math.MaxUint64-nbytes {
 			st.structf(t.infoOff, "tensor %q extent overflows uint64", t.name)
 			allVerified = false
-			prevOff, prevVerified = int64(t.off), false
 			continue
 		}
 		end := t.off + nbytes
+		if end > math.MaxInt64 || end > uint64(math.MaxInt64-dataStart) {
+			st.structf(t.infoOff, "tensor %q extent ends at %d, beyond int64", t.name, end)
+			allVerified = false
+			continue
+		}
 		if end > uint64(size)-uint64(dataStart) {
 			// t.infoOff is inside the file by construction (the record was read
 			// from it), so every offset reported here is in range.
-			absEnd := int64(dataStart) + int64(end)
+			absEnd := dataStart + int64(end)
 			pastEOF++
 			switch pastEOF {
 			case 1:
@@ -458,13 +466,50 @@ func parse(s source.Source, l limits.Limits, sink *report.Sink, partial bool) (*
 			}
 			allVerified = false
 		}
-		if prevVerified && int64(t.off) < prevEnd {
-			st.structf(t.infoOff, "tensor %q offset %d overlaps the previous tensor's end %d", t.name, t.off, prevEnd)
-		}
+		extents = append(extents, extent{name: t.name, infoOff: t.infoOff, start: t.off, end: end})
 		if end > maxEnd {
 			maxEnd = end
 		}
-		prevOff, prevEnd, prevVerified = int64(t.off), int64(end), true
+	}
+	// Check overlaps (and non-zero inter-tensor gaps when all extents are verified)
+	// in offset-sorted order so out-of-order disjoint tensors do not fabricate an
+	// overlap and contained overlaps are caught via the running highEnd watermark.
+	sort.SliceStable(extents, func(i, j int) bool { return extents[i].start < extents[j].start })
+	const maxGapScanBytes = 4 << 20
+	gapBudget := int64(maxGapScanBytes)
+	checkGap := func(gapStart, gapEnd int64, beforeName string, relStart, relEnd uint64) {
+		if !allVerified || gapEnd <= gapStart || gapEnd > size || gapBudget <= 0 {
+			return
+		}
+		gapLen := gapEnd - gapStart
+		sample := gapLen
+		if sample > residualSample {
+			sample = residualSample
+		}
+		if sample > gapBudget {
+			sample = gapBudget
+		}
+		gapBudget -= sample
+		if gb, err := s.Bytes(gapStart, sample); (err == nil || len(gb) > 0) && !allZero(gb) {
+			st.structf(gapStart, "non-zero %d-byte gap between tensors before %q (offsets %d..%d)",
+				gapLen, beforeName, relStart, relEnd)
+		}
+	}
+	if len(extents) > 0 && extents[0].start > 0 {
+		checkGap(dataStart, dataStart+int64(extents[0].start), extents[0].name, 0, extents[0].start)
+	}
+	var highEnd uint64
+	for i, e := range extents {
+		if i > 0 {
+			if e.start < highEnd {
+				st.structf(e.infoOff, "tensor %q offset %d overlaps the previous tensor's end %d", e.name, e.start, highEnd)
+			} else if e.start > highEnd {
+				checkGap(dataStart+int64(highEnd), dataStart+int64(e.start), e.name, highEnd, e.start)
+			}
+		}
+		if e.end > highEnd {
+			highEnd = e.end
+		}
 	}
 	if pastEOF > 1 && !st.partial {
 		st.emitExtra(RuleStruct, pastEOFAt,
@@ -704,25 +749,73 @@ func (st *state) readArray(r *reader, key string, depth int) bool {
 		st.structf(off, "truncated array length for %q", key)
 		return false
 	}
-	minElem := uint64(minValueBytes(et))
 	remaining := uint64(r.size - r.off)
+	// Fixed-width numeric arrays (every scalar except BOOL, which validates 0/1)
+	// emit no per-element findings, so skip their exact byte span in O(1) without
+	// per-element reads or allocations.
+	if elemSize, ok := fixedNumericSize(et); ok {
+		if cnt > remaining/elemSize {
+			st.structf(off, "array %q declares %d elements but only %d bytes remain", key, cnt, remaining)
+			return false
+		}
+		if st.lim.MaxArrayElements > 0 && cnt > uint64(st.lim.MaxArrayElements) {
+			st.limit(limits.RuleEntries, "MaxArrayElements", clampInt64(cnt), int64(st.lim.MaxArrayElements), "array "+key)
+		}
+		if !r.skip(cnt * elemSize) {
+			st.structf(off, "array %q runs past EOF", key)
+			return false
+		}
+		return true
+	}
+	minElem := uint64(minValueBytes(et))
 	if cnt > remaining/minElem+1 {
 		st.structf(off, "array %q declares %d elements but only %d bytes remain", key, cnt, remaining)
 		return false
 	}
 	// A metadata array is bounded by MaxArrayElements, not MaxEntries: a 256 000
 	// token vocabulary is an ordinary file, while a 256 000 member archive is not.
-	// The array is walked to its end either way, so the finding must name the cap
-	// that actually applies rather than one the walk does not enforce.
+	// Enforce the cap by stopping after MaxArrayElements so a hostile array cannot
+	// drive unbounded work, reporting both the limit finding and the unread count.
+	readCount := cnt
+	capped := false
 	if st.lim.MaxArrayElements > 0 && cnt > uint64(st.lim.MaxArrayElements) {
 		st.limit(limits.RuleEntries, "MaxArrayElements", clampInt64(cnt), int64(st.lim.MaxArrayElements), "array "+key)
+		readCount = uint64(st.lim.MaxArrayElements)
+		st.structf(off, "array %q declares %d elements, exceeding MaxArrayElements %d; %d element(s) were not read",
+			key, cnt, st.lim.MaxArrayElements, cnt-readCount)
+		capped = true
 	}
-	for range cnt {
+	for range readCount {
 		if _, ok := st.value(r, et, key, depth+1); !ok {
 			return false
 		}
 	}
+	if capped {
+		if et == 7 { // BOOL: fixed 1 byte per element, can still seek past the tail
+			if !r.skip(cnt - readCount) {
+				st.structf(off, "array %q runs past EOF", key)
+				return false
+			}
+			return true
+		}
+		return false
+	}
 	return true
+}
+
+func fixedNumericSize(vt uint32) (uint64, bool) {
+	switch vt {
+	case 0, 1:
+		return 1, true
+	case 2, 3:
+		return 2, true
+	case 4, 5, 6:
+		return 4, true
+	case 10, 11, 12:
+		return 8, true
+	default:
+		return 0, false
+	}
 }
 
 // readString reads a gguf_string (u64 length + bytes), scans it and collects it
@@ -865,8 +958,8 @@ func (st *state) polyglot(size int64) {
 	st.scanRegion("head", 0, head)
 	if size > polyglotHeadBytes {
 		start := size - polyglotTailBytes
-		if start < 0 {
-			start = 0
+		if start < head {
+			start = head
 		}
 		st.scanRegion("tail", start, size-start)
 	}
@@ -1104,6 +1197,9 @@ func orderName(ord binary.ByteOrder) string {
 func defaultLimits(l *limits.Limits) {
 	if l.MaxEntries == 0 {
 		l.MaxEntries = limits.Default().MaxEntries
+	}
+	if l.MaxArrayElements == 0 {
+		l.MaxArrayElements = limits.Default().MaxArrayElements
 	}
 	if l.MaxStringBlob == 0 {
 		l.MaxStringBlob = limits.Default().MaxStringBlob
