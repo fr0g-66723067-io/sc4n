@@ -128,7 +128,7 @@ type sarifArtifact struct {
 type sarifRegion struct {
 	StartLine   int        `json:"startLine"`
 	StartColumn int        `json:"startColumn,omitempty"`
-	ByteOffset  int64      `json:"byteOffset,omitempty"`
+	ByteOffset  *int64     `json:"byteOffset,omitempty"`
 	ByteLength  int        `json:"byteLength,omitempty"`
 	Snippet     *sarifText `json:"snippet,omitempty"`
 }
@@ -209,6 +209,7 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 			// support page makes shortDescription, fullDescription and help
 			// required on a reportingDescriptor, so all three are filled in.
 			ri = len(log.Runs[0].Tool.Driver.Rules)
+			index[f.RuleID] = ri
 			unregistered := "rule " + f.RuleID + " is not in sc4n's rule registry"
 			log.Runs[0].Tool.Driver.Rules = append(log.Runs[0].Tool.Driver.Rules, sarifRule{
 				ID:                   f.RuleID,
@@ -227,15 +228,24 @@ func (r *Report) WriteSARIF(w io.Writer) error {
 			path, member = f.Artifact, ""
 		}
 		region := sarifRegion{
-			StartLine:  1,
-			ByteOffset: f.Offset,
-			ByteLength: len(f.Evidence),
+			StartLine: 1,
 		}
 		if f.Line != nil {
-			region.StartLine = *f.Line
-		}
-		if f.Col != nil {
-			region.StartColumn = *f.Col
+			if *f.Line >= 1 {
+				region.StartLine = *f.Line
+			}
+			if f.Col != nil && *f.Col >= 1 {
+				region.StartColumn = *f.Col
+			}
+		} else if f.Offset >= 0 {
+			// SARIF 2.1.0 §3.30.14 requires byteOffset whenever byteLength is
+			// present. Use a pointer so byteOffset: 0 is serialized rather than
+			// omitted, and omit both for line-only findings.
+			off := f.Offset
+			region.ByteOffset = &off
+			if len(f.Evidence) > 0 {
+				region.ByteLength = len(f.Evidence)
+			}
 		}
 		if f.Evidence != "" {
 			region.Snippet = &sarifText{Text: oneLine(f.Evidence, 512)}
@@ -348,12 +358,28 @@ func helpMarkdown(r *Rule) string {
 
 // pathURI renders a relative path as SARIF's artifactLocation.uri. A URI with a
 // scheme (say http: for a hypothetical remote reference) is passed through
-// untouched; everything else is percent-encoded with forward slashes.
+// untouched; everything else is percent-encoded with forward slashes. A relative
+// path whose first segment contains ':' retains net/url's "./" prefix per
+// RFC 3986 §4.2 so it is not parsed as a URI scheme.
 func pathURI(p string) string {
 	if strings.Contains(p, "://") {
 		return p
 	}
 	clean := filepath.ToSlash(p)
+	if !strings.HasPrefix(clean, "/") {
+		trimmed := strings.TrimPrefix(clean, "./")
+		first, _, _ := strings.Cut(trimmed, "/")
+		if !strings.ContainsRune(first, ':') {
+			clean = trimmed
+		}
+	}
 	u := url.URL{Path: clean}
-	return strings.TrimPrefix(u.String(), "./")
+	out := u.String()
+	if strings.HasPrefix(out, "./") {
+		first, _, _ := strings.Cut(strings.TrimPrefix(out, "./"), "/")
+		if !strings.ContainsRune(first, ':') {
+			return strings.TrimPrefix(out, "./")
+		}
+	}
+	return out
 }

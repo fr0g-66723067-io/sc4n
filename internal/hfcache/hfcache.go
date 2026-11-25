@@ -31,6 +31,7 @@ package hfcache
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -67,7 +68,7 @@ func DefaultDir() string {
 	if hf := os.Getenv("HF_HOME"); hf != "" {
 		return filepath.Join(hf, "hub")
 	}
-	if h := os.Getenv("HOME"); h != "" {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
 		return filepath.Join(h, ".cache", "huggingface", "hub")
 	}
 	return ""
@@ -102,7 +103,7 @@ func Expand(dir string, c *report.Collector) ([]Entry, error) {
 		return nil, err
 	}
 
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	var out []Entry
 
 	for _, repo := range repos {
@@ -121,9 +122,6 @@ func Expand(dir string, c *report.Collector) ([]Entry, error) {
 					return nil
 				}
 				if d.IsDir() {
-					if d.Name() == ".no_exist" && p != filepath.Join(dir, filepath.FromSlash(snapDir)) {
-						return filepath.SkipDir
-					}
 					return nil
 				}
 				rel, rerr := filepath.Rel(dir, p)
@@ -143,17 +141,21 @@ func Expand(dir string, c *report.Collector) ([]Entry, error) {
 				// keying on that silently dropped every repository after the
 				// first, findings and all.
 				key := blobRel
-				if seen[key] {
+				commit := strings.ToLower(snapshotCommit(relSlash))
+				revs := refs[commit]
+				if idx, ok := seen[key]; ok {
+					if len(revs) > 0 {
+						out[idx].Revision = mergeRevisions(out[idx].Revision, revs)
+					}
 					return nil
 				}
-				seen[key] = true
+				seen[key] = len(out)
 
-				commit := snapshotCommit(relSlash)
 				out = append(out, Entry{
 					Path:     filepath.Join(dir, filepath.FromSlash(blobRel)),
 					Display:  display,
 					Digest:   digestOf(blobRel),
-					Revision: strings.Join(refs[commit], ","),
+					Revision: mergeRevisions("", revs),
 					RootDir:  dir,
 					Rel:      blobRel,
 				})
@@ -224,6 +226,14 @@ func resolveEntry(root *os.Root, c *report.Collector, relSlash string) (blobRel,
 	}
 	tfi, err := root.Stat(target)
 	if err != nil {
+		if isRootEscape(err) {
+			emit(c, RuleSymlinkEscape, display, "resolved blob escapes the cache root: "+target)
+			return "", "", false
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			emit(c, RuleNotScanned, display, "resolved blob could not be stat'd: "+err.Error())
+			return "", "", false
+		}
 		emit(c, RuleBlobMissing, display, "resolved blob is missing: "+target)
 		return "", "", false
 	}
@@ -238,13 +248,62 @@ func resolveEntry(root *os.Root, c *report.Collector, relSlash string) (blobRel,
 	return target, display, true
 }
 
+// isRootEscape reports whether an os.Root error indicates that a symlink or path
+// component escaped the root directory (e.g. a 2-hop symlink in blobs/).
+func isRootEscape(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "escapes from parent") || strings.Contains(msg, "escapes")
+}
+
+// mergeRevisions merges existing comma-separated ref labels with add, returning
+// a sorted, deduplicated comma-separated list.
+func mergeRevisions(existing string, add []string) string {
+	set := map[string]bool{}
+	if existing != "" {
+		for _, r := range strings.Split(existing, ",") {
+			if r != "" {
+				set[r] = true
+			}
+		}
+	}
+	for _, r := range add {
+		if r != "" {
+			set[r] = true
+		}
+	}
+	if len(set) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(set))
+	for r := range set {
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+// maxRefBytes caps how much of a refs/<name> file readRefs will read. A genuine
+// ref is a 40-hex commit plus optional whitespace; capping prevents a hostile or
+// corrupted ref file from consuming unbounded memory.
+const maxRefBytes = 4 << 10
+
 // readRefs reads refs/<name> files into a commit -> ref names map.
 func readRefs(root *os.Root, c *report.Collector, repoRel string) map[string][]string {
 	out := map[string][]string{}
 	refRoot := path.Join(repoRel, "refs")
-	_ = filepath.WalkDir(filepath.Join(root.Name(), filepath.FromSlash(refRoot)),
+	refPath := filepath.Join(root.Name(), filepath.FromSlash(refRoot))
+	if _, err := os.Lstat(refPath); errors.Is(err, os.ErrNotExist) {
+		return out
+	}
+	_ = filepath.WalkDir(refPath,
 		func(p string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
+				if p == refPath && errors.Is(walkErr, os.ErrNotExist) {
+					return nil
+				}
 				rel, _ := filepath.Rel(root.Name(), p)
 				emit(c, RuleNotScanned, filepath.ToSlash(rel), "refs subtree could not be walked: "+walkErr.Error())
 				return nil
@@ -257,18 +316,38 @@ func readRefs(root *os.Root, c *report.Collector, repoRel string) map[string][]s
 				return nil
 			}
 			relSlash := filepath.ToSlash(rel)
-			b, err := root.ReadFile(relSlash)
+			tfi, serr := root.Stat(relSlash)
+			if serr != nil {
+				emit(c, RuleNotScanned, relSlash, "ref could not be stat'd: "+serr.Error())
+				return nil
+			}
+			if !tfi.Mode().IsRegular() {
+				emit(c, RuleNotScanned, relSlash, "ref is not a regular file: "+tfi.Mode().String())
+				return nil
+			}
+			fh, err := root.Open(relSlash)
 			if err != nil {
 				emit(c, RuleNotScanned, relSlash, "ref could not be read: "+err.Error())
 				return nil
 			}
+			b, rerr := io.ReadAll(io.LimitReader(fh, maxRefBytes+1))
+			_ = fh.Close()
+			if rerr != nil {
+				emit(c, RuleNotScanned, relSlash, "ref could not be read: "+rerr.Error())
+				return nil
+			}
 			name := strings.TrimPrefix(relSlash, repoRel+"/refs/")
+			if len(b) > maxRefBytes {
+				emit(c, RuleRefMalformed, relSlash, "refs/"+name+" exceeds 4 KiB")
+				return nil
+			}
 			commit := strings.TrimSpace(string(b))
 			if !isCommit(commit) {
 				emit(c, RuleRefMalformed, relSlash, "refs/"+name+" is not a 40-hex commit")
 				return nil
 			}
-			out[commit] = append(out[commit], name)
+			lc := strings.ToLower(commit)
+			out[lc] = append(out[lc], name)
 			return nil
 		})
 	for k := range out {

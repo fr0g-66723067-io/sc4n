@@ -224,7 +224,7 @@ func (c *Collector) discard(f Finding) {
 func (c *Collector) NoteRule(r *Rule, artifact string, off int64, evidence string, extra map[string]string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.findings = append(c.findings, Finding{
+	f := Finding{
 		RuleID:     r.ID,
 		Title:      r.Title,
 		Severity:   r.Severity,
@@ -235,7 +235,14 @@ func (c *Collector) NoteRule(r *Rule, artifact string, off int64, evidence strin
 		Offset:     off,
 		Evidence:   evidence,
 		Extra:      extra,
-	})
+	}
+	if c.limit > 0 {
+		h := findingHeap(c.findings)
+		heap.Push(&h, f)
+		c.findings = h
+		return
+	}
+	c.findings = append(c.findings, f)
 }
 
 // Dropped is the number of findings discarded because the cap was reached.
@@ -316,6 +323,12 @@ func (c *Collector) Suppress(fp map[string]bool) int {
 		kept = append(kept, f)
 	}
 	c.findings = kept
+	c.suppressed += n
+	if c.limit > 0 {
+		h := findingHeap(c.findings)
+		heap.Init(&h)
+		c.findings = h
+	}
 	return n
 }
 
@@ -392,9 +405,20 @@ func (s *Sink) Named(member string) *Sink {
 // growing the map with them.
 const maxSinkSeen = 1 << 16
 
-func (s *Sink) duplicate(r *Rule, pos uint64, evidence string) bool {
+const (
+	dupKindOffset byte = iota
+	dupKindLineCol
+)
+
+func (s *Sink) duplicate(r *Rule, kind byte, pos uint64, evidence string, redacted bool, extra map[string]string) bool {
 	if s.seen == nil {
 		s.seen = make(map[[2]uint64]struct{})
+	}
+	ex := extraString(extra)
+	var flags [2]byte
+	flags[0] = kind
+	if redacted {
+		flags[1] = 1
 	}
 	var key [2]uint64
 	for i, h := range [2]hash.Hash64{fnv.New64a(), fnv.New64()} {
@@ -402,10 +426,13 @@ func (s *Sink) duplicate(r *Rule, pos uint64, evidence string) bool {
 		h.Write([]byte{0})
 		io.WriteString(h, s.artifact)
 		h.Write([]byte{0})
+		h.Write(flags[:])
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], pos)
 		h.Write(b[:])
 		io.WriteString(h, evidence)
+		h.Write([]byte{0})
+		io.WriteString(h, ex)
 		key[i] = h.Sum64()
 	}
 	if _, ok := s.seen[key]; ok {
@@ -430,7 +457,7 @@ func (s *Sink) Emit(r *Rule, off int64, evidence string) {
 // EmitExtra is Emit with additional machine-readable fields (for example
 // `location`, `resolved`, `entropy`).
 func (s *Sink) EmitExtra(r *Rule, off int64, evidence string, extra map[string]string) {
-	if s.duplicate(r, uint64(off), evidence) {
+	if s.duplicate(r, dupKindOffset, uint64(off), evidence, false, extra) {
 		return
 	}
 	s.c.Add(Finding{
@@ -452,7 +479,7 @@ func (s *Sink) EmitExtra(r *Rule, off int64, evidence string, extra map[string]s
 // recorded (so a baseline fingerprint stays stable) but the flag tells every
 // consumer to treat it as sensitive, and the text itself is masked.
 func (s *Sink) EmitRedacted(r *Rule, off int64, evidence string, extra map[string]string) {
-	if s.duplicate(r, uint64(off), evidence) {
+	if s.duplicate(r, dupKindOffset, uint64(off), evidence, true, extra) {
 		return
 	}
 	s.c.Add(Finding{
@@ -478,7 +505,7 @@ func (s *Sink) EmitAt(r *Rule, line, col int, evidence string) {
 
 // EmitAtExtra is EmitExtra with a line/column instead of a byte offset.
 func (s *Sink) EmitAtExtra(r *Rule, line, col int, evidence string, extra map[string]string) {
-	if s.duplicate(r, position(line, col), evidence) {
+	if s.duplicate(r, dupKindLineCol, position(line, col), evidence, false, extra) {
 		return
 	}
 	l, c := line, col
@@ -642,20 +669,19 @@ func colOf(f Finding) int {
 // and the offset-stability argument above is about evidence windows, not about
 // secrets: a secret's identity is where it sits.
 func Fingerprint(f Finding) string {
-	var b strings.Builder
-	b.Grow(len(f.RuleID) + len(f.Artifact) + 40)
-	b.WriteString(f.RuleID)
-	b.WriteByte('\x00')
-	b.WriteString(f.Artifact)
-	b.WriteByte('\x00')
+	h := sha256.New()
+	io.WriteString(h, f.RuleID)
+	h.Write([]byte{0})
+	io.WriteString(h, f.Artifact)
+	h.Write([]byte{0})
 	if f.EvidenceRedacted {
-		b.WriteString("at:")
-		b.WriteString(strconv.FormatInt(f.Offset, 10))
-		return b.String()
+		io.WriteString(h, "at:")
+		io.WriteString(h, strconv.FormatInt(f.Offset, 10))
+	} else {
+		evSum := sha256.Sum256([]byte(f.Evidence))
+		h.Write(evSum[:])
 	}
-	sum := sha256.Sum256([]byte(f.Evidence))
-	b.WriteString(hex.EncodeToString(sum[:12]))
-	return b.String()
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // SeverityBand returns GitHub's numeric security-severity for a severity, which

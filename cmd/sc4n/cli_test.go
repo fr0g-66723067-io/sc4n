@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/fr0g-66723067-io/sc4n/internal/hubcampaign"
 )
 
 func TestRunExitCodes(t *testing.T) {
@@ -593,5 +596,210 @@ func TestCollectorCapDoesNotDependOnBaseline(t *testing.T) {
 	}
 	if got := collectorLimit(0, 100); got != 100 {
 		t.Fatalf("collectorLimit(0, 100) = %d, want the default 100", got)
+	}
+}
+
+func TestScanFlagValidationAndZeroOverrides(t *testing.T) {
+	dir := t.TempDir()
+	data := bytes.Repeat([]byte("A"), 64)
+	f := filepath.Join(dir, "sample.bin")
+	if err := os.WriteFile(f, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Usage rejections: -stdin + paths, negative -timeout, negative -j, bad -max-hash.
+	for name, args := range map[string][]string{
+		"stdin with path":  {"scan", "-stdin", "-name", "a.bin", f},
+		"negative timeout": {"scan", "-timeout", "-1s", f},
+		"negative jobs":    {"scan", "-j", "-2", f},
+		"bad max-hash":     {"scan", "-max-hash", "nope", f},
+	} {
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != exitUsage {
+			t.Errorf("%s: exit = %d, want %d (stderr: %s)", name, code, exitUsage, errOut.String())
+		}
+	}
+
+	// -max-hash 16 caps hashing to 16 bytes; -max-hash 0 hashes the full file.
+	var out, errOut bytes.Buffer
+	if code := run([]string{"scan", "-format", "json", "-max-hash", "16", f}, &out, &errOut); code != exitClean {
+		t.Fatalf("-max-hash 16 exited %d: %s", code, errOut.String())
+	}
+	var doc struct {
+		Artifacts []struct {
+			SHA256Scope string `json:"sha256Scope"`
+		} `json:"artifacts"`
+		Limits struct {
+			MaxHashBytes int64 `json:"maxHashBytes"`
+			MaxDepth     int   `json:"maxDepth"`
+		} `json:"limits"`
+		Findings []struct {
+			RuleID string `json:"ruleId"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Artifacts[0].SHA256Scope != "prefix:16" || doc.Limits.MaxHashBytes != 16 {
+		t.Fatalf("-max-hash 16: scope=%q limit=%d", doc.Artifacts[0].SHA256Scope, doc.Limits.MaxHashBytes)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"scan", "-format", "json", "-max-hash", "0", f}, &out, &errOut); code != exitClean {
+		t.Fatalf("-max-hash 0 exited %d: %s", code, errOut.String())
+	}
+	doc = struct {
+		Artifacts []struct {
+			SHA256Scope string `json:"sha256Scope"`
+		} `json:"artifacts"`
+		Limits struct {
+			MaxHashBytes int64 `json:"maxHashBytes"`
+			MaxDepth     int   `json:"maxDepth"`
+		} `json:"limits"`
+		Findings []struct {
+			RuleID string `json:"ruleId"`
+		} `json:"findings"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Artifacts[0].SHA256Scope != "full" || doc.Limits.MaxHashBytes != 0 {
+		t.Fatalf("-max-hash 0: scope=%q limit=%d, want full and 0", doc.Artifacts[0].SHA256Scope, doc.Limits.MaxHashBytes)
+	}
+
+	// -max-depth 0 must stop container recursion instead of resetting to 4.
+	zipPath := filepath.Join(dir, "nest.zip")
+	var zbuf bytes.Buffer
+	zw := zip.NewWriter(&zbuf)
+	w, err := zw.Create("evil.pkl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("\x80\x04\x8c\x02os\x8c\x06system\x93\x8c\x02id\x85\x52.")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(zipPath, zbuf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	code := run([]string{"scan", "-format", "json", "-max-depth", "0", zipPath}, &out, &errOut)
+	if code != exitClean && code != exitFindings {
+		t.Fatalf("-max-depth 0 exited %d: %s", code, errOut.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Limits.MaxDepth != 0 {
+		t.Fatalf("limits.maxDepth = %d, want 0", doc.Limits.MaxDepth)
+	}
+	foundDepth := false
+	for _, fn := range doc.Findings {
+		if fn.RuleID == "SC4N-LIMIT-DEPTH" {
+			foundDepth = true
+		}
+		if fn.RuleID == "SC4N-PICKLE-GLOBAL-CRITICAL" {
+			t.Fatalf("-max-depth 0 descended into nested pickle: %+v", doc.Findings)
+		}
+	}
+	if !foundDepth {
+		t.Fatalf("-max-depth 0 did not emit SC4N-LIMIT-DEPTH: %+v", doc.Findings)
+	}
+}
+
+func TestHFCacheEmptySARIFUnsuccessfulAndBaselineSuppressesExpander(t *testing.T) {
+	bad := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bad, "models--x", "refs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad, "models--x", "refs", "main"), []byte("not-a-commit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty/broken cache in SARIF must set executionSuccessful: false.
+	var sarifOut, errOut bytes.Buffer
+	if code := run([]string{"scan", "-hf-cache", "-hf-cache-dir", bad, "-format", "sarif"}, &sarifOut, &errOut); code != exitUnreadable {
+		t.Fatalf("exit = %d, want %d", code, exitUnreadable)
+	}
+	var sarifDoc struct {
+		Runs []struct {
+			Invocations []struct {
+				ExecutionSuccessful bool `json:"executionSuccessful"`
+			} `json:"invocations"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(sarifOut.Bytes(), &sarifDoc); err != nil {
+		t.Fatalf("invalid SARIF: %v", err)
+	}
+	if sarifDoc.Runs[0].Invocations[0].ExecutionSuccessful {
+		t.Fatal("empty/broken -hf-cache SARIF reported executionSuccessful=true")
+	}
+
+	// Baseline loaded before hfcache.Expand suppresses structural findings.
+	base := filepath.Join(t.TempDir(), "base.json")
+	var out bytes.Buffer
+	errOut.Reset()
+	_ = run([]string{"scan", "-hf-cache", "-hf-cache-dir", bad, "-format", "json", "-out", base}, &out, &errOut)
+
+	out.Reset()
+	errOut.Reset()
+	_ = run([]string{"scan", "-hf-cache", "-hf-cache-dir", bad, "-baseline", base, "-format", "json"}, &out, &errOut)
+	var repDoc struct {
+		Summary struct {
+			Findings   int `json:"findings"`
+			Suppressed int `json:"suppressed"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &repDoc); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, out.String())
+	}
+	if repDoc.Summary.Suppressed == 0 || repDoc.Summary.Findings != 0 {
+		t.Fatalf("baseline did not suppress hfcache expander findings: %+v", repDoc.Summary)
+	}
+}
+
+func TestHubPrintCampaignJSONSeparatesStderrAndEarlyStageSkipsStaleCampaign(t *testing.T) {
+	rep := &hubcampaign.CampaignReport{}
+	rep.Totals.Repos = 2
+	rep.Totals.Files = 3
+	rep.Totals.Findings.Max = "none"
+
+	var out, errOut bytes.Buffer
+	if err := printCampaign(&out, &errOut, rep, true); err != nil {
+		t.Fatalf("printCampaign: %v", err)
+	}
+	var decoded hubcampaign.CampaignReport
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout with -json is not pure JSON: %v\nstdout=%s", err, out.String())
+	}
+	if !strings.Contains(errOut.String(), "sc4n hub: 2 repos") {
+		t.Fatalf("human summary did not go to stderr: %q", errOut.String())
+	}
+
+	// Running -stage candidates when a stale campaign.json already exists in -out
+	// must NOT print stale campaign totals.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[{"id":"o/fresh"}]`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	stale := `{"totals":{"repos":99,"files":99,"findings":{"high":5,"max":"high"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "campaign.json"), []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	code := run([]string{"hub", "-out", dir, "-stage", "candidates", "-defaults=false",
+		"-search", "fresh", "-api", srv.URL, "-fail-on", "high"}, &out, &errOut)
+	if code != exitClean {
+		t.Fatalf("candidates stage exited %d (stale campaign.json leaked?): stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if strings.Contains(out.String(), "99 repos") {
+		t.Fatalf("stale campaign.json printed on candidates stage: %q", out.String())
 	}
 }

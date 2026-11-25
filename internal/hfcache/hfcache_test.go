@@ -223,3 +223,182 @@ func TestDirectorySymlinkIsReportedNotSilent(t *testing.T) {
 		t.Fatalf("directory link was silent; findings=%v", ids(c.Findings()))
 	}
 }
+
+// TestSnapshotDotNoExistIsScanned pins that a directory literally named
+// `.no_exist` inside snapshots/ is walked and its files are yielded: the real
+// HF cache puts `.no_exist/` as a sibling of `snapshots/`, so skipping it inside
+// `snapshots/` let malicious repos hide files there.
+func TestSnapshotDotNoExistIsScanned(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "models--org--repo")
+	commit := strings.Repeat("a", 40)
+	hidden := filepath.Join(repo, "snapshots", commit, ".no_exist")
+	if err := os.MkdirAll(hidden, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	evil := filepath.Join(hidden, "evil.pkl")
+	if err := os.WriteFile(evil, []byte("\x80\x04N."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := Expand(dir, nil)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if len(entries) != 1 || !strings.HasSuffix(entries[0].Display, ".no_exist/evil.pkl") {
+		t.Fatalf("entries = %+v, want hidden .no_exist/evil.pkl to be scanned", entries)
+	}
+}
+
+// TestTwoHopSymlinkEscapeReportsSymlinkEscape pins that a 2-hop escape (snapshot
+// symlink -> blobs/<sha> -> /etc/passwd, or blobs/ -> /etc) emits HIGH
+// RuleSymlinkEscape rather than Medium RuleBlobMissing.
+func TestTwoHopSymlinkEscapeReportsSymlinkEscape(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("blob symlink escapes", func(t *testing.T) {
+		dir := t.TempDir()
+		repo := filepath.Join(dir, "models--org--repo")
+		snap := filepath.Join(repo, "snapshots", strings.Repeat("1", 40))
+		blobs := filepath.Join(repo, "blobs")
+		if err := os.MkdirAll(snap, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(blobs, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sha := strings.Repeat("b", 64)
+		if err := os.Symlink(outside, filepath.Join(blobs, sha)); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "blobs", sha), filepath.Join(snap, "leak.bin")); err != nil {
+			t.Fatal(err)
+		}
+		c := report.NewCollector(0)
+		entries, err := Expand(dir, c)
+		if err != nil {
+			t.Fatalf("expand: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("escaping 2-hop blob yielded entries: %+v", entries)
+		}
+		if !hasRule(c.Findings(), RuleSymlinkEscape.ID) {
+			t.Fatalf("expected %s, got %v", RuleSymlinkEscape.ID, ids(c.Findings()))
+		}
+		if hasRule(c.Findings(), RuleBlobMissing.ID) {
+			t.Fatalf("2-hop escape was misclassified as %s: %v", RuleBlobMissing.ID, ids(c.Findings()))
+		}
+	})
+
+	t.Run("blobs dir symlink escapes", func(t *testing.T) {
+		dir := t.TempDir()
+		repo := filepath.Join(dir, "models--org--repo")
+		snap := filepath.Join(repo, "snapshots", strings.Repeat("2", 40))
+		if err := os.MkdirAll(snap, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Dir(outside), filepath.Join(repo, "blobs")); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "blobs", "secret.txt"), filepath.Join(snap, "leak.bin")); err != nil {
+			t.Fatal(err)
+		}
+		c := report.NewCollector(0)
+		entries, err := Expand(dir, c)
+		if err != nil {
+			t.Fatalf("expand: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("escaping blobs dir yielded entries: %+v", entries)
+		}
+		if !hasRule(c.Findings(), RuleSymlinkEscape.ID) {
+			t.Fatalf("expected %s, got %v", RuleSymlinkEscape.ID, ids(c.Findings()))
+		}
+	})
+}
+
+// TestDeduplicatedBlobPreservesLaterRevisionAndCaseInsensitiveRefs pins that
+// when two revisions share one blob and the lexicographically earlier commit has
+// no ref (or a different ref), the later revision's ref label is merged onto the
+// surviving entry rather than dropped, and uppercase commit hex in refs/ matches.
+func TestDeduplicatedBlobPreservesLaterRevisionAndCaseInsensitiveRefs(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "models--org--repo")
+	blobs := filepath.Join(repo, "blobs")
+	refs := filepath.Join(repo, "refs")
+	if err := os.MkdirAll(blobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(refs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("c", 64)
+	if err := os.WriteFile(filepath.Join(blobs, sha), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitA := strings.Repeat("0", 40) // walked first, has no ref
+	commitB := strings.Repeat("f", 40) // walked second, pointed to by refs/main (uppercase in file)
+	for _, c := range []string{commitA, commitB} {
+		snap := filepath.Join(repo, "snapshots", c)
+		if err := os.MkdirAll(snap, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "blobs", sha), filepath.Join(snap, "model.bin")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(refs, "main"), []byte(strings.ToUpper(commitB)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := Expand(dir, nil)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if entries[0].Revision != "main" {
+		t.Fatalf("Revision = %q, want %q", entries[0].Revision, "main")
+	}
+}
+
+func TestMissingRefsDirIsQuietAndOversizedRefIsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "models--org--norefs")
+	snap := filepath.Join(repo, "snapshots", strings.Repeat("1", 40))
+	if err := os.MkdirAll(snap, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snap, "a.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := report.NewCollector(0)
+	entries, err := Expand(dir, c)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if len(c.Findings()) != 0 {
+		t.Fatalf("missing refs/ emitted findings: %v", ids(c.Findings()))
+	}
+
+	// An oversized ref file is capped at 4 KiB and reported as malformed.
+	refsDir := filepath.Join(repo, "refs")
+	if err := os.MkdirAll(refsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refsDir, "huge"), []byte(strings.Repeat("a", 8192)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c2 := report.NewCollector(0)
+	if _, err := Expand(dir, c2); err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if !hasRule(c2.Findings(), RuleRefMalformed.ID) {
+		t.Fatalf("oversized ref did not emit %s: %v", RuleRefMalformed.ID, ids(c2.Findings()))
+	}
+}

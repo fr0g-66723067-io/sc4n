@@ -42,8 +42,13 @@ func Section(parent Source, off, size int64, name string) (Source, error) {
 		return nil, errors.New("source: negative range")
 	}
 	b, err := parent.Bytes(off, size)
-	if err != nil && len(b) < int(size) {
-		return nil, err
+	// Compare in int64: int(size) truncates on a 32-bit build, and a truncated
+	// comparison lets a short slice through to b[:size], which panics.
+	if int64(len(b)) < size {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("source: range extends past the end of the parent")
 	}
 	return Mem(name, b[:size]), nil
 }

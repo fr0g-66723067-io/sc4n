@@ -183,3 +183,58 @@ func TestOpenUnreadableIsAnError(t *testing.T) {
 		t.Fatal("Open succeeded on a missing file")
 	}
 }
+
+// TestOpenFileMmapFailureFallsBackToRead pins that mmapSource does not close f
+// on error: OpenFile falls back to readCapped(f, ...) when mapping fails (for
+// example, an empty file with MmapThreshold == 0), which failed with "file
+// already closed" when mmapSource closed f on error.
+func TestOpenFileMmapFailureFallsBackToRead(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.bin")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := limits.Default()
+	l.MmapThreshold = 0
+	s, err := Open(empty, l)
+	if err != nil {
+		t.Fatalf("Open empty file with MmapThreshold=0 failed (mmap fallback broken): %v", err)
+	}
+	defer s.Close()
+	if s.Size() != 0 {
+		t.Fatalf("Size = %d, want 0", s.Size())
+	}
+
+	// Also verify directly on a non-empty file that an error from mmapSource
+	// leaves the descriptor open for the caller to read and close.
+	nonEmpty := filepath.Join(dir, "data.bin")
+	if err := os.WriteFile(nonEmpty, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(nonEmpty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := mmapSource(nonEmpty, f, 0); err == nil {
+		t.Fatal("mmapSource(size=0) unexpectedly succeeded")
+	}
+	got, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("descriptor was closed by mmapSource on error: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("read after mmapSource failure = %q, want %q", got, "hello")
+	}
+}
+
+func TestSectionRejectsShortRange(t *testing.T) {
+	s := Mem("x", []byte("abcd"))
+	defer s.Close()
+	if _, err := Section(s, 0, 10, "sub"); err == nil {
+		t.Fatal("Section accepted range past parent end")
+	}
+	if _, err := Section(s, 0, math.MaxInt64, "sub"); err == nil {
+		t.Fatal("Section accepted overflowing size")
+	}
+}

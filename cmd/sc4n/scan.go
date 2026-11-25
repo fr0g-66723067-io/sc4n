@@ -28,6 +28,7 @@ type scanFlags struct {
 	maxDepth    int
 	maxDecomp   string
 	maxRatio    int64
+	maxHash     string
 	maxFindings int
 	timeout     time.Duration
 	root        string
@@ -55,9 +56,10 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&f.jobs, "j", 0, "worker count (0 = number of CPUs)")
 	fs.StringVar(&f.memBudget, "mem-budget", "1GiB", "total artifact bytes mapped at once")
 	fs.StringVar(&f.maxArtifact, "max-artifact", "64GiB", "largest single file to open")
-	fs.IntVar(&f.maxDepth, "max-depth", 4, "container nesting cap")
+	fs.IntVar(&f.maxDepth, "max-depth", 4, "container nesting cap (0 disables recursion)")
 	fs.StringVar(&f.maxDecomp, "max-decompress", "8GiB", "cumulative decompression cap per archive")
 	fs.Int64Var(&f.maxRatio, "max-ratio", 200, "decompression ratio cap")
+	fs.StringVar(&f.maxHash, "max-hash", "256MiB", "prefix byte cap for artifact sha256 (0 = full file)")
 	fs.IntVar(&f.maxFindings, "max-findings", 100000, "finding cap, applied after -baseline suppression; the most severe findings are kept, so a dropped finding is never more severe than a kept one")
 	fs.DurationVar(&f.timeout, "timeout", 0, "bound the whole scan (e.g. 10m; 0 = unbounded)")
 	fs.StringVar(&f.root, "root", "", "containment root for path-shaped values")
@@ -81,6 +83,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
+	visited := map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) { visited[fl.Name] = true })
 	paths := fs.Args()
 
 	switch {
@@ -91,6 +95,10 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		}
 		if f.hfCache {
 			fmt.Fprintln(stderr, "sc4n: -stdin and -hf-cache are mutually exclusive")
+			return exitUsage
+		}
+		if len(paths) > 0 {
+			fmt.Fprintln(stderr, "sc4n: -stdin takes no path arguments")
 			return exitUsage
 		}
 	case f.hfCache:
@@ -115,10 +123,18 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sc4n: %v\n", err)
 		return exitUsage
 	}
+	if f.timeout < 0 {
+		fmt.Fprintf(stderr, "sc4n: -timeout must not be negative (%s)\n", f.timeout)
+		return exitUsage
+	}
+	if f.jobs < 0 {
+		fmt.Fprintf(stderr, "sc4n: -j must not be negative (%d)\n", f.jobs)
+		return exitUsage
+	}
 	sev, _ := report.ParseSeverity(f.failOn)
 	warnInertFlags(f, stderr)
 
-	l, err := buildLimits(f)
+	l, err := buildLimits(f, visited)
 	if err != nil {
 		fmt.Fprintf(stderr, "sc4n: %v\n", err)
 		return exitUsage
@@ -161,18 +177,20 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	cfg := scan.Config{
-		Paths:        paths,
-		Partial:      f.partial,
-		Symlinks:     symlinkPolicy,
-		Limits:       l,
-		Jobs:         f.jobs,
-		MemBudget:    budget,
-		Root:         f.root,
-		DeepStats:    f.deepStats,
-		Timeout:      f.timeout,
-		MaxFindings:  f.maxFindings,
-		Baseline:     baseline,
-		Attestations: attestations,
+		Paths:             paths,
+		Partial:           f.partial,
+		Symlinks:          symlinkPolicy,
+		Limits:            l,
+		Jobs:              f.jobs,
+		MemBudget:         budget,
+		Root:              f.root,
+		DeepStats:         f.deepStats,
+		Timeout:           f.timeout,
+		MaxFindings:       f.maxFindings,
+		Baseline:          baseline,
+		Attestations:      attestations,
+		ExplicitZeroDepth: visited["max-depth"] && l.MaxDepth == 0,
+		ExplicitFullHash:  visited["max-hash"] && l.MaxHashBytes == 0,
 	}
 	switch {
 	case f.stdin:
@@ -186,8 +204,10 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		}
 		// The expander runs before the walk and reports its own structural
 		// findings (an escaping symlink, a missing blob), so it needs the
-		// collector the report will be built from.
+		// collector the report will be built from — with the baseline already
+		// installed so baselined structural findings are suppressed before the cap.
 		collector := report.NewCollector(collectorLimit(f.maxFindings, l.MaxFindings))
+		collector.SetSuppress(baseline)
 		entries, err := hfcache.Expand(dir, collector)
 		if err != nil {
 			fmt.Fprintf(stderr, "sc4n: -hf-cache: %v\n", err)
@@ -201,7 +221,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 			// and -out was never created.
 			fmt.Fprintf(stderr, "sc4n: -hf-cache: %s holds no blobs\n", dir)
 			rep := report.Build(report.Tool{Name: "sc4n", Version: version}, f.root, nil, collector,
-				reportLimits(l), nil, 0)
+				reportLimits(l), nil, collector.Suppressed())
+			rep.Unreadable = 1
 			if werr := writeReport(rep, f, stdout); werr != nil {
 				fmt.Fprintf(stderr, "sc4n: %v\n", werr)
 			}
@@ -299,7 +320,7 @@ func writeReport(rep *report.Report, f scanFlags, stdout io.Writer) error {
 	return nil
 }
 
-func buildLimits(f scanFlags) (limits.Limits, error) {
+func buildLimits(f scanFlags, visited map[string]bool) (limits.Limits, error) {
 	l := limits.Default()
 	art, err := parseSize(f.maxArtifact)
 	if err != nil {
@@ -309,14 +330,31 @@ func buildLimits(f scanFlags) (limits.Limits, error) {
 	if err != nil {
 		return l, fmt.Errorf("-max-decompress: %w", err)
 	}
+	hashCap, err := parseSize(f.maxHash)
+	if err != nil {
+		return l, fmt.Errorf("-max-hash: %w", err)
+	}
 	l.MaxArtifactBytes = art
 	l.MaxDecompressedBytes = dec
 	l.MaxDepth = f.maxDepth
 	l.MaxRatio = f.maxRatio
+	l.MaxHashBytes = hashCap
 	l.MaxFindings = f.maxFindings
 	// Normalize here rather than letting scan.Run reject it, so that a negative
 	// flag is a usage error before any file is opened.
-	return l.Normalize()
+	norm, err := l.Normalize()
+	if err != nil {
+		return norm, err
+	}
+	// Restore explicitly passed zero values for flags where 0 has a distinct
+	// meaning rather than "use the default".
+	if visited["max-depth"] && f.maxDepth == 0 {
+		norm.MaxDepth = 0
+	}
+	if visited["max-hash"] && hashCap == 0 {
+		norm.MaxHashBytes = 0
+	}
+	return norm, nil
 }
 
 func reportLimits(l limits.Limits) report.Limits { return l.ReportLimits() }

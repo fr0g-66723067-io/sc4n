@@ -141,6 +141,14 @@ type Config struct {
 	// verdict, and a path key would mis-merge the moment the same artifact is
 	// scanned from a different root.
 	Attestations *malice.Index
+	// ExplicitZeroDepth preserves Limits.MaxDepth == 0 across Limits.Normalize,
+	// so an explicit -max-depth 0 disables container recursion instead of
+	// resetting to the default depth.
+	ExplicitZeroDepth bool
+	// ExplicitFullHash preserves Limits.MaxHashBytes == 0 across
+	// Limits.Normalize, so an explicit -max-hash 0 digests the entire artifact
+	// instead of resetting to the default prefix cap.
+	ExplicitFullHash bool
 }
 
 // Result is the outcome of a scan.
@@ -175,6 +183,15 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	l, err := cfg.Limits.Normalize()
 	if err != nil {
 		return nil, err
+	}
+	if cfg.ExplicitZeroDepth && cfg.Limits.MaxDepth == 0 {
+		l.MaxDepth = 0
+	}
+	if cfg.ExplicitFullHash && cfg.Limits.MaxHashBytes == 0 {
+		l.MaxHashBytes = 0
+	}
+	if cfg.MaxFindings < 0 {
+		return nil, fmt.Errorf("scan: MaxFindings is negative (%d)", cfg.MaxFindings)
 	}
 	jobs := cfg.Jobs
 	if jobs <= 0 {
@@ -212,26 +229,31 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		// artifact: a stream's length is unknown up front, so the budget bounds
 		// how much may be buffered rather than being charged after the fact.
 		b := newMemBudget(budget)
-		sum := scanStdin(ctx, sess, cfg, l, b)
+		sum, cancelled := scanStdin(ctx, sess, cfg, l, b)
 		res.Artifacts = []report.ArtifactSummary{sum}
+		res.Cancelled = cancelled
 		if sum.Error != "" {
 			res.Unreadable = 1
 		}
 		res.Suppressed = collector.Suppressed()
-		noteFindingsCap(collector, l)
+		noteFindingsCap(collector, maxFindings)
 		res.Timings["total_ms"] = report.Millis(time.Since(start))
 		return res, nil
 	}
 
 	expandStart := time.Now()
-	entries, walkErr := expand(cfg)
+	entries, expandCancelled, walkErr := expand(ctx, cfg)
 	res.Timings["expand_ms"] = report.Millis(time.Since(expandStart))
+	if expandCancelled {
+		res.Cancelled = true
+	}
 
 	if len(entries) > 0 {
 		b := newMemBudget(budget)
 		var next atomic.Int64
 		var wg sync.WaitGroup
 		var mu sync.Mutex
+		outcomes := make([]scanOutcome, 0, len(entries))
 		cancelled := atomic.Bool{}
 
 		workers := min(jobs, len(entries))
@@ -248,27 +270,50 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					if i >= len(entries) {
 						return
 					}
-					sum := scanOne(ctx, sess, entries[i], l, b, cfg.Attestations)
+					out := scanOne(ctx, sess, entries[i], l, b, cfg.Attestations)
 					mu.Lock()
-					res.Artifacts = append(res.Artifacts, sum)
+					outcomes = append(outcomes, out)
 					mu.Unlock()
 				}
 			}()
 		}
 		wg.Wait()
 
-		sort.SliceStable(res.Artifacts, func(i, j int) bool { return res.Artifacts[i].Path < res.Artifacts[j].Path })
-		for _, a := range res.Artifacts {
-			if a.Error != "" {
+		// Sort outcomes by artifact path before assigning duplicate labels so
+		// the winner of MarkSeen is deterministic regardless of worker timing,
+		// and never overwrite a parse or digest error already recorded on the row.
+		sort.SliceStable(outcomes, func(i, j int) bool { return outcomes[i].sum.Path < outcomes[j].sum.Path })
+		res.Artifacts = make([]report.ArtifactSummary, 0, len(outcomes))
+		for i := range outcomes {
+			sum := outcomes[i].sum
+			if outcomes[i].dedupKey != "" {
+				if prev, first := sess.MarkSeen(outcomes[i].dedupKey, sum.Path); !first {
+					dup := "duplicate of " + prev
+					if sum.SubFormat == "" {
+						sum.SubFormat = dup
+					} else {
+						sum.SubFormat += "; " + dup
+					}
+				}
+			}
+			if sum.Error != "" {
 				res.Unreadable++
 			}
+			res.Artifacts = append(res.Artifacts, sum)
 		}
-		res.Cancelled = cancelled.Load()
+		if cancelled.Load() {
+			res.Cancelled = true
+		}
 	}
 	res.Suppressed = collector.Suppressed()
-	noteFindingsCap(collector, l)
+	noteFindingsCap(collector, maxFindings)
 	res.Timings["total_ms"] = report.Millis(time.Since(start))
 	return res, walkErr
+}
+
+type scanOutcome struct {
+	sum      report.ArtifactSummary
+	dedupKey string
 }
 
 // noteFindingsCap records that the finding list is incomplete. The drop is
@@ -276,18 +321,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 // (a SARIF upload, a CI gate) sees only the list: without a finding of its own,
 // a truncated list is indistinguishable from a complete one. The notice is
 // appended through Note, because the cap it describes would otherwise drop it.
-func noteFindingsCap(c *report.Collector, l limits.Limits) {
+func noteFindingsCap(c *report.Collector, maxFindings int) {
 	dropped := c.Dropped()
 	if dropped == 0 {
 		return
 	}
 	c.NoteRule(limits.RuleFindings, c.FirstDroppedArtifact(), 0,
 		strconv.Itoa(dropped)+" finding(s) were dropped at the MaxFindings cap of "+
-			strconv.Itoa(l.MaxFindings)+"; raise -max-findings to see them all",
+			strconv.Itoa(maxFindings)+"; raise -max-findings to see them all",
 		map[string]string{
 			"limit":   "MaxFindings",
 			"dropped": strconv.Itoa(dropped),
-			"cap":     strconv.Itoa(l.MaxFindings),
+			"cap":     strconv.Itoa(maxFindings),
 		})
 }
 
@@ -297,7 +342,7 @@ func noteFindingsCap(c *report.Collector, l limits.Limits) {
 // producer that never stops is reported as a limit finding rather than buffered
 // without bound, and the read loop observes ctx so -timeout stops a stream that
 // stays open without producing.
-func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits.Limits, b *memBudget) report.ArtifactSummary {
+func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits.Limits, b *memBudget) (report.ArtifactSummary, bool) {
 	name := cfg.StdinName
 	sum := report.ArtifactSummary{Path: name, Format: artifact.FormatUnknown.String()}
 	capBytes, capLimit := readCap(l.MaxArtifactBytes, b.total)
@@ -311,7 +356,7 @@ func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits
 			limits.Emit(sess.Collector.For(name), limits.RuleArtifact, capErr.limit, capErr.value, capErr.cap, name)
 		}
 		sum.Error = err.Error()
-		return sum
+		return sum, errors.Is(err, errStdinDeadline)
 	}
 	size := int64(len(data))
 
@@ -321,13 +366,13 @@ func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits
 	if size >= largeArtifact {
 		if !b.acquireLarge(ctx) {
 			sum.Error = "scan deadline exceeded while waiting for a large-artifact slot"
-			return sum
+			return sum, true
 		}
 		defer b.releaseLarge()
 	}
 	if !b.acquire(ctx, size) {
 		sum.Error = "scan deadline exceeded while waiting for the memory budget"
-		return sum
+		return sum, true
 	}
 	defer b.release(size)
 
@@ -353,7 +398,7 @@ func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits
 		sess.Collector.For(name).EmitExtra(artifact.RuleParseFailed, 0, perr.Error(), nil)
 		sum.SubFormat = "parse-error: " + perr.Error()
 	}
-	return sum
+	return sum, false
 }
 
 // readCap returns the largest stdin stream that may be buffered and the name of
@@ -363,7 +408,7 @@ func scanStdin(ctx context.Context, sess *artifact.Session, cfg Config, l limits
 // wins. The name travels with the cap so the finding points at the knob the
 // operator can raise.
 func readCap(maxArtifact, memBudget int64) (int64, string) {
-	if memBudget > 0 && memBudget < maxArtifact {
+	if maxArtifact <= 0 || (memBudget > 0 && memBudget < maxArtifact) {
 		return memBudget, "MemBudget"
 	}
 	return maxArtifact, "MaxArtifactBytes"
@@ -404,15 +449,23 @@ func readStdinCapped(ctx context.Context, r io.Reader, capBytes int64, capLimit 
 	// cap or deadline failure does not leak it to its next read.
 	done := make(chan struct{})
 	defer close(done)
-	ch := make(chan stdinRead, 1)
+	ch := make(chan stdinRead)
+	ack := make(chan struct{})
 	go func() {
 		defer close(ch)
+		tmp := make([]byte, 64<<10)
 		for {
-			buf := make([]byte, 1<<20)
-			n, err := r.Read(buf)
+			n, err := r.Read(tmp)
 			if n > 0 {
 				select {
-				case ch <- stdinRead{buf: buf[:n]}:
+				case ch <- stdinRead{buf: tmp[:n]}:
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				}
+				select {
+				case <-ack:
 				case <-done:
 					return
 				case <-ctx.Done():
@@ -448,12 +501,17 @@ func readStdinCapped(ctx context.Context, r io.Reader, capBytes int64, capLimit 
 				return nil, &stdinCapError{limit: capLimit, value: total, cap: capBytes}
 			}
 			buf = append(buf, c.buf...)
+			select {
+			case ack <- struct{}{}:
+			case <-ctx.Done():
+				return nil, errStdinDeadline
+			}
 		}
 	}
 }
 
 // scanOne opens, hashes and scans one entry, releasing its budget when done.
-func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limits, b *memBudget, att *malice.Index) report.ArtifactSummary {
+func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limits, b *memBudget, att *malice.Index) scanOutcome {
 	name := e.Display
 	if name == "" {
 		name = e.Path
@@ -462,7 +520,7 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 
 	if e.Skip != nil {
 		sum.Error = e.Skip.Error()
-		return sum
+		return scanOutcome{sum: sum}
 	}
 
 	var (
@@ -475,40 +533,45 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 		root, rerr = os.OpenRoot(e.RootDir)
 		if rerr != nil {
 			sum.Error = rerr.Error()
-			return sum
+			return scanOutcome{sum: sum}
 		}
 		defer root.Close()
 		f, oerr := root.Open(e.Rel)
 		if oerr != nil {
 			sum.Error = oerr.Error()
-			return sum
+			return scanOutcome{sum: sum}
 		}
 		opened = f
 		fi, serr := f.Stat()
 		if serr != nil {
 			_ = f.Close()
 			sum.Error = serr.Error()
-			return sum
+			return scanOutcome{sum: sum}
 		}
 		if !fi.Mode().IsRegular() {
 			_ = f.Close()
 			sum.Error = notRegular(e.Path, fi.Mode()).Error()
-			return sum
+			return scanOutcome{sum: sum}
 		}
 		before = fi
 		sum.Size = fi.Size()
 	}
 
-	fi, err := os.Lstat(e.Path)
+	var (
+		fi  os.FileInfo
+		err error
+	)
 	if opened != nil {
-		fi, err = opened.Stat()
+		fi = before
+	} else {
+		fi, err = os.Lstat(e.Path)
 	}
 	if err != nil {
 		if opened != nil {
 			_ = opened.Close()
 		}
 		sum.Error = err.Error()
-		return sum
+		return scanOutcome{sum: sum}
 	}
 	// A symlink is followed (the hf-cache layout is built out of relative
 	// symlinks); the containment check happens in the hf-cache expander, which
@@ -517,21 +580,25 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	if opened == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if st, serr := os.Stat(e.Path); serr == nil {
 			size = st.Size()
+			// Record the resolved target's Stat as `before` so the post-scan
+			// comparison against os.Stat(e.Path) compares target-to-target
+			// instead of comparing the symlink's Lstat against the target's Stat.
+			before = st
 			if st.IsDir() {
 				// A directory reached through an entry list is not an artifact;
 				// there is nothing to read and the contents are walked under their
 				// own path.
-				return sum
+				return scanOutcome{sum: sum}
 			}
 			// A link that resolves to a pipe, a socket or a device node is the
 			// same hang as a pipe found directly: report it instead of opening it.
 			if !st.Mode().IsRegular() {
 				sum.Error = notRegular(e.Path, st.Mode()).Error()
-				return sum
+				return scanOutcome{sum: sum}
 			}
 		} else {
 			sum.Error = serr.Error()
-			return sum
+			return scanOutcome{sum: sum}
 		}
 	}
 	sum.Size = size
@@ -540,7 +607,7 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	}
 	if opened == nil && fi.Mode()&os.ModeSymlink == 0 && !fi.Mode().IsRegular() {
 		sum.Error = notRegular(e.Path, fi.Mode()).Error()
-		return sum
+		return scanOutcome{sum: sum}
 	}
 
 	// The large-artifact slot is acquired before the byte budget: a task holding
@@ -548,20 +615,26 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 	// because byte holders are already running and will release.
 	if size >= largeArtifact {
 		if !b.acquireLarge(ctx) {
+			if opened != nil {
+				_ = opened.Close()
+			}
 			sum.Error = "scan deadline exceeded while waiting for a large-artifact slot"
-			return sum
+			return scanOutcome{sum: sum}
 		}
 		defer b.releaseLarge()
 	}
 	if !b.acquire(ctx, size) {
+		if opened != nil {
+			_ = opened.Close()
+		}
 		sum.Error = "scan deadline exceeded while waiting for the memory budget"
-		return sum
+		return scanOutcome{sum: sum}
 	}
 	defer b.release(size)
 
 	var src source.Source
 	if opened != nil {
-		src, err = source.OpenFile(opened, e.Path, l)
+		src, err = source.OpenFile(opened, name, l)
 	} else {
 		src, err = source.Open(e.Path, l)
 	}
@@ -573,7 +646,7 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 			limits.Emit(sess.Collector.For(name), limits.RuleArtifact, "MaxArtifactBytes", size, l.MaxArtifactBytes, e.Path)
 		}
 		sum.Error = err.Error()
-		return sum
+		return scanOutcome{sum: sum}
 	}
 	defer src.Close()
 
@@ -628,20 +701,15 @@ func scanOne(ctx context.Context, sess *artifact.Session, e Entry, l limits.Limi
 		sess.Collector.For(name).EmitExtra(artifact.RuleParseFailed, 0, perr.Error(), nil)
 	}
 	sum.SubFormat = subFormatFor(perr, digestErr)
-	if e.Digest != "" {
-		// A guard, not the primary mechanism: the hf-cache expander already
-		// de-duplicates a cache on the resolved blob path, so this normally never
-		// fires. It stays because one map lookup per artifact is cheap insurance
-		// for any future walker that yields the same bytes twice.
-		//
+	var dedupKey string
+	if e.Digest != "" && sum.Error == "" {
 		// The dedup key is the digest *and* its scope, so a prefix digest of a
 		// huge blob can never collide with the full digest of a small one.
-		key := scope + ":" + e.Digest
-		if prev, first := sess.MarkSeen(key, name); !first {
-			sum.SubFormat = "duplicate of " + prev
-		}
+		// Actual MarkSeen assignment happens after worker join in sorted path
+		// order so duplicate labels are deterministic.
+		dedupKey = scope + ":" + e.Digest
 	}
-	return sum
+	return scanOutcome{sum: sum, dedupKey: dedupKey}
 }
 
 // subFormatFor describes why a row was not fully scanned. A parse failure and a
@@ -830,26 +898,33 @@ func bindRoot(e Entry, root string) Entry {
 	if root == "" {
 		return e
 	}
-	rel, err := filepath.Rel(root, e.Path)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	croot := canonicalPath(root)
+	cpath := canonicalPath(e.Path)
+	rel, err := filepath.Rel(croot, cpath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return e
 	}
-	e.RootDir, e.Rel = root, rel
+	e.RootDir, e.Rel = croot, rel
 	return e
 }
 
 // expand turns the configuration into a sorted work list. The first path-expansion
 // error is returned alongside the list so the CLI can exit 3 for a path the user
 // named and could not be opened, while still scanning everything else.
-func expand(cfg Config) ([]Entry, error) {
+func expand(ctx context.Context, cfg Config) ([]Entry, bool, error) {
 	if len(cfg.Entries) > 0 {
 		out := append([]Entry(nil), cfg.Entries...)
 		sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-		return dedupeEntries(out), nil
+		return dedupeEntries(out), ctx.Err() != nil, nil
 	}
 	var out []Entry
 	var firstErr error
+	cancelled := false
 	for _, p := range cfg.Paths {
+		if ctx.Err() != nil {
+			cancelled = true
+			break
+		}
 		display := p
 		lfi, lerr := os.Lstat(p)
 		if lerr != nil {
@@ -894,16 +969,21 @@ func expand(cfg Config) ([]Entry, error) {
 			out = append(out, e)
 			continue
 		}
-		// The root a link must stay inside. EvalSymlinks on the named directory so
-		// that scanning a path that is itself reached through a link (a mounted
-		// cache) compares resolved targets, not spellings.
-		root, rerr := filepath.EvalSymlinks(p)
-		if rerr != nil {
-			root = filepath.Clean(p)
-		}
+		// Keep both the walked directory spelling (for computing Rel against the
+		// paths WalkDir yields) and the canonical root (for containment checks and
+		// os.OpenRoot). Using EvalSymlinks(p) as the base of filepath.Rel broke
+		// whenever p had a symlinked ancestor (e.g. /tmp/link/repo or macOS /tmp):
+		// WalkDir yields /tmp/link/repo/file, whose Rel against /tmp/real/repo
+		// started with ".." and os.Root rejected every file.
+		walkRoot := filepath.Clean(p)
+		root = canonicalPath(p)
 		walkErr := filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
+			if ctx.Err() != nil {
+				cancelled = true
+				return filepath.SkipAll
+			}
 			if err != nil {
-				out = append(out, Entry{Path: path, Display: path})
+				out = append(out, Entry{Path: path, Display: path, Skip: err})
 				return nil
 			}
 			info, ierr := d.Info()
@@ -952,15 +1032,18 @@ func expand(cfg Config) ([]Entry, error) {
 						Skip: symlinkEscape(path, target)})
 					return nil
 				}
-				// A regular in-root target is opened through os.Root at the link's
-				// own spelling: the target was resolved for the containment decision,
-				// but a writer can replace the link between that check and the open,
-				// and os.Root refuses a link that leaves the root. A non-regular
-				// target keeps the pathname open so scanOne rejects it by mode —
-				// os.Root.Open would block on a FIFO — and -symlinks follow keeps the
-				// resolved target, which is the policy the operator asked for.
+				// A regular in-root target is opened through os.Root: relative
+				// symlinks are opened at the link's own spelling so os.Root catches
+				// a replacement between walk and open; absolute symlinks that stay
+				// inside root are opened at the target's root-relative path because
+				// os.Root refuses absolute symlinks even when the target is in-root.
 				if cfg.Symlinks == SymlinkRoot && serr == nil && st.Mode().IsRegular() {
-					if rel, rerr := filepath.Rel(root, path); rerr == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+					if raw, rlerr := os.Readlink(path); rlerr == nil && filepath.IsAbs(raw) {
+						if relTarget, rerr := filepath.Rel(root, canonicalPath(target)); rerr == nil && relTarget != "." && relTarget != ".." && !strings.HasPrefix(relTarget, ".."+string(filepath.Separator)) {
+							out = append(out, Entry{Path: path, Display: path, RootDir: root, Rel: relTarget})
+							return nil
+						}
+					} else if rel, rerr := filepath.Rel(walkRoot, path); rerr == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 						out = append(out, Entry{Path: path, Display: path, RootDir: root, Rel: rel})
 						return nil
 					}
@@ -968,7 +1051,7 @@ func expand(cfg Config) ([]Entry, error) {
 				out = append(out, Entry{Path: target, Display: path})
 				return nil
 			}
-			rel, rerr := filepath.Rel(root, path)
+			rel, rerr := filepath.Rel(walkRoot, path)
 			if rerr != nil {
 				rel = filepath.Base(path)
 			}
@@ -978,16 +1061,34 @@ func expand(cfg Config) ([]Entry, error) {
 		if walkErr != nil && firstErr == nil {
 			firstErr = walkErr
 		}
+		if cancelled {
+			break
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return dedupeEntries(out), firstErr
+	return dedupeEntries(out), cancelled, firstErr
 }
 
-// withinRoot reports whether target resolves inside root. Both are absolute or
-// both relative to the same working directory, because root came from the same
-// argument the walk started from.
+// canonicalPath resolves p to an absolute, symlink-free path where possible so
+// containment comparisons do not fail when one side is relative and the other is
+// absolute (for example, an absolute symlink inside a relative scan root).
+func canonicalPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
+}
+
+// withinRoot reports whether target resolves inside root. Both are canonicalized
+// (absolute + symlinks resolved) so a relative root and an absolute target
+// compare cleanly.
 func withinRoot(root, target string) bool {
-	rel, err := filepath.Rel(root, target)
+	croot := canonicalPath(root)
+	ctarget := canonicalPath(target)
+	rel, err := filepath.Rel(croot, ctarget)
 	if err != nil {
 		return false
 	}

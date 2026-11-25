@@ -289,6 +289,9 @@ func TestRunStdinDeadlineInterruptsBlockedProducer(t *testing.T) {
 	if res.Unreadable != 1 {
 		t.Fatalf("unreadable = %d, want 1 (the CLI exits 3 for this)", res.Unreadable)
 	}
+	if !res.Cancelled {
+		t.Fatal("res.Cancelled = false, want true when stdin deadline fires")
+	}
 }
 
 // TestRunAdmitsArtifactLargerThanTheWholeBudget pins the documented behaviour:
@@ -500,10 +503,10 @@ func TestExpandBindsAnInRootSymlinkToTheRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "weights.bin")
-	if err := os.Symlink(target, link); err != nil {
+	if err := os.Symlink("real.bin", link); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	entries, err := expand(Config{Paths: []string{dir}, Limits: limits.Default()})
+	entries, _, err := expand(context.Background(), Config{Paths: []string{dir}, Limits: limits.Default()})
 	if err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -547,5 +550,218 @@ func TestRootBoundEntryRefusesAnEscapingLink(t *testing.T) {
 	}
 	if len(res.Collector.Findings()) != 0 {
 		t.Fatalf("the escaping target was scanned: %v", res.Collector.Findings())
+	}
+}
+
+// TestRunSymlinkedAncestorDirectory pins that scanning a directory reached
+// through a symlinked ancestor (e.g. /tmp/link/repo or macOS /tmp/...) succeeds
+// rather than failing every file with "path escapes from parent".
+func TestRunSymlinkedAncestorDirectory(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real", "repo")
+	write(t, realDir, "sub/a.pkl", []byte("\x80\x04N."))
+	linkParent := filepath.Join(base, "link")
+	if err := os.Symlink(filepath.Join(base, "real"), linkParent); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	res, err := Run(context.Background(), Config{
+		Paths:  []string{filepath.Join(linkParent, "repo")},
+		Limits: limits.Default(),
+		Jobs:   2,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Unreadable != 0 {
+		t.Fatalf("Unreadable = %d, artifacts = %+v", res.Unreadable, res.Artifacts)
+	}
+	if len(res.Artifacts) != 1 || res.Artifacts[0].Format != "pickle" {
+		t.Fatalf("artifacts = %+v, want 1 pickle", res.Artifacts)
+	}
+}
+
+// TestRunAcceptsAbsoluteInRootSymlinkFromRelativeRoot pins that an absolute
+// symlink whose target stays inside a relative scan root (./repo/b.txt ->
+// $PWD/repo/a.txt) is accepted as in-root both via directory scan and direct
+// path scan.
+func TestRunAcceptsAbsoluteInRootSymlinkFromRelativeRoot(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	aPath := write(t, repo, "a.txt", []byte("hello world\n"))
+	bPath := filepath.Join(repo, "b.txt")
+	if err := os.Symlink(aPath, bPath); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(base); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origWD) }()
+
+	for _, target := range []string{"./repo", "./repo/b.txt"} {
+		res, err := Run(context.Background(), Config{Paths: []string{target}, Limits: limits.Default()})
+		if err != nil {
+			t.Fatalf("Run(%q): %v", target, err)
+		}
+		if res.Unreadable != 0 {
+			t.Fatalf("Run(%q): Unreadable = %d, artifacts = %+v", target, res.Unreadable, res.Artifacts)
+		}
+		for _, f := range res.Collector.Findings() {
+			if f.RuleID == rulePathMutated.ID {
+				t.Fatalf("Run(%q): unexpected false mutation finding: %+v", target, f)
+			}
+		}
+	}
+}
+
+// TestRunSymlinkFollowNoFalseMutation pins that scanning a symlink without
+// os.Root (SymlinkFollow) compares target Stat against target Stat rather than
+// symlink Lstat against target Stat, avoiding false SC4N-PATH-ARTIFACT-MUTATED.
+func TestRunSymlinkFollowNoFalseMutation(t *testing.T) {
+	dir := t.TempDir()
+	target := write(t, dir, "real.txt", []byte("longer than the symlink path payload\n"))
+	link := filepath.Join(dir, "l.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	res, err := Run(context.Background(), Config{
+		Entries:  []Entry{{Path: link, Display: link}},
+		Limits:   limits.Default(),
+		Symlinks: SymlinkFollow,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Unreadable != 0 {
+		t.Fatalf("Unreadable = %d, artifacts = %+v", res.Unreadable, res.Artifacts)
+	}
+	for _, f := range res.Collector.Findings() {
+		if f.RuleID == rulePathMutated.ID {
+			t.Fatalf("false mutation finding on symlink: %+v", f)
+		}
+	}
+}
+
+// TestRunRootBoundEntryUsesDisplayNameAsSourceName pins that -hf-cache entries
+// (where Path is blobs/<sha> and Display is snapshots/<rev>/modeling_evil.py)
+// pass Display to source.OpenFile so extension-aware parsers see the snapshot
+// filename rather than the opaque blob digest.
+func TestRunRootBoundEntryUsesDisplayNameAsSourceName(t *testing.T) {
+	dir := t.TempDir()
+	blobRel := filepath.Join("models--o--r", "blobs", strings.Repeat("a", 64))
+	blobPath := write(t, dir, blobRel, []byte("import os\nos.system('id')\n"))
+	display := "models--o--r/snapshots/" + strings.Repeat("1", 40) + "/modeling_evil.py"
+
+	res, err := Run(context.Background(), Config{
+		Entries: []Entry{{
+			Path:    blobPath,
+			Display: display,
+			RootDir: dir,
+			Rel:     filepath.ToSlash(blobRel),
+		}},
+		Limits: limits.Default(),
+		Jobs:   1,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Unreadable != 0 {
+		t.Fatalf("Unreadable = %d, artifacts = %+v", res.Unreadable, res.Artifacts)
+	}
+	if len(res.Artifacts) != 1 || res.Artifacts[0].Format != "python" {
+		t.Fatalf("format = %+v, want python via Display name", res.Artifacts)
+	}
+}
+
+func TestRunUnreadableSubdirectoryReportsPermissionDenied(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores chmod 000")
+	}
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "locked")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(sub, 0o755) }()
+
+	res, err := Run(context.Background(), Config{Paths: []string{dir}, Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Unreadable != 1 {
+		t.Fatalf("Unreadable = %d, want 1", res.Unreadable)
+	}
+	if len(res.Artifacts) != 1 || strings.Contains(res.Artifacts[0].Error, "special file") ||
+		!strings.Contains(strings.ToLower(res.Artifacts[0].Error), "permission denied") {
+		t.Fatalf("unreadable subdir error = %q, want permission denied", res.Artifacts[0].Error)
+	}
+}
+
+func TestExpandCancelsOnContextDone(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.txt", []byte("hi"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := Run(ctx, Config{Paths: []string{dir}, Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Cancelled {
+		t.Fatal("expected res.Cancelled = true for pre-cancelled context")
+	}
+}
+
+func TestNoteFindingsCapUsesConfigMaxFindingsAndRejectsNegative(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.pkl", []byte("\x80\x04\x8c\x02os\x8c\x06system\x93\x8c\x02id\x85\x52."))
+	write(t, dir, "b.pkl", []byte("\x80\x04\x8c\x02os\x8c\x06system\x93\x8c\x02id\x85\x52."))
+
+	if _, err := Run(context.Background(), Config{Paths: []string{dir}, Limits: limits.Default(), MaxFindings: -1}); err == nil {
+		t.Fatal("negative MaxFindings was accepted")
+	}
+	res, err := Run(context.Background(), Config{Paths: []string{dir}, Limits: limits.Default(), MaxFindings: 1})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, f := range res.Collector.Findings() {
+		if f.RuleID == "SC4N-LIMIT-FINDINGS" {
+			if f.Extra["cap"] != "1" {
+				t.Fatalf("cap = %q, want 1", f.Extra["cap"])
+			}
+			return
+		}
+	}
+	t.Fatalf("no SC4N-LIMIT-FINDINGS emitted; findings=%v", res.Collector.Findings())
+}
+
+func TestMarkSeenDuplicateIsDeterministicAndPreservesSubFormat(t *testing.T) {
+	dir := t.TempDir()
+	p1 := write(t, dir, "first.bin", []byte("same bytes"))
+	p2 := write(t, dir, "second.bin", []byte("same bytes"))
+	entries := []Entry{
+		{Path: p2, Display: "z_second.bin", Digest: "deadbeef"},
+		{Path: p1, Display: "a_first.bin", Digest: "deadbeef"},
+	}
+	// Run across multiple trials with parallel workers to verify deterministic winner.
+	for range 10 {
+		res, err := Run(context.Background(), Config{Entries: entries, Limits: limits.Default(), Jobs: 4})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(res.Artifacts) != 2 {
+			t.Fatalf("artifacts = %d, want 2", len(res.Artifacts))
+		}
+		if res.Artifacts[0].Path != "a_first.bin" || res.Artifacts[0].SubFormat != "" {
+			t.Fatalf("first = %+v, want a_first.bin with empty SubFormat", res.Artifacts[0])
+		}
+		if res.Artifacts[1].Path != "z_second.bin" || res.Artifacts[1].SubFormat != "duplicate of a_first.bin" {
+			t.Fatalf("second = %+v, want duplicate of a_first.bin", res.Artifacts[1])
+		}
 	}
 }
