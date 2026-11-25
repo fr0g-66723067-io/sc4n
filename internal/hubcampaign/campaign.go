@@ -391,9 +391,10 @@ func localName(s string) bool {
 	return filepath.IsLocal(s)
 }
 
-// forEach runs fn for every index with Jobs workers, stopping the launch loop at
-// the first error but letting running work finish. It returns the first error in
-// index order, so a failure is reported deterministically.
+// forEach runs fn for every index with Jobs workers, stopping the launch loop
+// on context cancellation while letting running work finish. It returns the
+// first error in index order (or ctx.Err() if cancelled), so failures are
+// reported deterministically.
 func forEach(ctx context.Context, jobs, n int, fn func(i int) error) error {
 	if jobs < 1 {
 		jobs = 1
@@ -402,19 +403,32 @@ func forEach(ctx context.Context, jobs, n int, fn func(i int) error) error {
 	sem := make(chan struct{}, jobs)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
+		if err := ctx.Err(); err != nil {
+			errs[i] = err
+			break
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			errs[i] = ctx.Err()
+			goto wait
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			errs[i] = fn(i)
 		}(i)
 	}
+wait:
 	wg.Wait()
 	for _, err := range errs {
 		if err != nil {
 			return err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return nil
 }

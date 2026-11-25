@@ -30,11 +30,16 @@ jobs:
       - name: release gate
         run: make release-gate
 
+      # Prove the tree still builds and passes under GOEXPERIMENT=simd and its
+      # emulated portable path (GODEBUG=simd=0).
+      - name: simd gate
+        run: make test-simd
+
       # The scan path is stdlib-only by design; these are the other release
       # targets a user may build for.
       - name: cross-build
         run: |
-          for target in linux/arm64 darwin/arm64 windows/amd64; do
+          for target in linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
               go build -trimpath -o /dev/null ./cmd/sc4n
           done

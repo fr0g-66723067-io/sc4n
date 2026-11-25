@@ -55,6 +55,7 @@ const (
 	defaultTimeout = 60 * time.Second
 	maxAttempts    = 4
 	retryBaseDelay = 250 * time.Millisecond
+	maxRetryAfter  = 60 * time.Second
 )
 
 // New validates cfg and returns a client.
@@ -67,8 +68,16 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hubapi: base URL: %w", err)
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname())) {
+	if u.Host == "" || u.Hostname() == "" {
+		return nil, fmt.Errorf("hubapi: base URL %q must include a host", raw)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && !(scheme == "http" && isLoopback(u.Hostname())) {
 		return nil, fmt.Errorf("hubapi: base URL %q must be https (http is allowed only for a loopback host)", raw)
+	}
+	tok := strings.TrimSpace(cfg.Token)
+	if strings.ContainsAny(tok, "\r\n") {
+		return nil, errors.New("hubapi: token contains CR or LF")
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
@@ -88,27 +97,45 @@ func New(cfg Config) (*Client, error) {
 	}
 	c := &Client{
 		base:    raw,
-		token:   strings.TrimSpace(cfg.Token),
+		token:   tok,
 		ua:      ua,
 		jobs:    jobs,
 		maxBody: maxBody,
 		timeout: timeout,
 	}
+	var transport http.RoundTripper
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr := dt.Clone()
+		tr.MaxIdleConnsPerHost = jobs
+		if tr.MaxIdleConns > 0 && tr.MaxIdleConns < jobs*2 {
+			tr.MaxIdleConns = jobs * 2
+		}
+		transport = tr
+	}
 	first := u.Host
+	firstScheme := scheme
 	// The Hub answers a file download with a redirect to its CDN. The bearer token
-	// is for huggingface.co only; carrying it to another host would hand a
-	// credential to whatever the Location names.
+	// is for huggingface.co only; carrying it to another host or over a downgraded
+	// scheme would hand a credential to whatever the Location names. Redirects must
+	// also satisfy the same HTTPS-only policy as BaseURL.
 	redirect := func(req *http.Request, via []*http.Request) error {
-		if len(via) > 0 && req.URL.Host != first {
+		if req.URL.Host == "" || req.URL.Hostname() == "" {
+			return &permanentError{err: fmt.Errorf("hubapi: refusing redirect to empty host (%q)", req.URL.String())}
+		}
+		rs := strings.ToLower(req.URL.Scheme)
+		if rs != "https" && !(rs == "http" && isLoopback(req.URL.Hostname())) {
+			return &permanentError{err: fmt.Errorf("hubapi: refusing redirect to %s://%s (https required)", req.URL.Scheme, req.URL.Host)}
+		}
+		if req.URL.Host != first || rs != firstScheme {
 			req.Header.Del("Authorization")
 		}
 		if len(via) >= 10 {
-			return errors.New("hubapi: stopped after 10 redirects")
+			return &permanentError{err: errors.New("hubapi: stopped after 10 redirects")}
 		}
 		return nil
 	}
-	c.hc = &http.Client{Timeout: timeout, CheckRedirect: redirect}
-	c.dl = &http.Client{CheckRedirect: redirect}
+	c.hc = &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: redirect}
+	c.dl = &http.Client{Transport: transport, CheckRedirect: redirect}
 	return c, nil
 }
 
@@ -193,13 +220,21 @@ func (c *Client) Top(ctx context.Context, r Rank) ([]RankedModel, error) {
 
 // Scan returns one repo's per-file security verdict.
 func (c *Client) Scan(ctx context.Context, id string) (ScanVerdict, error) {
+	esc, err := escapePath(id)
+	if err != nil {
+		return ScanVerdict{}, fmt.Errorf("hubapi: repo id %q: %w", id, err)
+	}
 	var v ScanVerdict
-	err := c.getJSON(ctx, c.raw("/api/models/"+escapePath(id)+"/scan"), &v)
+	err = c.getJSON(ctx, c.raw("/api/models/"+esc+"/scan"), &v)
 	return v, err
 }
 
 // Files lists a repo's siblings and their sizes.
 func (c *Client) Files(ctx context.Context, id string) ([]RepoFile, error) {
+	esc, err := escapePath(id)
+	if err != nil {
+		return nil, fmt.Errorf("hubapi: repo id %q: %w", id, err)
+	}
 	var info struct {
 		Siblings []struct {
 			RFilename string `json:"rfilename"`
@@ -209,7 +244,7 @@ func (c *Client) Files(ctx context.Context, id string) ([]RepoFile, error) {
 			} `json:"lfs"`
 		} `json:"siblings"`
 	}
-	if err := c.getJSON(ctx, c.raw("/api/models/"+escapePath(id)+"?blobs=true"), &info); err != nil {
+	if err := c.getJSON(ctx, c.raw("/api/models/"+esc+"?blobs=true"), &info); err != nil {
 		return nil, err
 	}
 	out := make([]RepoFile, 0, len(info.Siblings))
@@ -229,13 +264,17 @@ func (c *Client) Files(ctx context.Context, id string) ([]RepoFile, error) {
 // ModelInfo returns a repo's gate mode and state. It costs one request, so the
 // campaign calls it only after a 403.
 func (c *Client) ModelInfo(ctx context.Context, id string) (ModelInfo, error) {
+	esc, err := escapePath(id)
+	if err != nil {
+		return ModelInfo{}, fmt.Errorf("hubapi: repo id %q: %w", id, err)
+	}
 	var raw struct {
 		// gated is `false` or a string ("auto" / "manual"), so it cannot be typed.
 		Gated    any  `json:"gated"`
 		Private  bool `json:"private"`
 		Disabled bool `json:"disabled"`
 	}
-	if err := c.getJSON(ctx, c.raw("/api/models/"+escapePath(id)), &raw); err != nil {
+	if err := c.getJSON(ctx, c.raw("/api/models/"+esc), &raw); err != nil {
 		return ModelInfo{}, err
 	}
 	out := ModelInfo{Private: raw.Private, Disabled: raw.Disabled}
@@ -269,6 +308,14 @@ func (c *Client) ModelInfo(ctx context.Context, id string) (ModelInfo, error) {
 //     that ignores the resume Range (200 instead of 206) is an error, because
 //     appending a second full copy to w would corrupt the file.
 func (c *Client) Download(ctx context.Context, id, path string, off, max int64, w io.Writer) (DownloadResult, error) {
+	escID, err := escapePath(id)
+	if err != nil {
+		return DownloadResult{}, fmt.Errorf("hubapi: repo id %q: %w", id, err)
+	}
+	escPath, err := escapePath(path)
+	if err != nil {
+		return DownloadResult{}, fmt.Errorf("hubapi: file path %q: %w", path, err)
+	}
 	var (
 		written  int64
 		res      DownloadResult
@@ -276,12 +323,7 @@ func (c *Client) Download(ctx context.Context, id, path string, off, max int64, 
 		firstErr error
 	)
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if attempt > 0 {
-			if !sleepContext(ctx, retryBaseDelay<<uint(attempt-1), "") {
-				return res, ctx.Err()
-			}
-		}
-		n, status, err := c.downloadOnce(ctx, id, path, off, max, written, w)
+		n, status, retryAfter, err := c.downloadOnce(ctx, escID, escPath, path, off, max, written, w)
 		res.Status = status
 		written += n
 		res.Bytes = written
@@ -292,18 +334,33 @@ func (c *Client) Download(ctx context.Context, id, path string, off, max int64, 
 		if firstErr == nil {
 			firstErr = err
 		}
+		var pe *permanentError
+		if errors.As(err, &pe) {
+			return res, pe.err
+		}
 		if errors.Is(err, ErrGated) || errors.Is(err, ErrAuth) || errors.Is(err, ErrNotFound) {
 			return res, err
 		}
 		if errors.Is(err, errNoResume) {
 			// The resume was the recovery attempt: report why it was needed, or the
 			// message names the symptom and hides the cause.
-			return res, fmt.Errorf("hubapi: download %s: %v; %w", path, firstErr, errNoResume)
+			if firstErr != nil && !errors.Is(firstErr, errNoResume) {
+				return res, fmt.Errorf("hubapi: download %s: %v; %w", path, firstErr, errNoResume)
+			}
+			return res, fmt.Errorf("hubapi: download %s: %w", path, errNoResume)
 		}
 		if max > 0 && written >= max {
 			// The requested range is complete even though the connection died on
 			// the last read: nothing is missing.
 			return res, nil
+		}
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		if attempt+1 < maxAttempts {
+			if !sleepContext(ctx, retryBaseDelay<<uint(attempt), retryAfter) {
+				return res, ctx.Err()
+			}
 		}
 	}
 	if lastErr == nil {
@@ -312,15 +369,22 @@ func (c *Client) Download(ctx context.Context, id, path string, off, max int64, 
 	return res, lastErr
 }
 
-// errNoResume reports a server that answered a resume Range with the whole file.
+// errNoResume reports a server that answered a Range request with the whole file.
 var errNoResume = errors.New("hubapi: server ignored the resume range")
 
+// permanentError wraps a non-retryable download failure (permanent 4xx status or
+// local io.Writer error) so Download returns immediately without backoff.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
 // downloadOnce performs one attempt, appending at written bytes past off.
-func (c *Client) downloadOnce(ctx context.Context, id, path string, off, max, written int64, w io.Writer) (int64, int, error) {
+func (c *Client) downloadOnce(ctx context.Context, escID, escPath, path string, off, max, written int64, w io.Writer) (int64, int, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.raw("/"+escapePath(id)+"/resolve/main/"+escapePath(path)), nil)
+		c.raw("/"+escID+"/resolve/main/"+escPath), nil)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, "", &permanentError{err: err}
 	}
 	c.auth(req)
 	req.Header.Set("Accept-Encoding", "identity")
@@ -342,25 +406,34 @@ func (c *Client) downloadOnce(ctx context.Context, id, path string, off, max, wr
 	resp, err := doRequest(dctx, c.dl, req)
 	if err != nil {
 		if dctx.Err() != nil && ctx.Err() == nil {
-			return 0, 0, fmt.Errorf("hubapi: download %s: no data for %s", path, c.timeout)
+			return 0, 0, "", fmt.Errorf("hubapi: download %s: no data for %s", path, c.timeout)
 		}
-		return 0, 0, err
+		return 0, 0, "", err
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
-		return 0, resp.StatusCode, statusError(resp, ErrAuth)
+		return 0, resp.StatusCode, "", statusError(resp, ErrAuth)
 	case http.StatusForbidden:
-		return 0, resp.StatusCode, statusError(resp, ErrGated)
+		return 0, resp.StatusCode, "", statusError(resp, ErrGated)
 	case http.StatusNotFound:
-		return 0, resp.StatusCode, ErrNotFound
+		return 0, resp.StatusCode, "", ErrNotFound
 	case http.StatusOK:
-		if cur > off {
-			return 0, resp.StatusCode, errNoResume
+		if cur > 0 {
+			return 0, resp.StatusCode, "", errNoResume
 		}
 	case http.StatusPartialContent:
+	case http.StatusRequestedRangeNotSatisfiable:
+		if off == 0 && max > 0 && written == 0 && strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Range")), "bytes */0") {
+			return 0, resp.StatusCode, "", nil
+		}
+		return 0, resp.StatusCode, "", &permanentError{err: fmt.Errorf("hubapi: download %s: HTTP %d", path, resp.StatusCode)}
 	default:
-		return 0, resp.StatusCode, fmt.Errorf("hubapi: download %s: HTTP %d", path, resp.StatusCode)
+		err := fmt.Errorf("hubapi: download %s: HTTP %d", path, resp.StatusCode)
+		if retryable(resp.StatusCode) {
+			return 0, resp.StatusCode, resp.Header.Get("Retry-After"), err
+		}
+		return 0, resp.StatusCode, "", &permanentError{err: err}
 	}
 
 	var r io.Reader = resp.Body
@@ -373,19 +446,19 @@ func (c *Client) downloadOnce(ctx context.Context, id, path string, off, max, wr
 		rd, rerr := r.Read(buf)
 		if rd > 0 {
 			if _, werr := w.Write(buf[:rd]); werr != nil {
-				return n, resp.StatusCode, werr
+				return n, resp.StatusCode, "", &permanentError{err: werr}
 			}
 			n += int64(rd)
 			idle.Reset(c.timeout)
 		}
 		if rerr == io.EOF {
-			return n, resp.StatusCode, nil
+			return n, resp.StatusCode, "", nil
 		}
 		if rerr != nil {
 			if dctx.Err() != nil && ctx.Err() == nil {
-				return n, resp.StatusCode, fmt.Errorf("hubapi: download %s: no data for %s", path, c.timeout)
+				return n, resp.StatusCode, "", fmt.Errorf("hubapi: download %s: no data for %s", path, c.timeout)
 			}
-			return n, resp.StatusCode, rerr
+			return n, resp.StatusCode, "", rerr
 		}
 	}
 }
@@ -418,6 +491,9 @@ func (c *Client) getJSON(ctx context.Context, raw string, v any) error {
 		if err != nil {
 			return err
 		}
+		if int64(len(body)) > c.maxBody {
+			return fmt.Errorf("hubapi: response exceeds MaxBody (%d bytes)", c.maxBody)
+		}
 		if len(bytes.TrimSpace(body)) == 0 {
 			if attempt+1 < maxAttempts {
 				if !sleepContext(ctx, retryBaseDelay<<uint(attempt), "") {
@@ -428,9 +504,6 @@ func (c *Client) getJSON(ctx context.Context, raw string, v any) error {
 			}
 			return fmt.Errorf("hubapi: GET %s: empty body after %d attempts (the Hub answers 200 with no content while a scan is unavailable; re-run the stage)",
 				req.URL.Path, maxAttempts)
-		}
-		if int64(len(body)) > c.maxBody {
-			return fmt.Errorf("hubapi: response exceeds MaxBody (%d bytes)", c.maxBody)
 		}
 		if err := json.Unmarshal(body, v); err != nil {
 			return fmt.Errorf("hubapi: GET %s: %w", req.URL.Path, err)
@@ -489,7 +562,7 @@ func (c *Client) send(req *http.Request, jsonAccept bool) (*http.Response, error
 }
 
 // do runs one request with the retry policy: only 429 and 5xx are retried, at most
-// maxAttempts times, honouring Retry-After in seconds.
+// maxAttempts times, honouring Retry-After in seconds or HTTP-date form.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -498,7 +571,14 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		}
 		resp, err := c.hc.Do(req)
 		if err != nil {
+			var pe *permanentError
+			if errors.As(err, &pe) {
+				return nil, pe.err
+			}
 			lastErr = err
+			if attempt == maxAttempts-1 || req.Context().Err() != nil {
+				break
+			}
 			if !sleepContext(req.Context(), retryBaseDelay<<uint(attempt), "") {
 				return nil, req.Context().Err()
 			}
@@ -532,11 +612,47 @@ func retryable(status int) bool {
 	return false
 }
 
-// sleepContext waits d, or the Retry-After value when it is a whole number of
-// seconds, and reports false when the context ended first.
+// parseRetryAfter decodes a Retry-After header in delta-seconds or HTTP-date
+// form, capping the result at maxRetryAfter and guarding against int64 overflow.
+func parseRetryAfter(retryAfter string, now time.Time) (time.Duration, bool) {
+	s := strings.TrimSpace(retryAfter)
+	if s == "" {
+		return 0, false
+	}
+	if sec, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if sec < 0 {
+			return 0, false
+		}
+		const maxSec = int64(maxRetryAfter / time.Second)
+		if sec > maxSec {
+			return maxRetryAfter, true
+		}
+		return time.Duration(sec) * time.Second, true
+	}
+	if t, err := http.ParseTime(s); err == nil {
+		wait := t.Sub(now)
+		if wait < 0 {
+			wait = 0
+		}
+		if wait > maxRetryAfter {
+			wait = maxRetryAfter
+		}
+		return wait, true
+	}
+	return 0, false
+}
+
+// sleepContext waits d, or the capped Retry-After value when present, and
+// reports false when the context ended first.
 func sleepContext(ctx context.Context, d time.Duration, retryAfter string) bool {
-	if s, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && s >= 0 {
-		d = time.Duration(s) * time.Second
+	if ra, ok := parseRetryAfter(retryAfter, time.Now()); ok {
+		d = ra
+	}
+	if d > maxRetryAfter {
+		d = maxRetryAfter
+	}
+	if d <= 0 {
+		return ctx.Err() == nil
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -557,15 +673,23 @@ func (c *Client) auth(req *http.Request) {
 
 func (c *Client) raw(path string) string { return c.base + path }
 
-// escapePath escapes each path segment, keeping the separators: repo ids are
-// "owner/name" and file names may contain spaces, '%' or '#', which must reach the
-// Hub encoded rather than altering the URL.
-func escapePath(p string) string {
+// escapePath validates and escapes each path segment, keeping the separators:
+// repo ids are "owner/name" and file names may contain spaces, '%' or '#',
+// which must reach the Hub encoded rather than altering the URL. Empty, "."
+// and ".." segments (and NUL bytes) are rejected so callers cannot traverse
+// authenticated Hub API URLs.
+func escapePath(p string) (string, error) {
+	if p == "" {
+		return "", errors.New("empty path")
+	}
 	parts := strings.Split(p, "/")
 	for i, s := range parts {
+		if s == "" || s == "." || s == ".." || strings.ContainsRune(s, 0) {
+			return "", fmt.Errorf("invalid path segment %q", s)
+		}
 		parts[i] = url.PathEscape(s)
 	}
-	return strings.Join(parts, "/")
+	return strings.Join(parts, "/"), nil
 }
 
 func isLoopback(host string) bool {

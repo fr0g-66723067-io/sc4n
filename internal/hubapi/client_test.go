@@ -375,8 +375,14 @@ func TestEscapePath(t *testing.T) {
 		{"a#b", "a%23b"},
 		{"a%2Fb", "a%252Fb"},
 	} {
-		if got := escapePath(tc.in); got != tc.want {
-			t.Errorf("escapePath(%q) = %q, want %q", tc.in, got, tc.want)
+		got, err := escapePath(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("escapePath(%q) = %q, %v; want %q, nil", tc.in, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"", ".", "..", "org/..", "../etc/passwd", "a/./b", "a//b", "/leading", "trailing/", "a\x00b"} {
+		if got, err := escapePath(bad); err == nil {
+			t.Errorf("escapePath(%q) = %q, nil; want error", bad, got)
 		}
 	}
 }
@@ -650,5 +656,255 @@ func TestTopRequestsTheRanking(t *testing.T) {
 	}
 	if _, err := c.Top(context.Background(), Rank{Sort: "score; drop table"}); err == nil {
 		t.Error("an unknown sort key was requested")
+	}
+}
+
+func TestNewRejectsEmptyHostAndCRLFToken(t *testing.T) {
+	for _, bad := range []string{"https://", "https:///api", "http://"} {
+		if _, err := New(Config{BaseURL: bad}); err == nil {
+			t.Errorf("New(%q) accepted empty host", bad)
+		}
+	}
+	for _, tok := range []string{"abc\r\nX-Injected: 1", "abc\ndef", "abc\rdef"} {
+		if _, err := New(Config{BaseURL: "http://127.0.0.1:1", Token: tok}); err == nil {
+			t.Errorf("New accepted CRLF token %q", tok)
+		}
+	}
+	c, err := New(Config{BaseURL: "http://127.0.0.1:1", Jobs: 16})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr, ok := c.hc.Transport.(*http.Transport)
+	if !ok || tr == nil || tr.MaxIdleConnsPerHost != 16 {
+		t.Fatalf("transport MaxIdleConnsPerHost = %v, want 16", tr)
+	}
+}
+
+func TestRedirectBlocksDowngradeAndStripsAuthOnSchemeChange(t *testing.T) {
+	// 1. Non-loopback http redirect must be blocked.
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://example.invalid/leak", http.StatusFound)
+	}))
+	defer hub.Close()
+	c := testClient(t, hub.URL, "tok")
+	var buf bytes.Buffer
+	if _, err := c.Download(context.Background(), "org/name", "a.bin", 0, 0, &buf); err == nil {
+		t.Fatal("redirect to non-loopback http host was followed")
+	}
+
+	// 2. HTTPS -> HTTP redirect strips Authorization even on loopback/same-host.
+	var httpAuth string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer plain.Close()
+
+	tlsHub := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+"/downgraded", http.StatusFound)
+	}))
+	defer tlsHub.Close()
+
+	tc, err := New(Config{BaseURL: tlsHub.URL, Token: "secret-tok", Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("New TLS: %v", err)
+	}
+	// Trust the httptest TLS certificate while preserving our CheckRedirect.
+	tc.dl.Transport = tlsHub.Client().Transport
+	buf.Reset()
+	if _, err := tc.Download(context.Background(), "org/name", "a.bin", 0, 0, &buf); err != nil {
+		t.Fatalf("TLS->loopback HTTP download: %v", err)
+	}
+	if httpAuth != "" {
+		t.Fatalf("Authorization leaked across HTTPS->HTTP redirect: %q", httpAuth)
+	}
+
+	// Verify same-host scheme downgrade check directly on CheckRedirect.
+	u, _ := url.Parse("http://" + tlsHub.Listener.Addr().String() + "/downgraded")
+	req, _ := http.NewRequest(http.MethodGet, u.String(), nil)
+	req.Header.Set("Authorization", "Bearer secret-tok")
+	viaReq, _ := http.NewRequest(http.MethodGet, tlsHub.URL+"/start", nil)
+	if err := tc.dl.CheckRedirect(req, []*http.Request{viaReq}); err != nil {
+		t.Fatalf("CheckRedirect loopback: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("same-host HTTPS->HTTP redirect kept Authorization: %q", got)
+	}
+}
+
+func TestTraversalPathsRejectedWithoutRequest(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL, "tok")
+	ctx := context.Background()
+
+	if _, err := c.Scan(ctx, "org/../admin"); err == nil {
+		t.Error("Scan accepted .. segment")
+	}
+	if _, err := c.Files(ctx, "./org"); err == nil {
+		t.Error("Files accepted . segment")
+	}
+	if _, err := c.ModelInfo(ctx, "org/.."); err == nil {
+		t.Error("ModelInfo accepted .. segment")
+	}
+	var buf bytes.Buffer
+	if _, err := c.Download(ctx, "org/name", "../secret", 0, 0, &buf); err == nil {
+		t.Error("Download accepted .. file path")
+	}
+	if hits != 0 {
+		t.Fatalf("server received %d requests for invalid traversal paths, want 0", hits)
+	}
+}
+
+func TestDownload416EmptyFileProbe(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Range", "bytes */0")
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL, "")
+	var buf bytes.Buffer
+	res, err := c.Download(context.Background(), "org/name", "empty.txt", 0, 1, &buf)
+	if err != nil {
+		t.Fatalf("Download 416 empty probe: %v", err)
+	}
+	if res.Bytes != 0 || res.Status != http.StatusRequestedRangeNotSatisfiable || hits != 1 {
+		t.Fatalf("res=%+v hits=%d, want 0 bytes, 416, 1 attempt", res, hits)
+	}
+}
+
+func TestDownloadOffGreaterThanZeroRejects200(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("0123456789abcdef"))
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL, "")
+	var buf bytes.Buffer
+	_, err := c.Download(context.Background(), "org/name", "a.bin", 10, 4, &buf)
+	if !errors.Is(err, errNoResume) {
+		t.Fatalf("err = %v, want errNoResume", err)
+	}
+	if buf.Len() != 0 || hits != 1 {
+		t.Fatalf("buf=%d hits=%d, want 0 bytes and 1 attempt", buf.Len(), hits)
+	}
+}
+
+type failWriter struct{ err error }
+
+func (f failWriter) Write(p []byte) (int, error) { return 0, f.err }
+
+func TestDownloadRetryPolicy(t *testing.T) {
+	// 429 with Retry-After: 0 retries and succeeds.
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&n, 1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte("ok"))
+	}))
+	c := testClient(t, srv.URL, "")
+	var buf bytes.Buffer
+	res, err := c.Download(context.Background(), "org/name", "a.bin", 0, 0, &buf)
+	srv.Close()
+	if err != nil || res.Bytes != 2 || n != 2 {
+		t.Fatalf("429 retry: res=%+v err=%v attempts=%d", res, err, n)
+	}
+
+	// Permanent 4xx statuses (400, 416 non-empty, 451) must not retry.
+	for _, status := range []int{http.StatusBadRequest, http.StatusRequestedRangeNotSatisfiable, http.StatusUnavailableForLegalReasons} {
+		var attempts int32
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&attempts, 1)
+			if status == http.StatusRequestedRangeNotSatisfiable {
+				w.Header().Set("Content-Range", "bytes */100")
+			}
+			w.WriteHeader(status)
+		}))
+		cl := testClient(t, s.URL, "")
+		buf.Reset()
+		_, err := cl.Download(context.Background(), "org/name", "a.bin", 200, 10, &buf)
+		s.Close()
+		if err == nil || attempts != 1 {
+			t.Errorf("HTTP %d: err=%v attempts=%d, want immediate failure in 1 attempt", status, err, attempts)
+		}
+	}
+
+	// Local io.Writer error must not retry.
+	var wHits int32
+	wsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&wHits, 1)
+		w.Write([]byte("payload"))
+	}))
+	defer wsrv.Close()
+	diskFull := errors.New("no space left on device")
+	wc := testClient(t, wsrv.URL, "")
+	_, err = wc.Download(context.Background(), "org/name", "a.bin", 0, 0, failWriter{err: diskFull})
+	if !errors.Is(err, diskFull) || wHits != 1 {
+		t.Fatalf("write error: err=%v attempts=%d, want diskFull in 1 attempt", err, wHits)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	if d, ok := parseRetryAfter("5", now); !ok || d != 5*time.Second {
+		t.Errorf("parseRetryAfter(5) = %v, %v", d, ok)
+	}
+	if d, ok := parseRetryAfter("999999999999", now); !ok || d != maxRetryAfter {
+		t.Errorf("parseRetryAfter(huge) = %v, %v; want %v", d, ok, maxRetryAfter)
+	}
+	if d, ok := parseRetryAfter("99999999999999999999999999", now); ok {
+		t.Errorf("parseRetryAfter(overflow) = %v, %v; want false", d, ok)
+	}
+	future := now.Add(15 * time.Second).Format(http.TimeFormat)
+	if d, ok := parseRetryAfter(future, now); !ok || d != 15*time.Second {
+		t.Errorf("parseRetryAfter(HTTP-date +15s) = %v, %v", d, ok)
+	}
+	farFuture := now.Add(5 * time.Minute).Format(http.TimeFormat)
+	if d, ok := parseRetryAfter(farFuture, now); !ok || d != maxRetryAfter {
+		t.Errorf("parseRetryAfter(HTTP-date +5m) = %v, %v; want %v", d, ok, maxRetryAfter)
+	}
+	past := now.Add(-10 * time.Second).Format(http.TimeFormat)
+	if d, ok := parseRetryAfter(past, now); !ok || d != 0 {
+		t.Errorf("parseRetryAfter(past HTTP-date) = %v, %v; want 0", d, ok)
+	}
+}
+
+func TestTokenRejectsNonENOENTAndCRLF(t *testing.T) {
+	home := t.TempDir()
+	// Make $HF_HOME/token a directory so os.ReadFile fails with EISDIR (non-ENOENT).
+	if err := os.Mkdir(filepath.Join(home, "token"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HF_HOME", home)
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("HUGGING_FACE_HUB_TOKEN", "")
+	if _, err := Token(""); err == nil {
+		t.Fatal("Token silently swallowed non-ENOENT error on $HF_HOME/token")
+	}
+
+	// Reject embedded CR/LF in env var and file.
+	t.Setenv("HF_TOKEN", "bad\r\nX-Injected: 1")
+	if _, err := Token(""); err == nil {
+		t.Fatal("Token accepted CRLF in HF_TOKEN")
+	}
+	t.Setenv("HF_TOKEN", "")
+
+	badFile := filepath.Join(t.TempDir(), "tok")
+	if err := os.WriteFile(badFile, []byte("line1\nline2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Token(badFile); err == nil {
+		t.Fatal("Token accepted multi-line token file")
 	}
 }

@@ -54,15 +54,11 @@ const (
 
 	// The container's stdout/stderr and the files it leaves behind are
 	// attacker-influenced: a payload can print forever or write a huge trace.
-	// The harness keeps a bounded tail so a hostile load cannot exhaust the
-	// host's memory before it is graded.
+	// The harness bounds docker output and streams the trace from the start up
+	// to maxTraceBytes so early effects cannot be pushed out by tail flooding.
 	maxDockerOutput = 64 << 10
-	// The tail is what the parser reads; the head is where the harness's own
-	// exec is, and it is read on its own so the pid is known even when a payload
-	// has pushed that line out of the tail.
-	maxTraceBytes     = 8 << 20
-	maxTraceHeadBytes = 64 << 10
-	maxResultBytes    = 1 << 20
+	maxTraceBytes   = 64 << 20
+	maxResultBytes  = 1 << 20
 )
 
 // cappedBuffer accepts every write (so the child never blocks on a full pipe)
@@ -149,6 +145,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		addRun(&doc.Runs, byDigest, *r)
 	}
 	sortRuns(doc.Runs)
+	if len(doc.Runs) == 0 && failed > 0 {
+		fmt.Fprintf(stderr, "sc4nconfirm: %d artifact(s) could not be confirmed; no attestation written\n", failed)
+		return exitFailed
+	}
 	if err := writeAttestation(o.out, doc); err != nil {
 		fmt.Fprintf(stderr, "sc4nconfirm: %v\n", err)
 		return exitFailed
@@ -176,9 +176,8 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 	// A model directory is attested through the config.json that names its
 	// code: that file is the artifact a scan reports SC4N-CONFIG-AUTO-MAP on, and
 	// the digest key is what lets the demonstration land on it. A directory
-	// without a config.json has no digest of its own, so its run informs a human
-	// and can never be merged - leaving SHA256 empty keeps that visible instead
-	// of colliding with another artifact.
+	// without a config.json cannot produce a valid 64-hex attestation entry and
+	// would cause malice.Load to reject the entire attestation file.
 	var digest string
 	switch {
 	case fi.Mode().IsRegular():
@@ -187,11 +186,13 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 			return nil, err
 		}
 	case fi.IsDir():
-		if cfg := filepath.Join(abs, "config.json"); isRegularFile(cfg) {
-			digest, err = fileDigest(cfg)
-			if err != nil {
-				return nil, err
-			}
+		cfg := filepath.Join(abs, "config.json")
+		if !isRegularFile(cfg) {
+			return nil, fmt.Errorf("%s has no config.json to key an attestation digest on", artifact)
+		}
+		digest, err = fileDigest(cfg)
+		if err != nil {
+			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("%s is neither a regular file nor a directory", artifact)
@@ -222,6 +223,9 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 	}
 
 	name := fmt.Sprintf("sc4nconfirm-%d-%d", os.Getpid(), index)
+	// Drop every default Linux capability and grant back only what the root
+	// entrypoint/strace wrapper needs before load.py drops to uid 65534 (which
+	// clears all capabilities before touching the artifact).
 	runArgs := []string{
 		"run", "--rm", "--name", name,
 		"--network=none", "--read-only",
@@ -229,7 +233,12 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 		"--tmpfs", "/home/worker:rw,size=64m",
 		"--memory", "2g", "--pids-limit", "128", "--cpus", "2",
 		"--ulimit", "fsize=67108864:67108864",
-		"--cap-add", "SYS_PTRACE", "--security-opt", "no-new-privileges",
+		"--cap-drop", "ALL",
+		"--cap-add", "SYS_PTRACE",
+		"--cap-add", "SETUID",
+		"--cap-add", "SETGID",
+		"--cap-add", "CHOWN",
+		"--security-opt", "no-new-privileges",
 		"-v", mount, "-v", outDir + ":/out",
 		o.image, target, "/tmp/result.json",
 	}
@@ -270,22 +279,11 @@ func confirmOne(o options, artifact string, index int, stderr io.Writer) (*malic
 		r.Error = res.Error
 		r.MissingModules = res.MissingModules
 	}
-	// The harness exec is identified by pid, so the head of the trace is read
-	// separately from the tail the parser sees: a payload can push the harness's
-	// own exec out of the last 8 MiB, and position alone would then drop a payload
-	// exec that copied the loader's command line.
+	// Stream-parse /out/trace from the start up to maxTraceBytes so a payload
+	// that floods quiet syscalls at the tail cannot erase earlier effects.
 	tracePath := filepath.Join(outDir, "trace")
-	harness := ""
-	if head, _, herr := readCappedFile(tracePath, maxTraceHeadBytes); herr == nil {
-		harness = harnessExecPID(string(head))
-	}
-	if trace, terr := readTail(tracePath, maxTraceBytes); terr == nil {
-		applyTrace(r, trace, harness)
-	} else if r.Error == "" {
+	if terr := applyTraceFile(r, tracePath, maxTraceBytes); terr != nil && r.Error == "" {
 		r.Error = "trace: " + terr.Error()
-	}
-	if r.Error == "" && r.Loaded {
-		r.Error = ""
 	}
 	return r, nil
 }
@@ -379,38 +377,6 @@ func readCappedFile(path string, max int) ([]byte, bool, error) {
 		return b[:max], true, nil
 	}
 	return b, false, nil
-}
-
-// readTail returns the last max bytes of path, suffixing a truncation marker to
-// the returned text when the file was larger. The trace is attacker-influenced
-// and can be arbitrarily large; only the tail is needed because a load's last
-// effects are the ones that matter when the file was cut short.
-func readTail(path string, max int64) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	off := fi.Size() - max
-	if off < 0 {
-		off = 0
-	}
-	if _, err := f.Seek(off, io.SeekStart); err != nil {
-		return "", err
-	}
-	b, err := io.ReadAll(io.LimitReader(f, max))
-	if err != nil {
-		return "", err
-	}
-	s := string(b)
-	if fi.Size() > max {
-		s += fmt.Sprintf("\n; trace truncated at %d bytes", max)
-	}
-	return s, nil
 }
 
 func isRegularFile(path string) bool {

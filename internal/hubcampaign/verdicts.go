@@ -43,22 +43,33 @@ func Verdicts(ctx context.Context, o Options) ([]RepoVerdict, error) {
 	if !o.Refresh {
 		var cached VerdictsFile
 		err := readJSON(o.path(fileVerdicts), &cached)
-		if err == nil && cached.Version == Version && cached.Level == o.Level {
+		if err == nil && cached.Version == Version && cached.Level == o.Level && verdictsMatchCandidates(cached.Repos, cands.Repos) {
 			progress(o, "verdicts: %d at level %s (cached, -refresh to re-probe)",
 				countLevel(cached.Repos, o.Level), o.Level)
 			return cached.Repos, nil
 		}
-		if err == nil && cached.Level != o.Level {
-			// The probe records every level, so a re-probe is only needed because
-			// the *file* is stamped with the level it was probed for, and Fetch
-			// refuses a mismatch. Re-probe rather than leaving a dead end.
-			progress(o, "verdicts: re-probing for level %s (file is stamped %s)", o.Level, cached.Level)
+		if err == nil && cached.Version == Version {
+			if cached.Level != o.Level {
+				// The probe records every level, so a re-probe is only needed because
+				// the *file* is stamped with the level it was probed for, and Fetch
+				// refuses a mismatch. Re-probe rather than leaving a dead end.
+				progress(o, "verdicts: re-probing for level %s (file is stamped %s)", o.Level, cached.Level)
+			} else {
+				progress(o, "verdicts: candidate set changed, re-probing")
+			}
 		}
 	}
 
 	repos := make([]RepoVerdict, len(cands.Repos))
 	err := forEach(ctx, o.Jobs, len(cands.Repos), func(i int) error {
-		repos[i] = probe(ctx, o.Client, cands.Repos[i].ID)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		v := probe(ctx, o.Client, cands.Repos[i].ID)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		repos[i] = v
 		return nil
 	})
 	if err != nil {
@@ -139,6 +150,30 @@ func hasLevel(r RepoVerdict, level string) bool {
 		}
 	}
 	return false
+}
+
+// verdictsMatchCandidates reports whether a cached verdicts file covers the
+// exact same candidate repo set as candidates.json (order-independent).
+func verdictsMatchCandidates(cached []RepoVerdict, cands []Candidate) bool {
+	if len(cached) != len(cands) {
+		return false
+	}
+	want := make([]string, len(cands))
+	for i, c := range cands {
+		want[i] = c.ID
+	}
+	sort.Strings(want)
+	got := make([]string, len(cached))
+	for i, r := range cached {
+		got[i] = r.ID
+	}
+	sort.Strings(got)
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // selectedRepos returns the repos with at least one file at the level, in id

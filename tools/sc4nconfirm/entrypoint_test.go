@@ -62,4 +62,13 @@ func TestEntrypointPassesTheLoaderResultPathOnce(t *testing.T) {
 	if len(argv) < 2 || argv[len(argv)-2] != "/w/model.pkl" || argv[len(argv)-1] != "/tmp/result.json" {
 		t.Fatalf("load.py argv tail = %q, want target and result once", argv)
 	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "-o /out/trace") {
+		t.Fatalf("strace must write directly to /out/trace; got %q", joined)
+	}
+	for _, sc := range []string{"sendto", "sendmsg", "sendmmsg", "creat", "unlinkat", "renameat2", "memfd_create"} {
+		if !strings.Contains(joined, sc) {
+			t.Errorf("strace trace filter missing %s: %q", sc, joined)
+		}
+	}
 }

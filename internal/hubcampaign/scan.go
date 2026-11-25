@@ -2,10 +2,13 @@ package hubcampaign
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	// The campaign runs the real scanner, so it needs the format/model registry
@@ -16,6 +19,14 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
 	"github.com/fr0g-66723067-io/sc4n/internal/scan"
 )
+
+const fileScanMeta = ".scan-cache.json"
+
+type scanCacheMeta struct {
+	Version        int    `json:"version"`
+	FetchSHA256    string `json:"fetchSha256,omitempty"`
+	BaselineSHA256 string `json:"baselineSha256,omitempty"`
+}
 
 // partialFiles names the files this campaign fetched as a header slice. A rule
 // that compares a declared extent against the file on disk needs that fact: on
@@ -88,9 +99,32 @@ func ScanTree(ctx context.Context, o Options) (*ScanResult, error) {
 	rep.Cancelled = res.Cancelled
 	relativise(repos, rep)
 	suppressed := res.Suppressed
+	if len(o.Baseline) > 0 {
+		// report.Fingerprint hashes the artifact path, so a baseline loaded from a
+		// relativised scan.json cannot be path-prefixed before scan.Run. Apply it
+		// here once findings carry their repo-relative paths.
+		kept := rep.Findings[:0]
+		for _, f := range rep.Findings {
+			if o.Baseline[report.Fingerprint(f)] {
+				suppressed++
+				continue
+			}
+			kept = append(kept, f)
+		}
+		rep.Findings = kept
+	}
 	rep.Suppressed = suppressed
 	if werr := writeReportJSON(o.path(fileScan), rep); werr != nil {
 		return nil, werr
+	}
+	if !res.Cancelled {
+		fetchHash, _ := fetchFingerprint(o)
+		meta := scanCacheMeta{
+			Version:        Version,
+			FetchSHA256:    fetchHash,
+			BaselineSHA256: baselineFingerprint(o.Baseline),
+		}
+		_ = writeJSON(o.path(fileScanMeta), meta)
 	}
 	bySev := res.Collector.CountBySeverity()
 	if suppressed > 0 {
@@ -133,7 +167,7 @@ func prefixBaseline(base string, fp map[string]bool) map[string]bool {
 	for k := range fp {
 		parts := strings.SplitN(k, "\x00", 3)
 		if len(parts) == 3 {
-			parts[1] = filepath.Join(base, filepath.FromSlash(parts[1]))
+			parts[1] = prefixArtifact(base, parts[1])
 			k = strings.Join(parts, "\x00")
 		}
 		out[k] = true
@@ -141,16 +175,50 @@ func prefixBaseline(base string, fp map[string]bool) map[string]bool {
 	return out
 }
 
-// relativise strips the repos root from every path in the report.
+// prefixArtifact prepends base to the filesystem portion of art without letting
+// filepath.Join / filepath.Clean rewrite container member paths after ':'.
+func prefixArtifact(base, art string) string {
+	if !strings.ContainsRune(art, ':') {
+		return filepath.Join(base, filepath.FromSlash(art))
+	}
+	// If the full name (containing ':') exists on disk, it is the file itself.
+	full := filepath.Join(base, filepath.FromSlash(art))
+	if _, err := os.Stat(full); err == nil {
+		return full
+	}
+	// Otherwise scan ':' right-to-left to preserve colons in the file's own name
+	// while keeping the member chain verbatim.
+	for i := len(art) - 1; i >= 0; i-- {
+		if art[i] != ':' {
+			continue
+		}
+		cand := filepath.Join(base, filepath.FromSlash(art[:i]))
+		if _, err := os.Stat(cand); err == nil {
+			return cand + art[i:]
+		}
+	}
+	idx := strings.IndexByte(art, ':')
+	return filepath.Join(base, filepath.FromSlash(art[:idx])) + art[idx:]
+}
+
+// relativise strips the repos root from every path in the report and converts
+// OS separators to forward slashes so scan.json is portable across platforms.
 //
 // The scan engine names an artifact by the path it was given, and the campaign
 // walks an absolute directory (it may be invoked from anywhere), so without this
 // scan.json would carry absolute paths and the join — which attributes findings by
 // repo-relative path — would match nothing. It also makes scan.json portable.
 func relativise(root string, rep *report.Report) {
-	prefix := strings.TrimRight(root, string(os.PathSeparator)) + string(os.PathSeparator)
+	cleanRoot := filepath.Clean(root)
+	prefix := strings.TrimRight(cleanRoot, string(os.PathSeparator)) + string(os.PathSeparator)
+	slashPrefix := strings.TrimRight(filepath.ToSlash(cleanRoot), "/") + "/"
 	trim := func(p string) string {
-		return strings.TrimPrefix(p, prefix)
+		if strings.HasPrefix(p, prefix) {
+			p = strings.TrimPrefix(p, prefix)
+		} else {
+			p = strings.TrimPrefix(filepath.ToSlash(p), slashPrefix)
+		}
+		return filepath.ToSlash(p)
 	}
 	for i := range rep.Artifacts {
 		rep.Artifacts[i].Path = trim(rep.Artifacts[i].Path)
@@ -205,6 +273,66 @@ type scanDoc struct {
 	// Suppressed is what -baseline removed from this scan, carried so the campaign
 	// can say how many findings it chose not to report.
 	Suppressed int `json:"suppressed,omitempty"`
+	// Cancelled reports an interrupted scan, which must never be served as cache.
+	Cancelled bool `json:"cancelled,omitempty"`
+}
+
+func fetchFingerprint(o Options) (string, bool) {
+	b, err := os.ReadFile(o.path(fileFetch))
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), true
+}
+
+func baselineFingerprint(fp map[string]bool) string {
+	if len(fp) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(fp))
+	for k, v := range fp {
+		if v {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func scanCacheValid(o Options, doc *scanDoc) bool {
+	if doc.Cancelled {
+		return false
+	}
+	var meta scanCacheMeta
+	if err := readJSON(o.path(fileScanMeta), &meta); err != nil || meta.Version != Version {
+		return false
+	}
+	if meta.BaselineSHA256 != baselineFingerprint(o.Baseline) {
+		return false
+	}
+	fetchHash, hasFetch := fetchFingerprint(o)
+	if hasFetch {
+		if meta.FetchSHA256 != fetchHash {
+			return false
+		}
+		if fi, err := os.Stat(o.path(fileFetch)); err == nil {
+			if si, serr := os.Stat(o.path(fileScan)); serr == nil && fi.ModTime().After(si.ModTime()) {
+				return false
+			}
+		}
+	} else if meta.FetchSHA256 != "" {
+		return false
+	}
+	return true
 }
 
 func sum(v []int) int {
@@ -233,6 +361,9 @@ func loadScan(o Options) (*ScanResult, error) {
 	doc, err := readScanDoc(o)
 	if err != nil {
 		return nil, err
+	}
+	if !scanCacheValid(o, doc) {
+		return nil, errors.New("hubcampaign: scan cache is stale")
 	}
 	var bySev [5]int
 	for _, f := range doc.Findings {

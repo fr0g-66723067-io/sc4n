@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -137,6 +139,15 @@ func graphSeeds(ctx context.Context, o options, out string, first graphOp) ([]st
 	return seeds, strings.Join(notes, "; "), nil
 }
 
+// seedKey returns a collision-resistant filename prefix for seed by appending
+// a short hash of the cleaned seed path, so two seeds named model.onnx in
+// different subdirectories do not overwrite each other's mutants or arg files.
+func seedKey(seed string) string {
+	base := strings.TrimSuffix(filepath.Base(seed), filepath.Ext(seed))
+	sum := sha256.Sum256([]byte(filepath.Clean(seed)))
+	return base + "_" + hex.EncodeToString(sum[:4])
+}
+
 // mutate runs mutate.py in the pinned image for one (operator, seed) pair and
 // returns the mutant path relative to out.
 func mutate(ctx context.Context, o options, out string, g graphOp, seed string) (string, error) {
@@ -152,8 +163,9 @@ func mutate(ctx context.Context, o options, out string, g graphOp, seed string) 
 		return "", err
 	}
 	seedDir := filepath.Dir(seed)
-	base := strings.TrimSuffix(filepath.Base(seed), filepath.Ext(seed))
-	outName := base + "__" + g.Name + ".onnx"
+	key := seedKey(seed)
+	outName := key + "__" + g.Name + ".onnx"
+	argName := "arg-" + key + ".json"
 	arg, err := json.Marshal(map[string]string{
 		"seed": "/s/" + filepath.Base(seed),
 		"out":  "/o/" + outName,
@@ -162,7 +174,7 @@ func mutate(ctx context.Context, o options, out string, g graphOp, seed string) 
 	if err != nil {
 		return "", err
 	}
-	if err := writeFile(filepath.Join(dir, "arg-"+base+".json"), arg); err != nil {
+	if err := writeFile(filepath.Join(dir, argName), arg); err != nil {
 		return "", err
 	}
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network=none",
@@ -173,7 +185,7 @@ func mutate(ctx context.Context, o options, out string, g graphOp, seed string) 
 		"-v", dir+":/o",
 		"-v", py+":/opt/sc4nlab:ro",
 		o.oracleImage,
-		"python3", "/opt/sc4nlab/mutate.py", "/o/arg-"+base+".json") // #nosec G204 -- fixed image, lab-owned dirs
+		"python3", "/opt/sc4nlab/mutate.py", "/o/"+argName) // #nosec G204 -- fixed image, lab-owned dirs
 	outb, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s", lastLine(string(outb)))

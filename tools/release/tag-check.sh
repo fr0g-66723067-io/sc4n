@@ -5,6 +5,14 @@
 set -eu
 
 tag=${1:?usage: tag-check.sh TAG}
+nl='
+'
+case "$tag" in
+	*"$nl"*)
+		echo "tag-check: tag contains newline" >&2
+		exit 1
+		;;
+esac
 printf '%s\n' "$tag" | grep -Eq \
 	'^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$' || {
 	echo "tag-check: $tag is not vMAJOR.MINOR.PATCH[-PRE]" >&2

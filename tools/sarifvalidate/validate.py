@@ -30,7 +30,13 @@ def main(argv):
         sys.stderr.write("usage: validate.py SCHEMA SARIF [SARIF ...]\n")
         return 2
     schema = json.load(open(argv[1]))
-    validator = jsonschema.Draft7Validator(schema)
+    format_checker = getattr(jsonschema.Draft7Validator, "FORMAT_CHECKER", None)
+    if format_checker is None:
+        try:
+            format_checker = jsonschema.FormatChecker()
+        except Exception:
+            format_checker = None
+    validator = jsonschema.Draft7Validator(schema, format_checker=format_checker)
     # A SARIF log is a validator target, so resolve $ref against the schema we
     # were given rather than fetching it: the repository must validate offline.
     status = 0

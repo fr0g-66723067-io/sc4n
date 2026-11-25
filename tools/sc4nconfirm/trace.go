@@ -3,13 +3,18 @@ package main
 // strace parsing.
 //
 // The trace is the evidence, so the parser's job is to be boring and total: it
-// reads the syscalls the entrypoint asked for (execve, execveat, openat,
-// connect) and turns each into one line of an effect list. It never fails a run
-// on a line it does not understand - a payload can emit arbitrary text through
-// the file it writes, and a parser that gave up would turn "unparseable" into
-// "no effects".
+// reads the syscalls the entrypoint asked for (execve, execveat, open/openat,
+// creat, unlinkat, renameat2, memfd_create, connect, sendto/sendmsg/sendmmsg)
+// and turns each into one line of an effect list. It never fails a run on a
+// line it does not understand - a payload can emit arbitrary text through the
+// file it writes, and a parser that gave up would turn "unparseable" into "no
+// effects".
 
 import (
+	"bufio"
+	"io"
+	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +26,10 @@ import (
 // should not produce a hundred-kilobyte attestation; the finding quotes the
 // first few and the count is in the extra fields.
 const maxEffectEntries = 64
+
+// maxPendingPIDs bounds the in-flight <unfinished ...> table so an attacker
+// that forks continuously cannot exhaust host memory while parsing.
+const maxPendingPIDs = 4096
 
 // directories the loader legitimately reads, so an open inside them is not an
 // effect. /home/worker is deliberately not here: it holds the canaries.
@@ -47,13 +56,67 @@ var homeNoisePrefixes = []string{
 	"/home/worker/.cache/huggingface/transformers",
 }
 
-// applyTrace fills the effect lists from a strace log. harnessPID is the pid the
-// first exec in the trace's head belongs to, or "" when the head was unavailable.
+// applyTraceFile streams tracePath from the start up to maxBytes and fills r's
+// effect lists. Streaming from byte 0 ensures a payload that floods quiet calls
+// at the tail cannot push earlier effects out of view.
+func applyTraceFile(r *malice.Run, tracePath string, maxBytes int64) error {
+	f, err := os.Open(tracePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return applyTraceReader(r, f, "", maxBytes)
+}
+
+// applyTrace fills the effect lists from an in-memory strace log. harnessPID is
+// the optional pid of the harness exec, or "" to identify it as the first exec.
 func applyTrace(r *malice.Run, trace, harnessPID string) {
+	_ = applyTraceReader(r, strings.NewReader(trace), harnessPID, 0)
+}
+
+// applyTraceReader stream-parses strace output line-by-line up to maxBytes
+// (unlimited when maxBytes <= 0), reassembling per-PID <unfinished ...> /
+// <... resumed> pairs so multi-threaded workloads do not lose syscalls.
+func applyTraceReader(r *malice.Run, rd io.Reader, harnessPID string, maxBytes int64) error {
+	if maxBytes > 0 {
+		rd = io.LimitReader(rd, maxBytes)
+	}
+	sc := bufio.NewScanner(rd)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+
 	seen := map[string]bool{}
+	pending := map[string]string{}
 	firstExec := true
-	for _, line := range strings.Split(trace, "\n") {
-		call, rest := splitCall(line)
+
+	for sc.Scan() {
+		pid, content := stripPID(sc.Text())
+		if content == "" {
+			continue
+		}
+		if idx := strings.Index(content, "<unfinished ...>"); idx >= 0 {
+			if len(pending) < maxPendingPIDs || pending[pid] != "" {
+				pending[pid] = strings.TrimRight(content[:idx], " \t")
+			}
+			continue
+		}
+		if strings.HasPrefix(content, "<... ") {
+			resumedIdx := strings.Index(content, " resumed>")
+			if resumedIdx < 0 {
+				continue
+			}
+			resumedCall := strings.TrimSpace(content[len("<... "):resumedIdx])
+			prefix, ok := pending[pid]
+			if !ok {
+				continue
+			}
+			delete(pending, pid)
+			if !strings.HasPrefix(prefix, resumedCall+"(") {
+				continue
+			}
+			content = prefix + content[resumedIdx+len(" resumed>"):]
+		}
+
+		call, rest := parseCall(content)
 		if call == "" {
 			continue
 		}
@@ -61,70 +124,92 @@ func applyTrace(r *malice.Run, trace, harnessPID string) {
 		case "execve", "execveat":
 			parts := quotedStrings(rest)
 			drop := false
-			if harnessExec(parts) {
-				// The harness exec is identified by pid. Position alone is not
-				// enough: only the last 8 MiB of the trace are parsed, so a payload
-				// that floods quiet reads and then execs the loader's exact command
-				// line was the "first exec" of the parsed text and was dropped.
+			if firstExec && harnessExec(parts) {
+				// Only the very first execve can be the harness's own start of
+				// load.py; a later in-place execve by the same PID is payload.
 				if harnessPID != "" {
-					drop = linePID(line) == harnessPID
+					drop = pid == harnessPID
 				} else {
-					drop = firstExec
+					drop = true
 				}
 			}
 			if !drop {
-				if argv := execArgv(rest); argv != "" {
+				if argv := execArgv(call, rest); argv != "" {
 					addEffect(&r.Exec, seen, argv)
 				}
 			}
 			firstExec = false
 		case "open", "openat", "openat2":
-			path, writing := openTarget(rest)
-			if path == "" {
+			p, writing := openTarget(rest)
+			if p == "" {
 				continue
 			}
 			if writing {
-				addEffect(&r.Wrote, seen, path)
-			} else if !quietPath(path, false) {
-				addEffect(&r.OpenedOutside, seen, path)
+				addEffect(&r.Wrote, seen, p)
+			} else if !quietPath(p, false) {
+				addEffect(&r.OpenedOutside, seen, p)
 			}
-		case "connect":
+		case "creat", "unlinkat":
+			if p, _, ok := firstQuotedString(rest); ok && p != "" {
+				addEffect(&r.Wrote, seen, p)
+			}
+		case "renameat2":
+			parts := quotedStrings(rest)
+			for i := 0; i < len(parts) && i < 2; i++ {
+				if parts[i] != "" {
+					addEffect(&r.Wrote, seen, parts[i])
+				}
+			}
+		case "memfd_create":
+			if p, _, ok := firstQuotedString(rest); ok {
+				addEffect(&r.Wrote, seen, "memfd:"+p)
+			}
+		case "connect", "sendto", "sendmsg", "sendmmsg":
 			if addr := connectAddr(rest); addr != "" {
 				addEffect(&r.Connect, seen, addr)
 			}
 		}
 	}
+	return sc.Err()
 }
 
-// splitCall returns the syscall name and its argument text for one strace line,
-// or "" for a line that is not a completed syscall. Both `1234  execve(...)` and
-// the older `[pid 1234] execve(...)` forms are handled, and an unfinished or
-// resumed line is skipped: half a call is not evidence.
-func splitCall(line string) (string, string) {
-	line = strings.TrimSpace(line)
-	if line == "" || strings.HasPrefix(line, "<") || strings.Contains(line, "<unfinished ...>") {
+// stripPID splits the leading pid column from one strace line. Both
+// `1234  execve(...)` and the older `[pid 1234] execve(...)` forms are handled.
+func stripPID(line string) (pid, content string) {
+	t := strings.TrimSpace(line)
+	if t == "" {
 		return "", ""
 	}
-	if strings.HasPrefix(line, "[pid ") {
-		if i := strings.Index(line, "] "); i >= 0 {
-			line = line[i+2:]
+	if strings.HasPrefix(t, "[pid ") {
+		rest := t[len("[pid "):]
+		if i := strings.IndexByte(rest, ']'); i > 0 {
+			return strings.TrimSpace(rest[:i]), strings.TrimLeft(rest[i+1:], " \t")
 		}
+		return "", ""
 	}
-	// Skip the pid column.
-	if i := strings.IndexAny(line, " \t"); i > 0 && isDigits(line[:i]) {
-		line = strings.TrimLeft(line[i:], " \t")
+	if i := strings.IndexAny(t, " \t"); i > 0 && isDigits(t[:i]) {
+		return t[:i], strings.TrimLeft(t[i:], " \t")
 	}
-	open := strings.IndexByte(line, '(')
+	return "", t
+}
+
+// parseCall extracts the syscall name and argument body from a PID-stripped
+// strace line, or "" when the line is not a completed syscall.
+func parseCall(content string) (string, string) {
+	if content == "" || strings.HasPrefix(content, "<") {
+		return "", ""
+	}
+	open := strings.IndexByte(content, '(')
 	if open <= 0 {
 		return "", ""
 	}
-	call := line[:open]
+	call := content[:open]
 	for _, c := range call {
 		if !(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
 			return "", ""
 		}
 	}
-	body := line[open+1:]
+	body := content[open+1:]
 	if i := strings.LastIndex(body, ") = "); i >= 0 {
 		body = body[:i]
 	}
@@ -141,6 +226,35 @@ func isDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// firstQuotedString returns the first double-quoted string in s and the
+// remainder of s immediately after its closing quote, honouring backslash
+// escapes so callers can inspect syscall flags strictly after the path.
+func firstQuotedString(s string) (val, after string, ok bool) {
+	q := strings.IndexByte(s, '"')
+	if q < 0 {
+		return "", "", false
+	}
+	var b strings.Builder
+	j := q + 1
+	for j < len(s) {
+		c := s[j]
+		if c == '\\' && j+1 < len(s) {
+			b.WriteByte(s[j+1])
+			j += 2
+			continue
+		}
+		if c == '"' {
+			return b.String(), s[j+1:], true
+		}
+		b.WriteByte(c)
+		j++
+	}
+	if b.Len() > 0 {
+		return b.String() + "...", "", true
+	}
+	return "", "", false
 }
 
 // quotedStrings returns the double-quoted strings in s, honouring the escapes
@@ -184,18 +298,28 @@ func quotedStrings(s string) []string {
 }
 
 // execArgv renders the program and its arguments as one line.
-func execArgv(body string) string {
+func execArgv(call, body string) string {
 	parts := quotedStrings(body)
 	if len(parts) == 0 {
 		return ""
 	}
 	// execve(path, [argv...]) and execveat(dirfd, path, [argv...], ...) put the
-	// path first and the argv array after it. argv[0] repeats the program under
-	// another spelling (`/bin/sh` vs `sh`), so it is dropped rather than printed
-	// twice, and the arguments are capped: four name what ran.
+	// path first and the argv array after it. When execveat is called with
+	// AT_EMPTY_PATH (fileless memfd execution), path is "" and dirfd identifies
+	// the executable descriptor.
 	prog := parts[0]
 	rest := parts[1:]
-	if len(rest) > 0 && (rest[0] == prog || filepath.Base(prog) == rest[0]) {
+	if call == "execveat" && prog == "" && strings.Contains(body, "AT_EMPTY_PATH") {
+		fd := "unknown"
+		if comma := strings.IndexByte(body, ','); comma > 0 {
+			if f := strings.TrimSpace(body[:comma]); f != "" {
+				fd = f
+			}
+		}
+		prog = "fd:" + fd
+	} else if len(rest) > 0 && (rest[0] == prog || filepath.Base(prog) == rest[0]) {
+		// argv[0] repeats the program under another spelling (`/bin/sh` vs `sh`),
+		// so it is dropped rather than printed twice.
 		rest = rest[1:]
 	}
 	if len(rest) > 4 {
@@ -205,35 +329,6 @@ func execArgv(body string) string {
 		return prog
 	}
 	return prog + " " + strings.Join(rest, " ")
-}
-
-// linePID returns the pid column of a strace line, or "" when it has none. Both
-// `1234  execve(...)` and the older `[pid 1234] execve(...)` forms are handled.
-func linePID(line string) string {
-	t := strings.TrimSpace(line)
-	if strings.HasPrefix(t, "[pid ") {
-		rest := t[len("[pid "):]
-		if i := strings.IndexByte(rest, ']'); i > 0 {
-			return strings.TrimSpace(rest[:i])
-		}
-		return ""
-	}
-	if i := strings.IndexAny(t, " \t"); i > 0 && isDigits(t[:i]) {
-		return t[:i]
-	}
-	return ""
-}
-
-// harnessExecPID returns the pid of the first exec in the head of a trace: the
-// entrypoint starts load.py under the tracer, and that exec is the harness. It is
-// read from the file's head, which readTail never returns.
-func harnessExecPID(head string) string {
-	for _, line := range strings.Split(head, "\n") {
-		if call, _ := splitCall(line); call == "execve" || call == "execveat" {
-			return linePID(line)
-		}
-	}
-	return ""
 }
 
 // harnessExec reports whether the first exec is the harness loading the
@@ -249,18 +344,18 @@ func harnessExec(parts []string) bool {
 }
 
 // openTarget returns the path an open/openat call names and whether the flags
-// ask for a write.
+// after the path ask for a write.
 func openTarget(body string) (string, bool) {
-	parts := quotedStrings(body)
-	if len(parts) == 0 {
+	p, after, ok := firstQuotedString(body)
+	if !ok {
 		return "", false
 	}
-	writing := strings.Contains(body, "O_WRONLY") || strings.Contains(body, "O_RDWR") ||
-		strings.Contains(body, "O_CREAT") || strings.Contains(body, "O_TRUNC")
-	return parts[0], writing
+	writing := strings.Contains(after, "O_WRONLY") || strings.Contains(after, "O_RDWR") ||
+		strings.Contains(after, "O_CREAT") || strings.Contains(after, "O_TRUNC")
+	return p, writing
 }
 
-// connectAddr renders the dialled address as ip:port, or unix:path.
+// connectAddr renders the dialled address as ip:port (or [ipv6]:port), or unix:path.
 func connectAddr(body string) string {
 	if i := strings.Index(body, "sun_path="); i >= 0 {
 		if parts := quotedStrings(body[i:]); len(parts) > 0 {
@@ -287,6 +382,9 @@ func connectAddr(body string) string {
 	}
 	switch {
 	case host != "" && port != "":
+		if strings.Contains(host, ":") {
+			return "[" + host + "]:" + port
+		}
 		return host + ":" + port
 	case host != "":
 		return host
@@ -298,13 +396,14 @@ func connectAddr(body string) string {
 
 // quietPath reports whether an open is harness plumbing rather than an effect.
 // A write is never quiet: the payload writing its own scratch file is the
-// observation. A read is quiet only when the path is the prefix itself or a
-// child of it; a bare HasPrefix would hide /tmpfoo behind the /tmp entry, and
-// a payload chooses its own path.
+// observation. Paths are cleaned first so traversal segments such as
+// `/dev/../home/worker/.aws/credentials` cannot hide canary reads behind a
+// quiet prefix.
 func quietPath(p string, writing bool) bool {
 	if p == "" {
 		return true
 	}
+	p = path.Clean(p)
 	if writing {
 		return false
 	}
