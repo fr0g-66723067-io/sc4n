@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/report"
@@ -77,9 +80,10 @@ type Session struct {
 	// starting point.
 	TopLimits limits.Limits
 
-	mu      sync.Mutex
-	seen    map[string]string
-	partial map[string]bool
+	mu          sync.Mutex
+	seen        map[string]string
+	partial     map[string]bool
+	partialBase map[string]bool
 
 	spentDecompressed int64
 	spentSpill        int64
@@ -89,18 +93,33 @@ type Session struct {
 
 // IsPartial reports whether the named artifact is a truncated copy.
 func (s *Session) IsPartial(name string) bool {
-	if s == nil || len(s.partial) == 0 {
+	if s == nil || len(s.partial) == 0 || name == "" {
 		return false
 	}
 	if s.partial[name] {
 		return true
 	}
+	clean := filepath.Clean(name)
+	if s.partial[clean] {
+		return true
+	}
+	// Container members carry a ":" separator (e.g. "evil.zip:sub/model.onnx").
+	// A bare filename registered via -partial must never match inside an archive.
+	if strings.Contains(name, ":") {
+		return false
+	}
 	if s.Root != "" {
-		if rel, err := filepath.Rel(s.Root, name); err == nil && s.partial[rel] {
+		if rel, err := filepath.Rel(s.Root, clean); err == nil && (s.partial[rel] || s.partial[filepath.Clean(rel)]) {
 			return true
 		}
+		if !filepath.IsAbs(clean) {
+			joined := filepath.Clean(filepath.Join(s.Root, clean))
+			if s.partial[joined] {
+				return true
+			}
+		}
 	}
-	return s.partial[filepath.Base(name)]
+	return s.partialBase[filepath.Base(clean)]
 }
 
 // NewSession returns a Session with an initialised memo.
@@ -120,8 +139,22 @@ func (s *Session) SetPartial(names []string) {
 		return
 	}
 	s.partial = make(map[string]bool, len(names))
+	s.partialBase = nil
 	for _, n := range names {
+		if n == "" {
+			continue
+		}
 		s.partial[n] = true
+		clean := filepath.Clean(n)
+		s.partial[clean] = true
+		// Only a bare filename (no directory separator, no container prefix) may
+		// match by filepath.Base.
+		if !strings.Contains(n, ":") && !strings.ContainsAny(n, "/\\") && clean != "." && clean != ".." {
+			if s.partialBase == nil {
+				s.partialBase = make(map[string]bool)
+			}
+			s.partialBase[clean] = true
+		}
 	}
 }
 
@@ -443,7 +476,14 @@ func ScanMemberBytes(parent *Ctx, name string, data []byte) (Format, error) {
 }
 
 func emitLimitDepth(ctx *Ctx, name string) {
-	limits.Emit(ctx.Sink, limits.RuleDepth, "MaxDepth", int64(ctx.Depth+1), int64(ctx.Session.TopLimits.MaxDepth), "stopped at "+name)
+	if ctx == nil || ctx.Sink == nil {
+		return
+	}
+	maxDepth := ctx.Depth
+	if ctx.Session != nil {
+		maxDepth = ctx.Session.TopLimits.MaxDepth
+	}
+	limits.Emit(ctx.Sink, limits.RuleDepth, "MaxDepth", int64(ctx.Depth+1), int64(maxDepth), "stopped at "+name)
 }
 
 // maxMagicProbe is how many leading bytes the magic table looks at. It is enough
@@ -500,9 +540,7 @@ var magicSniffer = []struct {
 	{[]byte("PK\x05\x06"), FormatZip, 0},
 	{[]byte("PK\x07\x08"), FormatZip, 0},
 	{[]byte("\x93NUMPY"), FormatNPY, 0},
-	{[]byte("GGUF"), FormatGGUF, 0},
 	{[]byte("\x89HDF\r\n\x1a\n"), FormatHDF5, 0},
-	{[]byte("TFL3"), FormatTFLite, 4},
 	{[]byte("\x1f\x8b"), FormatGzip, 0},
 	{[]byte("BZh"), FormatBzip2, 0},
 	{[]byte("\xfd7zXZ\x00"), FormatXz, 0},
@@ -547,7 +585,7 @@ func init() {
 	// Below every structured sniffer (the lowest of those is msgpack at 50) and
 	// above the text fallback, so a zlib-shaped prefix cannot outrank a file that
 	// is really a model: see weakMagicSniffer.
-	RegisterSniffer("magic-weak", 55, sniffWeakMagic)
+	RegisterSniffer("magic-weak", 45, sniffWeakMagic)
 	RegisterSniffer("tarkind", 90, sniffTar)
 	RegisterSniffer(textFallbackSniffer, -100, sniffText)
 
@@ -674,6 +712,24 @@ func sniffWeakMagic(s source.Source, l limits.Limits) (Format, bool) {
 	return sniffTable(s, weakMagicSniffer)
 }
 
+var (
+	bzip2BlockMagic = []byte{0x31, 0x41, 0x59, 0x26, 0x53, 0x59}
+	bzip2EOSMagic   = []byte{0x17, 0x72, 0x45, 0x38, 0x50, 0x90}
+)
+
+// isValidBzip2Head checks the 10-byte bzip2 stream header: "BZh", block size
+// '1'..'9', followed by either the compressed-block magic or the end-of-stream
+// magic. A bare "BZh" prefix in text or binary data is not claimed.
+func isValidBzip2Head(b []byte) bool {
+	if len(b) < 10 || b[0] != 'B' || b[1] != 'Z' || b[2] != 'h' {
+		return false
+	}
+	if b[3] < '1' || b[3] > '9' {
+		return false
+	}
+	return bytes.Equal(b[4:10], bzip2BlockMagic) || bytes.Equal(b[4:10], bzip2EOSMagic)
+}
+
 // sniffTable runs one magic table against the artifact's head. Both tables hold the
 // same struct type, so the scan is written once.
 func sniffTable(s source.Source, table []struct {
@@ -691,31 +747,115 @@ func sniffTable(s source.Source, table []struct {
 			continue
 		}
 		if bytes.HasPrefix(head[m.at:], m.magic) {
+			if m.format == FormatBzip2 && !isValidBzip2Head(head) {
+				continue
+			}
 			return m.format, true
 		}
 	}
 	return FormatUnknown, false
 }
 
-// sniffTar looks for the ustar magic at offset 257, which is where every tar
-// variant that Go's archive/tar accepts puts it.
+// sniffTar validates a 512-byte tar header block: either a ustar/GNU header
+// ("ustar" at offset 257) with a valid header checksum, or a classic V7 tar
+// header (NUL magic at 257..261, valid checksum, non-empty filename and
+// plausible octal mode/size and typeflag). Checking the checksum prevents a
+// literal "ustar" string at byte 257 of a text/JSON/Python file from being
+// misclassified as tar.
 func sniffTar(s source.Source, l limits.Limits) (Format, bool) {
-	if s.Size() < 262 {
+	if s.Size() < 512 {
 		return FormatUnknown, false
 	}
-	b, err := s.Bytes(257, 5)
-	if err != nil || len(b) < 5 {
+	blk, err := s.Bytes(0, 512)
+	if (err != nil && len(blk) < 512) || len(blk) < 512 {
 		return FormatUnknown, false
 	}
-	if bytes.Equal(b, []byte("ustar")) {
+	if !tarChecksumValid(blk) {
+		return FormatUnknown, false
+	}
+	if bytes.Equal(blk[257:262], []byte("ustar")) {
+		return FormatTar, true
+	}
+	if bytes.Equal(blk[257:262], []byte{0, 0, 0, 0, 0}) && tarV7Plausible(blk) {
 		return FormatTar, true
 	}
 	return FormatUnknown, false
 }
 
+// tarChecksumValid checks the 512-byte tar header checksum at offset 148..155
+// against both unsigned and signed byte sums per POSIX / tarfile convention.
+func tarChecksumValid(blk []byte) bool {
+	want, ok := parseTarOctal(blk[148:156])
+	if !ok {
+		return false
+	}
+	var unsignedSum, signedSum int64
+	for i := 0; i < 512; i++ {
+		c := blk[i]
+		if i >= 148 && i < 156 {
+			c = ' '
+		}
+		unsignedSum += int64(c)
+		signedSum += int64(int8(c))
+	}
+	return want == unsignedSum || want == signedSum
+}
+
+// tarV7Plausible verifies the fields that distinguish a classic V7 tar header
+// from arbitrary 512-byte blocks that happen to satisfy the checksum.
+func tarV7Plausible(blk []byte) bool {
+	// Non-empty filename at offset 0 with no control bytes before NUL.
+	if blk[0] == 0 {
+		return false
+	}
+	for i := 0; i < 100 && blk[i] != 0; i++ {
+		if blk[i] < 0x20 || blk[i] == 0x7f {
+			return false
+		}
+	}
+	// Plausible octal mode (offset 100..107) and size (offset 124..135).
+	if mode, ok := parseTarOctal(blk[100:108]); !ok || mode < 0 || mode > 0o777777 {
+		return false
+	}
+	if size, ok := parseTarOctal(blk[124:136]); !ok || size < 0 {
+		return false
+	}
+	// Plausible V7 typeflag (offset 156): NUL (regular) or '0'..'7'.
+	tf := blk[156]
+	return tf == 0 || (tf >= '0' && tf <= '7')
+}
+
+func parseTarOctal(field []byte) (int64, bool) {
+	i := 0
+	for i < len(field) && field[i] == ' ' {
+		i++
+	}
+	if i == len(field) {
+		return 0, false
+	}
+	var v int64
+	digits := 0
+	for i < len(field) && field[i] >= '0' && field[i] <= '7' {
+		v = v*8 + int64(field[i]-'0')
+		digits++
+		i++
+	}
+	if digits == 0 {
+		return 0, false
+	}
+	for ; i < len(field); i++ {
+		if field[i] != 0 && field[i] != ' ' {
+			return 0, false
+		}
+	}
+	return v, true
+}
+
 // sniffText is the last-resort classifier. It runs only when no structural
 // sniffer matched, and it never claims a binary file: a NUL byte in the first
-// kilobyte disqualifies the content.
+// kilobyte disqualifies the content unless the head opens with a valid UTF-8
+// text prefix or is valid UTF-8 and predominantly printable text with only
+// occasional NUL bytes.
 func sniffText(s source.Source, l limits.Limits) (Format, bool) {
 	n := min64(s.Size(), 1024)
 	head, err := s.Bytes(0, n)
@@ -734,34 +874,95 @@ func sniffText(s source.Source, l limits.Limits) (Format, bool) {
 		}
 		return FormatText, true
 	}
-	// A NUL in the head means binary, with one exception: when the artifact
-	// *opens* as a document — a printable prefix at least minTextPrefix long — it
-	// is text with binary appended, and the content layer reports that as
-	// SC4N-CONTENT-NOT-UTF8 while still running the byte-safe indicators over the
-	// whole buffer. Without the exception, one appended byte silenced the whole
-	// scan: a config.json plus a NUL was dispatched "unknown", and "unknown" has no
-	// parser and no indicator pass, so its finding list was empty and read exactly
-	// like a clean file's.
+	// A NUL in the head means binary, with two exceptions:
+	//   1. the artifact *opens* as a valid UTF-8 document (at least minTextPrefix
+	//      bytes of printable UTF-8, allowing non-ASCII runes and a UTF-8 BOM)
+	//      followed by appended binary/NUL bytes; or
+	//   2. the head is valid UTF-8 and predominantly printable text with only
+	//      occasional NUL bytes (for example a NUL inserted inside the first 64
+	//      bytes of a Jinja template or markdown card).
+	// In both cases the content layer reports SC4N-CONTENT-NOT-UTF8 while still
+	// running the byte-safe indicators over the buffer.
 	if p := textPrefixLen(head); p >= minTextPrefix {
+		return FormatText, true
+	}
+	if looksLikeTextWithNUL(head, s.Size() > int64(len(head))) {
 		return FormatText, true
 	}
 	return FormatUnknown, false
 }
 
-// textPrefixLen returns the length of the leading run of bytes a text format can
-// hold: ASCII printable plus tab, newline and carriage return. It stops at the
-// first control byte or NUL, which is what makes "the artifact opens as text"
-// decidable without reading the whole file.
+// textPrefixLen returns the byte length of the leading run of valid UTF-8 text:
+// printable runes (ASCII and non-ASCII), UTF-8 BOM, tab, newline and carriage
+// return. It stops at the first control byte, NUL or invalid UTF-8 byte.
 func textPrefixLen(b []byte) int {
-	for i, c := range b {
-		switch {
-		case c >= 0x20 && c < 0x7f:
-		case c == '\t' || c == '\n' || c == '\r':
-		default:
+	for i := 0; i < len(b); {
+		if b[i] < utf8.RuneSelf {
+			c := b[i]
+			if (c >= 0x20 && c < 0x7f) || c == '\t' || c == '\n' || c == '\r' {
+				i++
+				continue
+			}
 			return i
 		}
+		r, sz := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && sz == 1 {
+			return i
+		}
+		if r == '\ufeff' || unicode.IsPrint(r) {
+			i += sz
+			continue
+		}
+		return i
 	}
 	return len(b)
+}
+
+// looksLikeTextWithNUL reports whether head is valid UTF-8 and predominantly
+// printable text despite occasional NUL bytes inside the first minTextPrefix
+// bytes. Binary files, random noise and short prefixes (< minTextPrefix
+// printable bytes) return false.
+func looksLikeTextWithNUL(head []byte, truncated bool) bool {
+	var printableBytes, nulCount, examined int
+	for i := 0; i < len(head); {
+		if head[i] == 0 {
+			nulCount++
+			examined++
+			i++
+			continue
+		}
+		if head[i] < utf8.RuneSelf {
+			c := head[i]
+			if (c >= 0x20 && c < 0x7f) || c == '\t' || c == '\n' || c == '\r' {
+				printableBytes++
+				examined++
+				i++
+				continue
+			}
+			return false
+		}
+		r, sz := utf8.DecodeRune(head[i:])
+		if r == utf8.RuneError && sz == 1 {
+			// A multi-byte UTF-8 rune split at the 1024-byte probe edge is not
+			// an invalid encoding.
+			if truncated && len(head)-i < utf8.UTFMax && !utf8.FullRune(head[i:]) {
+				break
+			}
+			return false
+		}
+		if r == '\ufeff' || unicode.IsPrint(r) {
+			printableBytes += sz
+			examined += sz
+			i += sz
+			continue
+		}
+		return false
+	}
+	if examined == 0 || printableBytes < minTextPrefix {
+		return false
+	}
+	// At most 10% NUL bytes (at least 90% printable UTF-8 text).
+	return nulCount*10 <= examined
 }
 
 // textFallbackSniffer is the name of the last-resort classifier: it claims

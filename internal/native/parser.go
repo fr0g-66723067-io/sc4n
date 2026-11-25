@@ -56,15 +56,10 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		ctx.Sink.EmitExtra(ruleNativeValid, 0,
 			"the artifact is a valid "+k.String()+" executable; sc4n does not disassemble it, and does not run it",
 			map[string]string{"kind": k.String()})
-		// The symbol walk is ELF-only: debug/elf is the only stdlib header parser
-		// that exposes imports, and a PE branch here would be code with no seed in
-		// the validity-oracle lab to check it against.
-		if kind == bytescan.NativeELF {
-			if names := polyglot.ExecImportNames(s, size, 0); len(names) > 0 {
-				ctx.Sink.EmitExtra(ruleNativeExecImports, 0,
-					"ELF imports process-control symbols: "+strings.Join(names, ", "),
-					map[string]string{"symbols": strings.Join(names, ","), "kind": k.String()})
-			}
+		if names := polyglot.ExecImportNames(s, size, 0); len(names) > 0 {
+			ctx.Sink.EmitExtra(ruleNativeExecImports, 0,
+				k.String()+" imports process-control symbols: "+strings.Join(names, ", "),
+				map[string]string{"symbols": strings.Join(names, ","), "kind": k.String()})
 		}
 	}
 
@@ -89,8 +84,7 @@ func emitEmbedded(ctx *artifact.Ctx, s source.Source, size int64) {
 	seen := map[int64]bool{0: true}
 	for _, w := range polyglot.MagicWindows(s, size) {
 		base := w.Base
-		polyglot.EachValidatedNative(w.Data, func(kind bytescan.NativeKind, off int) {
-			abs := base + int64(off)
+		polyglot.EachValidatedNativeInWindow(s, size, w, func(kind bytescan.NativeKind, abs int64) {
 			if seen[abs] {
 				return
 			}
