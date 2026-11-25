@@ -259,6 +259,7 @@ var importMapping = map[string]string{
 	"whichdb":     "dbm",
 	"StringIO":    "io",
 	"cStringIO":   "io",
+	"cPickle":     "pickle",
 }
 
 var nameMapping = map[[2]string][2]string{

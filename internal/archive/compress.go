@@ -156,10 +156,11 @@ func JoblibLegacyShape(b []byte) bool {
 	return zlibShape(b[header:]) || (b[header] == ' ' && zlibShape(b[header+1:]))
 }
 
-// zlibShape is RFC 1950's two-byte check: CMF low nibble 8 (deflate) and a valid
-// FCHECK, so that CMF*256+FLG is a multiple of 31.
+// zlibShape is RFC 1950's two-byte check: CMF low nibble 8 (deflate), CINFO
+// high nibble <= 7 (window size <= 32 KiB) and a valid FCHECK, so that
+// CMF*256+FLG is a multiple of 31.
 func zlibShape(b []byte) bool {
-	return len(b) >= 2 && b[0]&0x0f == 8 && (int(b[0])<<8|int(b[1]))%31 == 0
+	return len(b) >= 2 && b[0]&0x0f == 8 && b[0]>>4 <= 7 && (int(b[0])<<8|int(b[1]))%31 == 0
 }
 
 // lzmaShape applies the header sanity check the plan requires: the 2-byte "\x5d\x00"

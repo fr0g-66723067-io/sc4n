@@ -157,6 +157,7 @@ var directNames = map[string]string{
 	"pickle.Unpickler":                       "constructs a second unpickler",
 	"_pickle.load":                           "the C-level loader",
 	"_pickle.loads":                          "the C-level loader",
+	"_pickle.Unpickler":                      "constructs a second unpickler",
 	"torch.load":                             "torch.load is a second unpickle of attacker data",
 	"torch.serialization.load":               "a second unpickle of attacker data",
 	"torch._inductor.codecache.compile_file": "compiles a source file and loads the resulting module",
@@ -191,6 +192,8 @@ var libraryGadgets = map[string]string{
 	// XML-RPC is the classic allowlisted-callable bridge: it resolves a dotted
 	// name and hands back the attribute.
 	"xmlrpc.server.resolve_dotted_attribute": "resolves a dotted name and returns the attribute",
+	"operator.attrgetter":                    "resolves a dotted attribute path on an arbitrary object",
+	"operator.methodcaller":                  "invokes an arbitrary named method on an object",
 	"xmlrpc.client.dumps":                    "builds an XML-RPC payload",
 	"xmlrpc.client.loads":                    "decodes an XML-RPC payload",
 
@@ -342,38 +345,48 @@ var libraryGadgets = map[string]string{
 	"shutil.make_archive":             "builds an archive",
 }
 
+// longestPrefix looks up q and then every dot-delimited prefix of q from
+// longest to shortest. Walking the prefixes of q instead of iterating the table
+// map makes classification O(segments) and completely deterministic when a table
+// holds overlapping prefixes (e.g. pathlib.Path and pathlib.Path.open).
+func longestPrefix(table map[string]string, q string) (entry, sink string, exact, ok bool) {
+	if sink, ok := table[q]; ok {
+		return q, sink, true, true
+	}
+	for i := strings.LastIndexByte(q, '.'); i > 0; i = strings.LastIndexByte(q[:i], '.') {
+		prefix := q[:i]
+		if sink, ok := table[prefix]; ok {
+			return prefix, sink, false, true
+		}
+	}
+	return "", "", false, false
+}
+
 // classifyGadget returns the tier for a qualified name.
 func classifyGadget(module, name string) Gadget {
 	q := module + "." + name
 
 	// 1. Exact-name primitives, including their subtrees.
-	if sink, ok := directNames[q]; ok {
-		return Gadget{Class: GadgetDirect, Sink: sink, Entry: q}
-	}
-	for entry, sink := range directNames {
-		if strings.HasPrefix(q, entry+".") {
-			return Gadget{Class: GadgetDirect, Sink: sink, Entry: entry + ".*"}
+	if entry, sink, exact, ok := longestPrefix(directNames, q); ok {
+		if !exact {
+			entry += ".*"
 		}
+		return Gadget{Class: GadgetDirect, Sink: sink, Entry: entry}
 	}
 
-	// 2. Whole-module primitives.
-	if sink, ok := directModules[module]; ok {
-		return Gadget{Class: GadgetDirect, Sink: sink, Entry: module + ".*"}
-	}
-	for pkg, sink := range directModules {
-		if strings.HasPrefix(module, pkg+".") {
-			return Gadget{Class: GadgetDirect, Sink: sink, Entry: pkg + ".*"}
-		}
+	// 2. Whole-module primitives, matched against q as well as module so
+	// STACK_GLOBAL "torch" "hub.load" matches "torch.hub" identically to
+	// GLOBAL "torch.hub" "load".
+	if entry, sink, _, ok := longestPrefix(directModules, q); ok {
+		return Gadget{Class: GadgetDirect, Sink: sink, Entry: entry + ".*"}
 	}
 
-	// 3. Library gadgets, exact then subtree.
-	if sink, ok := libraryGadgets[q]; ok {
-		return Gadget{Class: GadgetLibrary, Sink: sink, Entry: q}
-	}
-	for entry, sink := range libraryGadgets {
-		if strings.HasPrefix(q, entry+".") {
-			return Gadget{Class: GadgetLibrary, Sink: sink, Entry: entry + ".*"}
+	// 3. Library gadgets, exact then longest subtree prefix.
+	if entry, sink, exact, ok := longestPrefix(libraryGadgets, q); ok {
+		if !exact {
+			entry += ".*"
 		}
+		return Gadget{Class: GadgetLibrary, Sink: sink, Entry: entry}
 	}
 
 	// 4. Anything else that is callable.

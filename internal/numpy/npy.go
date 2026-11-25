@@ -58,8 +58,9 @@ type npyHeader struct {
 	// field the list named, including nested structured fields; an 'O' in any of
 	// them means the data section is a pickle stream, exactly as for a bare '|O'
 	// string descr.
-	structured bool
-	fields     []string
+	structured    bool
+	unparsedDescr bool
+	fields        []string
 	// unknown lists top-level keys that are not one of descr, fortran_order,
 	// shape. numpy never writes any, so their presence is a structural finding.
 	unknown []string
@@ -190,6 +191,9 @@ func parseNPY(ctx *artifact.Ctx, s source.Source) error {
 		// size is the sum of its fields and so is not a single number. The
 		// declared length is not verified, but the element count is still taken
 		// from shape so that an unsizeable shape is reported.
+		if h.unparsedDescr {
+			return structErr(ctx, headerStart, "structured descr list could not be decoded into field descriptors; object fields cannot be ruled out")
+		}
 		if _, ok := shapeElems(h.shape); !ok {
 			return structErr(ctx, headerStart, "shape "+shapeString(h.shape)+" cannot be sized without overflow")
 		}
@@ -282,6 +286,7 @@ func parseNPYHeader(b []byte, l limits.Limits, sink *report.Sink) (npyHeader, er
 				h.fields = fields
 			} else if p.list() {
 				h.structured = true
+				h.unparsedDescr = true
 			} else {
 				return h, errors.New("descr is neither a string nor a list")
 			}
@@ -396,7 +401,9 @@ func (p *litParser) eat(c byte) bool {
 	return false
 }
 
-// str reads a single- or double-quoted string, decoding only backslash escapes.
+// str reads a single- or double-quoted Python string literal, decoding standard
+// escapes as well as \xHH, \uHHHH, \UHHHHHHHH and octal \NNN escapes so an
+// obfuscated descriptor like '|\x4f' is decoded to '|O' just as Python does.
 // A value larger than MaxStringBlob is consumed but retained only to the cap; the
 // total retained text is bounded by MaxRetainedText.
 func (p *litParser) str() (string, bool) {
@@ -407,6 +414,19 @@ func (p *litParser) str() (string, bool) {
 	p.i++
 	var sb strings.Builder
 	full := int64(0)
+	writeByte := func(ch byte) {
+		full++
+		if int64(sb.Len()) < p.maxString {
+			sb.WriteByte(ch)
+		}
+	}
+	writeRune := func(r rune) {
+		var tmp [4]byte
+		n := utf8EncodeRune(tmp[:], r)
+		for k := 0; k < n; k++ {
+			writeByte(tmp[k])
+		}
+	}
 	for p.i < len(p.b) {
 		c := p.b[p.i]
 		if c == quote {
@@ -427,15 +447,148 @@ func (p *litParser) str() (string, bool) {
 		}
 		if c == '\\' && p.i+1 < len(p.b) {
 			p.i++
-			c = p.b[p.i]
+			e := p.b[p.i]
+			switch e {
+			case 'x':
+				if p.i+2 < len(p.b) {
+					if v, ok := parseHexN(p.b[p.i+1 : p.i+3]); ok {
+						writeRune(rune(v))
+						p.i += 3
+						continue
+					}
+				}
+				writeByte('\\')
+				writeByte('x')
+				p.i++
+				continue
+			case 'u':
+				if p.i+4 < len(p.b) {
+					if v, ok := parseHexN(p.b[p.i+1 : p.i+5]); ok {
+						writeRune(rune(v))
+						p.i += 5
+						continue
+					}
+				}
+				writeByte('\\')
+				writeByte('u')
+				p.i++
+				continue
+			case 'U':
+				if p.i+8 < len(p.b) {
+					if v, ok := parseHexN(p.b[p.i+1 : p.i+9]); ok && v <= 0x10FFFF {
+						writeRune(rune(v))
+						p.i += 9
+						continue
+					}
+				}
+				writeByte('\\')
+				writeByte('U')
+				p.i++
+				continue
+			case '0', '1', '2', '3', '4', '5', '6', '7':
+				v := int(e - '0')
+				for k := 0; k < 2 && p.i+1 < len(p.b); k++ {
+					if o := p.b[p.i+1]; o >= '0' && o <= '7' {
+						v = v<<3 | int(o-'0')
+						p.i++
+					} else {
+						break
+					}
+				}
+				writeRune(rune(v & 0xff))
+				p.i++
+				continue
+			case 'n':
+				writeByte('\n')
+				p.i++
+				continue
+			case 'r':
+				writeByte('\r')
+				p.i++
+				continue
+			case 't':
+				writeByte('\t')
+				p.i++
+				continue
+			case 'a':
+				writeByte('\a')
+				p.i++
+				continue
+			case 'b':
+				writeByte('\b')
+				p.i++
+				continue
+			case 'f':
+				writeByte('\f')
+				p.i++
+				continue
+			case 'v':
+				writeByte('\v')
+				p.i++
+				continue
+			case '\\', '\'', '"':
+				writeByte(e)
+				p.i++
+				continue
+			case '\n':
+				p.i++
+				continue
+			default:
+				writeByte('\\')
+				writeByte(e)
+				p.i++
+				continue
+			}
 		}
-		full++
-		if int64(sb.Len()) < p.maxString {
-			sb.WriteByte(c)
-		}
+		writeByte(c)
 		p.i++
 	}
 	return "", false
+}
+
+func parseHexN(b []byte) (uint32, bool) {
+	var v uint32
+	for _, c := range b {
+		var d byte
+		switch {
+		case c >= '0' && c <= '9':
+			d = c - '0'
+		case c >= 'a' && c <= 'f':
+			d = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			d = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		v = v<<4 | uint32(d)
+	}
+	return v, true
+}
+
+func utf8EncodeRune(p []byte, r rune) int {
+	if r < 0 || r > 0x10FFFF || (r >= 0xD800 && r <= 0xDFFF) {
+		r = 0xFFFD
+	}
+	switch {
+	case r < 0x80:
+		p[0] = byte(r)
+		return 1
+	case r < 0x800:
+		p[0] = 0xC0 | byte(r>>6)
+		p[1] = 0x80 | byte(r&0x3F)
+		return 2
+	case r < 0x10000:
+		p[0] = 0xE0 | byte(r>>12)
+		p[1] = 0x80 | byte((r>>6)&0x3F)
+		p[2] = 0x80 | byte(r&0x3F)
+		return 3
+	default:
+		p[0] = 0xF0 | byte(r>>18)
+		p[1] = 0x80 | byte((r>>12)&0x3F)
+		p[2] = 0x80 | byte((r>>6)&0x3F)
+		p[3] = 0x80 | byte(r&0x3F)
+		return 4
+	}
 }
 
 func (p *litParser) boolLit() (bool, bool) {
@@ -575,10 +728,11 @@ func (p *litParser) intLit() (int64, bool) {
 		p.i = start
 		return 0, false
 	}
+	end := p.i
 	if p.i < len(p.b) && p.b[p.i] == 'L' {
 		p.i++
 	}
-	n, err := strconv.ParseInt(string(p.b[start:p.i]), 10, 64)
+	n, err := strconv.ParseInt(string(p.b[start:end]), 10, 64)
 	if err != nil {
 		p.i = start
 		return 0, false
@@ -658,23 +812,26 @@ func (p *litParser) descrFieldsAt() ([]string, bool) {
 			return nil, false
 		}
 		p.ws()
-		// The second element is the field's dtype: a string, or a nested
-		// dtype.descr list for a nested structured field.
-		if s, ok := p.str(); ok {
-			out = append(out, s)
-		} else if nested, ok := p.descrFieldsAt(); ok {
-			out = append(out, nested...)
+		// The second element is the field's dtype: a string, a nested dtype.descr
+		// list, or a tuple-form dtype such as ('|O', (1,)).
+		if fieldTypes, ok := p.descrFieldType(); ok {
+			out = append(out, fieldTypes...)
 		} else {
 			return nil, false
 		}
-		// An optional third element is the sub-array shape, e.g. ('a', '<i4', (2,)).
+		// An optional third element is the sub-array shape, e.g. ('a', '<i4', (2,)),
+		// and a trailing comma is valid Python syntax in either 2- or 3-tuples.
 		p.ws()
 		if p.eat(',') {
 			p.ws()
-			if !p.skipValue() {
-				return nil, false
+			if p.i < len(p.b) && p.b[p.i] != ')' {
+				if !p.skipValue() {
+					return nil, false
+				}
+				p.ws()
+				p.eat(',')
+				p.ws()
 			}
-			p.ws()
 		}
 		if !p.eat(')') {
 			return nil, false
@@ -688,6 +845,45 @@ func (p *litParser) descrFieldsAt() ([]string, bool) {
 		}
 		return nil, false
 	}
+}
+
+// descrFieldType reads the dtype element of a structured field tuple: a scalar
+// string ('|O'), a nested dtype.descr list ([('x', '|O')]), or a tuple-form
+// sub-array dtype (('base_dtype', shape)).
+func (p *litParser) descrFieldType() ([]string, bool) {
+	if s, ok := p.str(); ok {
+		return []string{s}, true
+	}
+	if nested, ok := p.descrFieldsAt(); ok {
+		return nested, true
+	}
+	if p.i >= len(p.b) || p.b[p.i] != '(' || p.depth >= maxLitDepth {
+		return nil, false
+	}
+	p.depth++
+	defer func() { p.depth-- }()
+	p.i++
+	p.ws()
+	inner, ok := p.descrFieldType()
+	if !ok {
+		return nil, false
+	}
+	p.ws()
+	if p.eat(',') {
+		p.ws()
+		if p.i < len(p.b) && p.b[p.i] != ')' {
+			if !p.skipValue() {
+				return nil, false
+			}
+			p.ws()
+			p.eat(',')
+			p.ws()
+		}
+	}
+	if !p.eat(')') {
+		return nil, false
+	}
+	return inner, true
 }
 
 // isObjectDtype reports whether a descriptor names the object kind. numpy writes

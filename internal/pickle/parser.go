@@ -1,6 +1,11 @@
 package pickle
 
 import (
+	"bytes"
+	"compress/zlib"
+	"errors"
+	"io"
+
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
@@ -39,12 +44,35 @@ func init() {
 // source as a pickle and produce a page of structural findings for every .py file
 // in a repository.
 // compressedHead reports whether b opens with a single-stream compressor frame:
-// RFC 1950 zlib (deflate in CMF's low nibble, FCHECK remainder zero) or the lzma
-// header. gzip, bzip2, xz, zstd and the 7z/rar signatures are claimed by the magic
-// table at a higher priority than this sniffer, so they need no check here.
-func compressedHead(b []byte) bool {
-	if len(b) >= 2 && b[0]&0x0f == 8 && (int(b[0])<<8|int(b[1]))%31 == 0 {
-		return true
+// RFC 1950 zlib (deflate in CMF's low nibble, CINFO <= 7, FCHECK remainder zero,
+// validated by a bounded zlib decompression probe) or the lzma header. gzip,
+// bzip2, xz, zstd and the 7z/rar signatures are claimed by the magic table at a
+// higher priority than this sniffer, so they need no check here.
+//
+// The decompression probe is required because valid protocol-0/1 pickles can
+// match the two-byte RFC 1950 check by coincidence — e.g. "(S" (MARK + STRING,
+// 0x2853 % 31 == 0) or BINUNICODE (0x58) followed by a matching length byte.
+func compressedHead(b []byte, whole bool) bool {
+	if len(b) >= 2 && b[0]&0x0f == 8 && b[0]>>4 <= 7 && (int(b[0])<<8|int(b[1]))%31 == 0 {
+		zr, err := zlib.NewReader(bytes.NewReader(b))
+		if err == nil {
+			var out [64]byte
+			total := 0
+			for total < len(out) {
+				n, rerr := zr.Read(out[total:])
+				total += n
+				if rerr == io.EOF {
+					_ = zr.Close()
+					return true
+				}
+				if rerr != nil {
+					_ = zr.Close()
+					return errors.Is(rerr, io.ErrUnexpectedEOF) && !whole
+				}
+			}
+			_ = zr.Close()
+			return true
+		}
 	}
 	return len(b) >= 3 && b[0] == 0x5d && b[1] == 0x00 && b[2] == 0x00
 }
@@ -59,7 +87,16 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if err != nil && len(head) < 2 {
 		return artifact.FormatUnknown, false
 	}
-	if compressedHead(head) {
+	// Only read a wider window for the zlib validation probe when the first two
+	// bytes actually satisfy the cheap RFC 1950 header check.
+	zprobe := head
+	if len(head) >= 2 && head[0]&0x0f == 8 && head[0]>>4 <= 7 && (int(head[0])<<8|int(head[1]))%31 == 0 && size > n {
+		if wide, werr := s.Bytes(0, min(size, int64(4096))); len(wide) >= len(head) {
+			_ = werr
+			zprobe = wide
+		}
+	}
+	if compressedHead(zprobe, int64(len(zprobe)) >= size) {
 		// A zlib/lzma frame is opaque: the bytes a resync would find inside it are
 		// deflate output, not opcodes. The weak zlib/lzma magic sniffers sit below
 		// this one (a safetensors header can start 78 9c), so without this gate a

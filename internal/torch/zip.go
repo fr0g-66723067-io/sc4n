@@ -123,7 +123,7 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if s == nil || s.Size() < 8 {
 		return artifact.FormatUnknown, false
 	}
-	head, _ := s.Bytes(0, 16)
+	head, _ := s.Bytes(0, 32)
 
 	// Legacy binary: the magic is a pickled int, and the plan's raw little-endian
 	// forms are accepted too (detectLegacy returns the byte width of the magic).
@@ -153,18 +153,21 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 
 // classifyZip maps a zip member-name list to a torch shape. The order matters:
 // a TorchScript archive also contains data.pkl, so constants.pkl/code must be
-// checked before the generic new-format shape.
+// checked before the generic new-format shape. PyTorch writes every member
+// under a single top-level directory prefix (typically "archive/", or the file
+// stem), so both bare names and single-prefix names are recognised.
 func classifyZip(names []string) (artifact.Format, bool) {
 	var hasData, hasConstants, hasArchiveFormat, hasCode bool
 	for _, n := range names {
+		rel := stripTorchTopDir(n)
 		switch {
-		case n == "data.pkl":
+		case n == "data.pkl" || rel == "data.pkl":
 			hasData = true
-		case n == "constants.pkl":
+		case n == "constants.pkl" || rel == "constants.pkl":
 			hasConstants = true
-		case n == "archive_format":
+		case n == "archive_format" || rel == "archive_format":
 			hasArchiveFormat = true
-		case n == "code" || strings.HasPrefix(n, "code/"):
+		case n == "code" || strings.HasPrefix(n, "code/") || rel == "code" || strings.HasPrefix(rel, "code/"):
 			hasCode = true
 		}
 	}
@@ -177,6 +180,16 @@ func classifyZip(names []string) (artifact.Format, bool) {
 		return artifact.FormatTorchNew, true
 	}
 	return artifact.FormatUnknown, false
+}
+
+// stripTorchTopDir strips one leading directory component ("archive/data.pkl"
+// -> "data.pkl") and returns "" when n has no leading directory.
+func stripTorchTopDir(n string) string {
+	i := strings.IndexByte(n, '/')
+	if i <= 0 || i+1 >= len(n) {
+		return ""
+	}
+	return n[i+1:]
 }
 
 // looksTorchTar reports whether a tar's member list is the legacy torch layout.
@@ -218,7 +231,7 @@ func startsWithPK(s source.Source) bool {
 // only ever a hint (dispatch is by content); it is used here solely to decide
 // whether to probe for a *prefixed* zip, which the magic table cannot see.
 var torchExts = map[string]bool{
-	".pt": true, ".pth": true, ".ckpt": true, ".ptl": true, ".pt2": true,
+	".pt": true, ".pth": true, ".ckpt": true, ".ptl": true, ".pt2": true, ".bin": true,
 }
 
 // isTorchExt reports whether name's extension is a torch checkpoint extension.

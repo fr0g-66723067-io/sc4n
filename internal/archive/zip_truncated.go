@@ -2,6 +2,7 @@ package archive
 
 import (
 	"bytes"
+	"compress/bzip2"
 	"compress/flate"
 	"errors"
 	"io"
@@ -128,6 +129,7 @@ func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMembe
 		flags := le16(h[6:])
 		method := le16(h[8:])
 		comp := int64(le32(h[18:]))
+		uncomp := int64(le32(h[22:]))
 		nameLen := int64(le16(h[26:]))
 		extraLen := int64(le16(h[28:]))
 		dataOff := off + zipLocalHeaderLen + nameLen + extraLen
@@ -144,13 +146,11 @@ func recoverLocalMembers(s source.Source, l limits.Limits) (out []recoveredMembe
 		sizeInvalid := false
 		switch {
 		case comp == 0xFFFFFFFF:
-			// Zip64: the real compressed size is in the local extra field. The
-			// declared value is only usable when it stays inside the source and
-			// ends on container framing; otherwise a truncated record would make
-			// the walk read past its member and hide the next one. The bound is
-			// checked in uint64: int64(c) is negative for a size above MaxInt64,
-			// which passed the old `dataOff+int64(c) <= size` test.
-			if _, c, _, okC := localZip64Sizes(s, off, nameLen, extraLen, false, true); okC && c > 0 &&
+			// Zip64: the real compressed size is in the local extra field. When
+			// uncompressed size is also 0xFFFFFFFF it precedes compressed size
+			// per APPNOTE 4.5.3, so wantUncomp must reflect uncomp == 0xFFFFFFFF.
+			wantUncomp := uncomp == 0xFFFFFFFF
+			if _, c, _, okC := localZip64Sizes(s, off, nameLen, extraLen, wantUncomp, true); okC && c > 0 &&
 				dataOff <= size && c <= uint64(size-dataOff) {
 				claimEnd := dataOff + int64(c)
 				if claimEnd == size || descriptorLen(s, dataOff, claimEnd) > 0 || nextZipSig(s, claimEnd, size) == claimEnd {
@@ -258,6 +258,10 @@ func scanRecovered(ctx *artifact.Ctx, s source.Source, members []recoveredMember
 		if m.name != "" {
 			checkMemberName(ctx, &Member{Name: m.name})
 		}
+		if m.flags&0x1 != 0 {
+			ctx.Sink.EmitExtra(ruleArchiveEncrypted, 0, "encrypted member "+snippet(m.name), map[string]string{"member": m.name})
+			continue
+		}
 		if m.sizeInvalid {
 			ctx.Sink.EmitExtra(ruleArchiveMemberError, 0,
 				"member "+snippet(m.name)+" declares a zip64 size that does not end on container framing",
@@ -284,6 +288,13 @@ func scanRecovered(ctx *artifact.Ctx, s source.Source, members []recoveredMember
 			r := capReader(truncatingReader{r: fr}, l, span, "member "+snippet(m.name))
 			n = processReader(ctx, m.name, -1, span, r, nil)
 			_ = fr.Close()
+			scanned++
+		case 12:
+			br := bzip2.NewReader(io.NewSectionReader(s, m.dataOff, span))
+			l := ctx.Limits
+			l.MaxDecompressedBytes = ctx.RemainingDecompressed()
+			r := capReader(truncatingReader{r: br}, l, span, "member "+snippet(m.name))
+			n = processReader(ctx, m.name, -1, span, r, nil)
 			scanned++
 		default:
 			EmitOpenError(ctx, m.name, &unsupportedMethodError{method: m.method})

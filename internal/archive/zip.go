@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"compress/bzip2"
 	"compress/flate"
 	"errors"
 	"hash/crc32"
@@ -127,7 +128,88 @@ func findEOCD(s source.Source) (int64, int64, error) {
 	if trailing >= 0 {
 		return pos, trailing, nil
 	}
+	// Standard tail window (64 KiB + 22 bytes) found no EOCD. A zip with >64 KiB
+	// of appended trailing data (polyglot / appended payload) places its EOCD
+	// earlier in the file; probe backward in bounded chunks and validate that a
+	// candidate EOCD points to a real central directory so random signature bytes
+	// inside member data are never mistaken for an EOCD.
+	if start > 0 {
+		maxBack := int64(1 << 20)
+		if startsWithLocalHeader(s) {
+			maxBack = 16 << 20
+		}
+		floor := size - maxBack
+		if floor < 0 {
+			floor = 0
+		}
+		const chunk = int64(256 << 10)
+		// Overlap by 21 bytes so an EOCD straddling the boundary between the
+		// standard tail window and earlier chunks is still found.
+		hi := start + 21
+		if hi > size {
+			hi = size
+		}
+		for hi > floor && hi >= 22 {
+			lo := hi - chunk
+			if lo < floor {
+				lo = floor
+			}
+			cb, cerr := s.Bytes(lo, hi-lo)
+			if cerr != nil && int64(len(cb)) < hi-lo {
+				break
+			}
+			for i := len(cb) - 22; i >= 0; i-- {
+				if le32(cb[i:]) != sigEOCD {
+					continue
+				}
+				candPos := lo + int64(i)
+				end := candPos + 22 + int64(le16(cb[i+20:]))
+				if end > size {
+					continue
+				}
+				if validEOCDCandidate(s, candPos, cb[i:i+22]) {
+					return candPos, size - end, nil
+				}
+			}
+			if lo == floor {
+				break
+			}
+			hi = lo + 21
+		}
+	}
 	return 0, 0, ErrNoEOCD
+}
+
+// validEOCDCandidate verifies that a candidate EOCD found behind >64 KiB of
+// trailing data actually references a central directory (or an empty archive).
+func validEOCDCandidate(s source.Source, eocdPos int64, end []byte) bool {
+	if len(end) < 22 || le32(end) != sigEOCD {
+		return false
+	}
+	entriesTotal := int64(le16(end[10:]))
+	cdSize := int64(le32(end[12:]))
+	cdOff := int64(le32(end[16:]))
+	anchor := eocdPos
+	if z64Pos, z64Size, z64Off, z64Entries, zerr := readZip64(s, eocdPos); zerr == nil {
+		if (entriesTotal != 0xffff && entriesTotal != z64Entries) ||
+			(cdSize != 0xffffffff && cdSize != z64Size) ||
+			(cdOff != 0xffffffff && cdOff != z64Off) {
+			return false
+		}
+		entriesTotal, cdSize, cdOff = z64Entries, z64Size, z64Off
+		anchor = z64Pos
+	}
+	if entriesTotal == 0 && cdSize == 0 && cdOff == 0 {
+		return true
+	}
+	if cdSize <= 0 || cdSize > anchor {
+		return false
+	}
+	if isCentralAt(s, cdOff) && cdOff+cdSize <= anchor {
+		return true
+	}
+	derived := anchor - cdSize
+	return derived >= 0 && isCentralAt(s, derived)
 }
 
 // zipDirInfo carries the directory-level facts a caller needs to report.
@@ -602,7 +684,7 @@ func localZip64Sizes(s source.Source, localOff, nameLen, extraLen int64, wantUnc
 // and validates the member's CRC-32 at end of stream.
 func openZipMember(s source.Source, l limits.Limits, m Member) (io.ReadCloser, error) {
 	switch m.Method {
-	case 0, 8:
+	case 0, 8, 12:
 	default:
 		return nil, &unsupportedMethodError{method: m.Method}
 	}
@@ -628,6 +710,8 @@ func openZipMember(s source.Source, l limits.Limits, m Member) (io.ReadCloser, e
 	case 8:
 		fr := flate.NewReader(sec)
 		inner, closer = fr, fr
+	case 12:
+		inner = bzip2.NewReader(sec)
 	}
 	capBytes, rule := decompressionCap(comp, l)
 	lr := &limitReader{r: inner, remaining: capBytes, rule: rule, limit: limitName(rule), cap: capBytes, detail: "member " + m.Name}

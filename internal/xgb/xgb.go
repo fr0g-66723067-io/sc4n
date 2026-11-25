@@ -285,6 +285,26 @@ func (w *uwalker) fail(msg string) error {
 	return errStop
 }
 
+// maxBlob returns the effective string/blob scan cap, defaulting a zero limit
+// to limits.Default().MaxStringBlob so a zero-valued Limits never discards
+// every string silently.
+func (w *uwalker) maxBlob() int64 {
+	if w.l.MaxStringBlob > 0 {
+		return w.l.MaxStringBlob
+	}
+	return limits.Default().MaxStringBlob
+}
+
+// failRead records an EOF/short-read error as stopExhausted (so the sniffer
+// distinguishes a large valid document straddling its 64 KiB sniff window from
+// a contradiction) and any other error as stopInvalid.
+func (w *uwalker) failRead(msg string, err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return w.failShort(msg)
+	}
+	return w.fail(msg)
+}
+
 // failShort records an error that is indistinguishable from the document simply
 // continuing past the bytes available. The parser reports it exactly as fail
 // does; only the sniffer's verdict differs.
@@ -430,7 +450,7 @@ func (w *uwalker) readLength() (int64, error) {
 func (w *uwalker) stringValue() error {
 	n, err := w.readLength()
 	if err != nil {
-		return w.fail("UBJSON string: " + err.Error())
+		return w.failRead("UBJSON string: "+err.Error(), err)
 	}
 	if n < 0 {
 		return w.fail("UBJSON string declares a negative length")
@@ -438,17 +458,24 @@ func (w *uwalker) stringValue() error {
 	if n > w.remaining() {
 		return w.failShort("UBJSON string length exceeds the bytes remaining")
 	}
-	if n > w.l.MaxStringBlob {
+	cap := w.maxBlob()
+	if n > cap {
 		if !w.quiet {
-			limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "ubjson string")
+			limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, cap, "ubjson string")
 		}
-		w.discard(n)
+		off := w.off
+		buf, err := w.readN(cap)
+		if err != nil {
+			return w.failShort("UBJSON string truncated")
+		}
+		w.scanString(off, buf)
+		w.discard(n - cap)
 		return nil
 	}
 	off := w.off
 	buf, err := w.readN(n)
 	if err != nil {
-		return w.fail("UBJSON string truncated")
+		return w.failShort("UBJSON string truncated")
 	}
 	w.scanString(off, buf)
 	return nil
@@ -468,7 +495,7 @@ func (w *uwalker) key() error {
 	}
 	n, err := w.readLength()
 	if err != nil {
-		return w.fail("UBJSON object key: " + err.Error())
+		return w.failRead("UBJSON object key: "+err.Error(), err)
 	}
 	if n < 0 {
 		return w.fail("UBJSON object key length is negative")
@@ -476,17 +503,24 @@ func (w *uwalker) key() error {
 	if n > w.remaining() {
 		return w.failShort("UBJSON object key length exceeds the bytes remaining")
 	}
-	if n > w.l.MaxStringBlob {
+	cap := w.maxBlob()
+	if n > cap {
 		if !w.quiet {
-			limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "ubjson key")
+			limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, cap, "ubjson key")
 		}
-		w.discard(n)
+		off := w.off
+		buf, err := w.readN(cap)
+		if err != nil {
+			return w.failShort("UBJSON object key truncated")
+		}
+		w.scanString(off, buf)
+		w.discard(n - cap)
 		return nil
 	}
 	off := w.off
 	buf, err := w.readN(n)
 	if err != nil {
-		return w.fail("UBJSON object key truncated")
+		return w.failShort("UBJSON object key truncated")
 	}
 	w.scanString(off, buf)
 	return nil
@@ -520,7 +554,7 @@ func (w *uwalker) array(depth int) error {
 		w.discard(1)
 		t, err := w.readByte()
 		if err != nil {
-			return w.fail("typed UBJSON array without an element type")
+			return w.failRead("typed UBJSON array without an element type", err)
 		}
 		if n, err := w.expectCount(); err != nil {
 			return err
@@ -532,7 +566,7 @@ func (w *uwalker) array(depth int) error {
 		w.discard(1)
 		n, err := w.readLength()
 		if err != nil {
-			return w.fail("UBJSON array count: " + err.Error())
+			return w.failRead("UBJSON array count: "+err.Error(), err)
 		}
 		if n < 0 {
 			return w.fail("UBJSON array declares a negative count")
@@ -568,12 +602,15 @@ func (w *uwalker) object(depth int) error {
 		w.discard(1)
 		t, err := w.readByte()
 		if err != nil {
-			return w.fail("typed UBJSON object without a value type")
+			return w.failRead("typed UBJSON object without a value type", err)
 		}
 		if n, err := w.expectCount(); err != nil {
 			return err
 		} else {
 			for range n {
+				if !w.count() {
+					return errStop
+				}
 				if err := w.key(); err != nil {
 					return err
 				}
@@ -588,7 +625,7 @@ func (w *uwalker) object(depth int) error {
 		w.discard(1)
 		n, err := w.readLength()
 		if err != nil {
-			return w.fail("UBJSON object count: " + err.Error())
+			return w.failRead("UBJSON object count: "+err.Error(), err)
 		}
 		if n < 0 {
 			return w.fail("UBJSON object declares a negative count")
@@ -624,13 +661,16 @@ func (w *uwalker) object(depth int) error {
 // expectCount reads a mandatory `#`-prefixed count.
 func (w *uwalker) expectCount() (int64, error) {
 	pb, err := w.peek()
-	if err != nil || pb != mCount {
+	if err != nil {
+		return 0, w.failRead("typed UBJSON container without a count", err)
+	}
+	if pb != mCount {
 		return 0, w.fail("typed UBJSON container without a count")
 	}
 	w.discard(1)
 	n, err := w.readLength()
 	if err != nil {
-		return 0, w.fail("UBJSON container count: " + err.Error())
+		return 0, w.failRead("UBJSON container count: "+err.Error(), err)
 	}
 	if n < 0 {
 		return 0, w.fail("UBJSON container declares a negative count")
@@ -653,7 +693,18 @@ func (w *uwalker) typedValues(t byte, n int64, depth int) error {
 	case mInt64, mFloat64:
 		return w.skipFixed(n, 8)
 	case mNull, mNoop, mTrue, mFalse:
-		// A strongly typed container of payload-less values has an empty body.
+		// A strongly typed container of payload-less values has an empty body,
+		// but its declared element count still charges MaxArrayElements.
+		if cap := w.arrayCap(); n > cap-w.elems {
+			if !w.elemsHi {
+				w.elemsHi = true
+				if !w.quiet {
+					limits.Emit(w.sink, limits.RuleEntries, "MaxArrayElements", n, cap, "ubjson typed null/bool array")
+				}
+			}
+			return errStop
+		}
+		w.elems += n
 		return nil
 	case mArray, mObject:
 		// The spec allows a container's declared element type to be a container
@@ -669,6 +720,9 @@ func (w *uwalker) typedValues(t byte, n int64, depth int) error {
 			return errStop
 		}
 		for range n {
+			if !w.count() {
+				return errStop
+			}
 			var err error
 			if t == mArray {
 				err = w.array(depth + 1)
@@ -688,6 +742,9 @@ func (w *uwalker) typedValues(t byte, n int64, depth int) error {
 			return errStop
 		}
 		for range n {
+			if !w.count() {
+				return errStop
+			}
 			if err := w.stringValue(); err != nil {
 				return err
 			}
