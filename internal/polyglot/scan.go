@@ -31,6 +31,7 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/archive"
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
+	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
@@ -128,8 +129,7 @@ func checkNative(ctx *artifact.Ctx, s source.Source, f artifact.Format, size int
 	seen := map[int64]bool{0: true}
 	for _, w := range MagicWindows(s, size) {
 		base := w.Base
-		EachValidatedNative(w.Data, func(kind bytescan.NativeKind, off int) {
-			abs := base + int64(off)
+		EachValidatedNativeInWindow(s, size, w, func(kind bytescan.NativeKind, abs int64) {
 			if seen[abs] {
 				return
 			}
@@ -154,14 +154,19 @@ func checkAppendedArchive(ctx *artifact.Ctx, s source.Source, size int64) {
 	if _, err := archive.Collect(s, ctx.Limits); err != nil {
 		return
 	}
-	sub, ok := ctx.Member(ctx.Sink.Artifact()+"!zip", artifact.FormatZip)
-	if !ok {
-		return
-	}
-	_ = archive.Scan(sub, s)
 	ctx.Sink.EmitExtra(rulePolyglotContainer, 0,
 		"the file is both native (leading header) and zip (an end-of-central-directory record after it), so two readers open it two different ways",
 		map[string]string{"container": "zip", "second": "native"})
+	sub, ok := ctx.Member("!zip", artifact.FormatZip)
+	if !ok {
+		maxDepth := ctx.Depth
+		if ctx.Session != nil {
+			maxDepth = ctx.Session.TopLimits.MaxDepth
+		}
+		limits.Emit(ctx.Sink, limits.RuleDepth, "MaxDepth", int64(ctx.Depth+1), int64(maxDepth), "stopped at !zip")
+		return
+	}
+	_ = archive.Scan(sub, s)
 }
 
 func max64(a, b int64) int64 {

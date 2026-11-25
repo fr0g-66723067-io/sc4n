@@ -51,6 +51,11 @@ type Options struct {
 	TrailingIsStorage bool
 	// StorageDescription names the payload for the evidence.
 	StorageDescription string
+	// SkipRanges lists half-open byte intervals [start, end) inside the stream
+	// that belong to an outer container's inline payload (such as joblib inline
+	// numeric array bodies) and must be jumped over cleanly in O(1) without
+	// modifying the operand stack or copying the buffer.
+	SkipRanges [][2]int64
 }
 
 // Stream is the result of a walk.
@@ -114,6 +119,7 @@ func Walk(ctx *artifact.Ctx, s source.Source, opt Options) (*Stream, error) {
 		lim:      ctx.Limits,
 		data:     data,
 		opt:      opt,
+		skips:    normalizeSkipRanges(opt.SkipRanges, int64(len(data))),
 		mm:       newMemo(len(data)),
 		globals:  map[string]*Global{},
 		structs:  map[string]*structStat{},
@@ -190,11 +196,17 @@ type walker struct {
 	structs map[string]*structStat
 
 	// once guards findings that should appear at most once per stream.
-	once map[string]bool
+	once         map[string]bool
+	onceOverflow bool
 	// siteOnce guards per-offset keys; it is bounded separately because an
 	// attacker controls the offset and a stream of malformed bytes would
 	// otherwise grow this map without limit.
 	siteOnce map[string]bool
+
+	// skips is the sorted, merged, clamped copy of opt.SkipRanges, walked with
+	// a monotonic cursor so jumping an inline container payload is O(1).
+	skips   [][2]int64
+	skipIdx int
 
 	// globalsOverflow is set when the distinct-global cap was reached and later
 	// names were classified without being retained in globals/stream.Globals.
@@ -314,24 +326,57 @@ func (w *walker) end() int {
 	return len(w.data)
 }
 
+// normalizeSkipRanges filters, clamps to [0, size], sorts and merges half-open
+// byte ranges so segment() can jump them with a single monotonic cursor.
+func normalizeSkipRanges(in [][2]int64, size int64) [][2]int64 {
+	if len(in) == 0 || size <= 0 {
+		return nil
+	}
+	out := make([][2]int64, 0, len(in))
+	for _, r := range in {
+		a, b := r[0], r[1]
+		if a < 0 {
+			a = 0
+		}
+		if b > size {
+			b = size
+		}
+		if a < b {
+			out = append(out, [2]int64{a, b})
+		}
+	}
+	if len(out) <= 1 {
+		return out
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i][0] != out[j][0] {
+			return out[i][0] < out[j][0]
+		}
+		return out[i][1] < out[j][1]
+	})
+	merged := out[:1]
+	for _, r := range out[1:] {
+		last := &merged[len(merged)-1]
+		if r[0] <= last[1] {
+			if r[1] > last[1] {
+				last[1] = r[1]
+			}
+			continue
+		}
+		merged = append(merged, r)
+	}
+	return merged
+}
+
 // run walks the whole window.
 func (w *walker) run() {
 	size := int64(len(w.data))
 	w.stream.Bytes = size
 	start := 0
-	if w.data[0] != opPROTO {
-		// A window that does not begin with PROTO is either a protocol-0/1
-		// stream or a prefix followed by a protocol-bearing one. Text in the
-		// prefix can decode as ordinary opcodes and reach the later STOP, so a
-		// successful walk from 0 is not proof that the prefix is part of the
-		// pickle; a clean stream at a later PROTO is the stronger evidence.
-		if k, ok := w.locateStreamStart(); ok {
-			w.emitPrefix(0, k)
-			w.windowStart = k
-			start = k
-		}
-	}
-	if start == 0 && !w.probePickle(0, false) {
+	// Test offset 0 BEFORE searching for a later PROTO so a valid protocol-0/1
+	// pickle at offset 0 is never skipped merely because a later string constant
+	// embeds a benign protocol-2..5 pickle.
+	if !w.probePickle(0, false) {
 		// The window does not open with a clean pickle. If a clean one starts
 		// later, the bytes in front of it are a prefix (the nullifAI shape) and
 		// are reported as such.
@@ -345,7 +390,7 @@ func (w *walker) run() {
 	for pos < int(size) {
 		next, fatal := w.segment(pos)
 		if fatal || next <= pos {
-			return
+			break
 		}
 		pos = next
 		if !w.firstSegmentDone {
@@ -354,10 +399,10 @@ func (w *walker) run() {
 		}
 		if w.opt.TrailingIsStorage {
 			// The container owns everything past the object pickle.
-			return
+			break
 		}
 		if pos >= int(size) {
-			return
+			break
 		}
 		// Decide what the bytes after the STOP are.
 		if w.probePickle(pos, false) {
@@ -366,7 +411,7 @@ func (w *walker) run() {
 			continue
 		}
 		w.emitTrailing(pos)
-		return
+		break
 	}
 	// A stream that never reached STOP is truncated.
 	if !w.stream.SawStop {
@@ -441,6 +486,7 @@ func (w *walker) probePickle(off int, needEvidence bool) bool {
 		silent:  true,
 		lim:     w.lim,
 		data:    w.data,
+		skips:   w.skips,
 		limit:   budget,
 		mm:      newMemo(budget),
 		globals: map[string]*Global{},
@@ -536,6 +582,19 @@ func (w *walker) segment(start int) (int, bool) {
 	w.resyncRun = 0
 	end := w.end()
 	for pos < end {
+		for w.skipIdx < len(w.skips) && w.skips[w.skipIdx][1] <= int64(pos) {
+			w.skipIdx++
+		}
+		if w.skipIdx < len(w.skips) && int64(pos) >= w.skips[w.skipIdx][0] {
+			nextPos := int(w.skips[w.skipIdx][1])
+			if nextPos > end {
+				nextPos = end
+			}
+			pos = nextPos
+			w.resyncRun = 0
+			w.skipIdx++
+			continue
+		}
 		if w.stream.Ops >= maxWalkOps {
 			w.emitOnce("walk-ops", limits.RuleEntries, int64(pos),
 				"MaxWalkOps reached: the stream decoded "+strconv.Itoa(w.stream.Ops)+" opcodes; the remainder was not walked")
@@ -582,7 +641,7 @@ func (w *walker) segment(start int) (int, bool) {
 				}
 				return pos, true
 			}
-			if pos == start && kind == "no-newline" {
+			if kind == "line-over-cap" {
 				w.stream.LineOverflow = true
 				w.structFinding(kind, err.Error(), int64(pos))
 				return pos, true
@@ -911,10 +970,14 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		g := w.globalValue(mod, name, int64(off), false)
-		if _, marked := w.st.popMark(); !marked {
+		items, marked := w.st.popMark()
+		if !marked {
 			w.structFinding("no-mark", "INST with no MARK on the stack", int64(off))
 		}
 		w.inst.add(g.text, int64(off))
+		args := containerOf(kTuple, items, len(items))
+		w.checkCodeStrings(args, off, "the INST argument", callableName(g))
+		w.malicePayload(g.global, args, off)
 		w.st.push(Val{kind: kInstance, text: g.text, global: g.global})
 
 	case opOBJ:
@@ -924,10 +987,15 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			break
 		}
 		cls := Val{}
+		var argItems []Val
 		if len(items) > 0 {
 			cls = items[0]
+			argItems = items[1:]
 		}
 		w.obj.add(describe(cls), int64(off))
+		args := containerOf(kTuple, argItems, len(argItems))
+		w.checkCodeStrings(args, off, "the OBJ argument", callableName(cls))
+		w.malicePayload(cls.global, args, off)
 		w.st.push(Val{kind: kInstance, text: cls.text, global: cls.global})
 
 	case opNEWOBJ:
@@ -937,8 +1005,8 @@ func (w *walker) apply(code byte, arg any, off int, info opcodeInfo) bool {
 			w.structFinding("stack-underflow", "NEWOBJ with fewer than two operands", int64(off))
 			break
 		}
-		if !isBuildableClass(cls.global) && cls.global != nil {
-			w.newObj.add(cls.text, int64(off))
+		if !isBuildableClass(cls.global) {
+			w.newObj.add(describe(cls), int64(off))
 		}
 		w.checkCodeStrings(args, off, "the NEWOBJ argument", callableName(cls))
 		w.st.push(Val{kind: kInstance, text: cls.text, global: cls.global})
@@ -1470,21 +1538,44 @@ func (w *walker) structFinding(kind, detail string, off int64) {
 	}
 }
 
-// emitOnce emits a finding at most once per key for this stream.
-func (w *walker) emitOnce(key string, r *report.Rule, off int64, ev string) {
-	if w.silent || w.once[key] {
-		return
+// onceKey records a stream-level deduplication key, capping map growth at
+// maxOnceKeys so a stream naming millions of unique globals or REDUCE targets
+// cannot exhaust memory after maxDistinctGlobal is exceeded.
+func (w *walker) onceKey(key string) bool {
+	if w.silent {
+		return false
+	}
+	if w.once == nil {
+		w.once = map[string]bool{}
+	}
+	if w.once[key] {
+		return false
+	}
+	if len(w.once) >= maxOnceKeys {
+		if !w.onceOverflow {
+			w.onceOverflow = true
+			w.sink.Emit(limits.RuleEntries, 0,
+				"MaxOnceKeys reached: per-stream deduplication is exhausted; later distinct findings are not reported")
+		}
+		return false
 	}
 	w.once[key] = true
+	return true
+}
+
+// emitOnce emits a finding at most once per key for this stream.
+func (w *walker) emitOnce(key string, r *report.Rule, off int64, ev string) {
+	if !w.onceKey(key) {
+		return
+	}
 	w.sink.Emit(r, off, ev)
 }
 
 // emitExtraOnce is emitOnce with extra fields.
 func (w *walker) emitExtraOnce(key string, r *report.Rule, off int64, ev string, extra map[string]string) {
-	if w.silent || w.once[key] {
+	if !w.onceKey(key) {
 		return
 	}
-	w.once[key] = true
 	w.sink.EmitExtra(r, off, ev, extra)
 }
 
@@ -1822,8 +1913,14 @@ func (w *walker) decodeArg(info opcodeInfo, pos int) (any, int, error) {
 		if info.arg == argDecimalnlLong {
 			s = strings.TrimSuffix(s, "L")
 		}
-		n, perr := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		trimmed := strings.TrimSpace(s)
+		n, perr := strconv.ParseInt(trimmed, 10, 64)
 		if perr != nil {
+			if info.arg == argDecimalnlLong && errors.Is(perr, strconv.ErrRange) {
+				if clamped, ok := parseClampedDecimal(trimmed); ok {
+					return clamped, next, nil
+				}
+			}
 			return nil, p, argErr("bad-decimal", fmt.Sprintf("%s has an unparsable decimal argument %q", info.name, truncateForEvidence(s)))
 		}
 		return n, next, nil
@@ -1882,7 +1979,11 @@ func (w *walker) decodeArg(info opcodeInfo, pos int) (any, int, error) {
 		if !utf8.Valid(raw) {
 			w.structFinding("non-utf8", info.name+" carries a payload that is not valid UTF-8", int64(pos))
 		}
-		return string(raw), next, nil
+		decoded, derr := unescapeRawUnicode(raw)
+		if derr != nil {
+			w.structFinding("bad-escape", derr.Error(), int64(pos))
+		}
+		return decoded, next, nil
 
 	case argString1:
 		if !need(1) {
@@ -1973,20 +2074,32 @@ func (w *walker) readNewline(info opcodeInfo, p, maxScan int) ([]byte, int, erro
 	if maxScan <= 0 {
 		maxScan = maxNameScan
 	}
-	limit := w.end()
+	end := w.end()
+	limit := end
+	hitCap := false
 	if p+maxScan < limit {
 		limit = p + maxScan
+		hitCap = true
+	} else if end < len(w.data) {
+		// The probe budget ended before the line or the artifact did.
+		hitCap = true
+	} else if limit-p >= maxScan {
+		hitCap = true
 	}
 	i := bytes.IndexByte(w.data[p:limit], '\n')
 	if i < 0 {
-		if info.arg == argStringnl || info.arg == argStringnlNoescape || info.arg == argUnicodestringnl {
-			full := len(w.data) - p
-			w.reportBlobCap(p, full, int64(maxScan), "newline argument")
-			return nil, p, argErr("line-over-blob-cap",
+		if hitCap {
+			if info.arg == argStringnl || info.arg == argStringnlNoescape || info.arg == argUnicodestringnl {
+				full := len(w.data) - p
+				w.reportBlobCap(p, full, int64(maxScan), "newline argument")
+				return nil, p, argErr("line-over-blob-cap",
+					fmt.Sprintf("%s has no newline within %d bytes, so its argument cannot be read", info.name, maxScan))
+			}
+			return nil, p, argErr("line-over-cap",
 				fmt.Sprintf("%s has no newline within %d bytes, so its argument cannot be read", info.name, maxScan))
 		}
 		return nil, p, argErr("no-newline",
-			fmt.Sprintf("%s has no newline within %d bytes, so its argument cannot be read", info.name, maxScan))
+			fmt.Sprintf("%s has no newline before end of stream", info.name))
 	}
 	return w.data[p : p+i], p + i + 1, nil
 }
@@ -2308,6 +2421,91 @@ func hexVal(c byte) (byte, bool) {
 		return c - 'A' + 10, true
 	}
 	return 0, false
+}
+
+// parseClampedDecimal validates an ASCII decimal integer that overflowed int64
+// (such as PyTorch's protocol-0 MAGIC_NUMBER) and clamps it preserving sign,
+// matching countedLong's contract for LONG1/LONG4.
+func parseClampedDecimal(s string) (int64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	neg := false
+	switch s[0] {
+	case '-':
+		neg = true
+		s = s[1:]
+	case '+':
+		s = s[1:]
+	}
+	if s == "" {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	if neg {
+		return math.MinInt64, true
+	}
+	return math.MaxInt64, true
+}
+
+// unescapeRawUnicode decodes Python's raw-unicode-escape codec (\uXXXX and
+// \UXXXXXXXX preceded by an odd number of backslashes), which CPython applies
+// to protocol-0 UNICODE payloads.
+func unescapeRawUnicode(b []byte) (string, error) {
+	if bytes.IndexByte(b, '\\') < 0 {
+		return string(b), nil
+	}
+	out := make([]byte, 0, len(b))
+	var firstErr error
+	for i := 0; i < len(b); {
+		if b[i] != '\\' {
+			out = append(out, b[i])
+			i++
+			continue
+		}
+		bs := 0
+		for i+bs < len(b) && b[i+bs] == '\\' {
+			bs++
+		}
+		if bs%2 == 1 && i+bs < len(b) && (b[i+bs] == 'u' || b[i+bs] == 'U') {
+			kind := b[i+bs]
+			want := 4
+			if kind == 'U' {
+				want = 8
+			}
+			if i+bs+1+want <= len(b) {
+				var cp uint32
+				ok := true
+				for k := 0; k < want; k++ {
+					hv, vok := hexVal(b[i+bs+1+k])
+					if !vok {
+						ok = false
+						break
+					}
+					cp = cp<<4 | uint32(hv)
+				}
+				if ok && cp <= utf8.MaxRune {
+					out = append(out, b[i:i+bs-1]...)
+					out = utf8.AppendRune(out, rune(cp))
+					i += bs + 1 + want
+					continue
+				}
+			}
+			if firstErr == nil {
+				firstErr = argErr("bad-escape", fmt.Sprintf("UNICODE argument has an invalid \\%c escape", kind))
+			}
+			out = append(out, b[i:i+bs+1]...)
+			i += bs + 1
+			continue
+		}
+		out = append(out, b[i:i+bs]...)
+		i += bs
+	}
+	return string(out), firstErr
 }
 
 func truncateForEvidence(s string) string {

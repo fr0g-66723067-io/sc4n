@@ -66,6 +66,12 @@ func TestRedosConstructs(t *testing.T) {
 		{`\d+`, ""},
 		{`a+?`, ""}, // lazy quantifiers are RE2
 		{`^\s*(\S+)\s*$`, ""},
+		{`(?:ab)+`, ""},
+		{`(?i:ab)+`, ""},
+		{`(?P<name>ab)+`, ""},
+		{`(a+)?`, ""},
+		{`(a+){0,1}`, ""},
+		{`(a+){1}`, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.pattern, func(t *testing.T) {
@@ -266,5 +272,27 @@ func TestFixtureFiles(t *testing.T) {
 	}
 	if !strings.Contains(ts[1], "__class__") {
 		t.Errorf("the second chat-template entry must be the malicious one: %q", ts[1])
+	}
+}
+
+func TestEmitterOffIncludesBase(t *testing.T) {
+	doc := []byte(`{"pre_tokenizer":{"type":"Split","pattern":{"Regex":"(\\w+)+"}}}`)
+	c := report.NewCollector(0)
+	const base = int64(4096)
+	AnalyzeJSON(c.For("tokenizer.json"), base, "tokenizer.json", doc)
+	fs := c.Findings()
+	if len(fs) == 0 {
+		t.Fatal("expected ReDoS finding")
+	}
+	if fs[0].Offset < base {
+		t.Fatalf("offset = %d, want >= base %d", fs[0].Offset, base)
+	}
+}
+
+func TestVocabSpansEmitsOneSpanPerTable(t *testing.T) {
+	doc := []byte(`{"model":{"vocab":{"a":0,"b":1,"c":2,"d":3,"e":4},"merges":["a b","c d"]}}`)
+	spans := VocabSpans(doc)
+	if len(spans) != 2 {
+		t.Fatalf("VocabSpans returned %d spans (want 2: one for vocab, one for merges): %+v", len(spans), spans)
 	}
 }

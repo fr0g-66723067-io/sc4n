@@ -168,23 +168,30 @@ func (a *agg) topRules(n int) []string {
 // key is the join key: one repo's one file.
 func key(repoID, rel string) string { return repoID + "\x00" + rel }
 
+// slashPath normalizes path separators for cross-platform scan.json inputs.
+// safeFilePath rejects backslashes in fetched filenames, so any backslash in a
+// top-level artifact path comes from a Windows path separator.
+func slashPath(p string) string {
+	return strings.ReplaceAll(p, `\`, "/")
+}
+
 // topPath is the artifact path with any member chain removed:
 // `o/n/pytorch_model.bin:archive/data.pkl` names the file on disk.
 //
 // A fetched file may itself contain ':', so the whole artifact is tried first
 // against the fetched set and a member chain is only cut when the whole path
-// names nothing. Cutting unconditionally detached such a file from its findings:
-// its row reported `sc4n: none` and the finding was attributed to a top path that
-// was never fetched.
+// names nothing. Scanning ':' right-to-left prefers the longest fetched prefix
+// when both `a` and `a:b.bin` exist in the same repo.
 func topPath(artifact string, exact map[string]bool) string {
-	if repoID, rel, ok := splitTop(artifact); ok && exact[key(repoID, rel)] {
-		return artifact
+	norm := slashPath(artifact)
+	if repoID, rel, ok := splitTop(norm); ok && exact[key(repoID, rel)] {
+		return norm
 	}
-	for i := 0; i < len(artifact); i++ {
-		if artifact[i] != ':' {
+	for i := len(norm) - 1; i >= 0; i-- {
+		if norm[i] != ':' {
 			continue
 		}
-		top := artifact[:i]
+		top := norm[:i]
 		if repoID, rel, ok := splitTop(top); ok && exact[key(repoID, rel)] {
 			return top
 		}
@@ -192,13 +199,13 @@ func topPath(artifact string, exact map[string]bool) string {
 	// No fetched file matches. Keep the previous rule, so a finding on a file the
 	// fetch stage never listed (the recall extras) is still attributed to the path
 	// its artifact names.
-	top, _, _ := strings.Cut(artifact, ":")
+	top, _, _ := strings.Cut(norm, ":")
 	return top
 }
 
 // splitTop splits a repo-relative artifact path into repo id and file path.
 func splitTop(top string) (repoID, rel string, ok bool) {
-	parts := strings.Split(top, "/")
+	parts := strings.Split(slashPath(top), "/")
 	if len(parts) < 3 {
 		return "", "", false
 	}
@@ -244,7 +251,7 @@ func Join(o Options) (*CampaignReport, error) {
 	// finding is distinguished from a file sc4n could not dispatch.
 	formats := make(map[string]string, len(doc.Artifacts))
 	for _, a := range doc.Artifacts {
-		formats[a.Path] = a.Format
+		formats[slashPath(a.Path)] = a.Format
 	}
 
 	// exact names every fetched file, so a finding's artifact path is attributed to
@@ -355,6 +362,8 @@ func Join(o Options) (*CampaignReport, error) {
 			info := &RankInfo{Sort: cands.Rank.Sort, Rows: len(cands.Rank.Captured)}
 			if o.Top > 0 {
 				info.Top = o.Top
+			} else if cands.Rank.Top > 0 {
+				info.Top = cands.Rank.Top
 			} else {
 				info.Top = len(cands.Rank.Captured)
 			}
@@ -394,7 +403,7 @@ func Join(o Options) (*CampaignReport, error) {
 				if fi.Level == o.Level {
 					flagged[fi.Path] = true
 				}
-				if prev, seen := hubLevel[fi.Path]; !seen || fi.Level < prev {
+				if prev, seen := hubLevel[fi.Path]; !seen || hubLevelRank(fi.Level) > hubLevelRank(prev) {
 					hubLevel[fi.Path] = fi.Level
 				}
 			}
@@ -423,8 +432,8 @@ func Join(o Options) (*CampaignReport, error) {
 			if a := byFile[key(rf.ID, ff.Path)]; a != nil {
 				fr.Sc4n = a.worst.String()
 				fr.Rules = a.topRules(8)
-				if a.member != rf.ID+"/"+ff.Path {
-					fr.Member = a.member
+				if m := slashPath(a.member); m != rf.ID+"/"+ff.Path {
+					fr.Member = m
 				}
 			} else {
 				fr.Sc4n = "none"
@@ -530,6 +539,22 @@ func checkStagesAgree(vs VerdictsFile, fd FetchDoc, level string) error {
 		msg += fmt.Sprintf(": %d fetched repo(s) no longer selected, e.g. %s", len(stale), stale[0])
 	}
 	return fmt.Errorf("%s; re-run -stage fetch", msg)
+}
+
+// hubLevelRank orders Hub verdict levels by severity:
+// unsafe > suspicious > caution > error.
+func hubLevelRank(level string) int {
+	switch level {
+	case "unsafe":
+		return 4
+	case "suspicious":
+		return 3
+	case "caution":
+		return 2
+	case "error":
+		return 1
+	}
+	return 0
 }
 
 // reasonFor explains a file with no sc4n finding. A covered file with no finding

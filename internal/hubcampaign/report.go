@@ -83,7 +83,7 @@ func campaignMarkdown(rep *CampaignReport) string {
 			cov[f.Coverage]++
 		}
 		fmt.Fprintf(&b, "| %s | %s | %d | %d full, %d partial, %d none | %s | %d/%d/%d |\n",
-			r.ID, r.Status, len(r.Files), cov["full"], cov["partial"], cov["none"],
+			mdCell(r.ID), mdCell(r.Status), len(r.Files), cov["full"], cov["partial"], cov["none"],
 			worstOf(r.Files),
 			r.Sc4n.BySeverity["critical"], r.Sc4n.BySeverity["high"], r.Sc4n.BySeverity["medium"])
 	}
@@ -92,7 +92,7 @@ func campaignMarkdown(rep *CampaignReport) string {
 		b.WriteString("\n## Findings by rule\n\n")
 		b.WriteString("| rule | severity | count |\n|---|---|---|\n")
 		for _, rc := range rep.Totals.ByRule {
-			fmt.Fprintf(&b, "| %s | %s | %d |\n", rc.Rule, rc.Severity, rc.Count)
+			fmt.Fprintf(&b, "| %s | %s | %d |\n", mdCell(rc.Rule), mdCell(rc.Severity), rc.Count)
 		}
 	}
 
@@ -118,7 +118,7 @@ func campaignMarkdown(rep *CampaignReport) string {
 			return misses[i].file < misses[j].file
 		})
 		for _, m := range misses {
-			fmt.Fprintf(&b, "| %s | %s | %s |\n", m.repo, m.file, m.format)
+			fmt.Fprintf(&b, "| %s | %s | %s |\n", mdCell(m.repo), mdCell(m.file), mdCell(m.format))
 		}
 	}
 
@@ -150,10 +150,21 @@ func campaignMarkdown(rep *CampaignReport) string {
 			return extras[i].e.Path < extras[j].e.Path
 		})
 		for _, x := range extras {
-			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", x.repo, x.e.Path, x.e.Sc4n, strings.Join(x.e.Rules, ", "))
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n",
+				mdCell(x.repo), mdCell(x.e.Path), mdCell(x.e.Sc4n), mdCell(strings.Join(x.e.Rules, ", ")))
 		}
 	}
 	return b.String()
+}
+
+// mdCell escapes pipe and newline characters so untrusted repo or file names
+// cannot break out of a Markdown table cell.
+func mdCell(s string) string {
+	s = strings.ReplaceAll(s, "|", `\|`)
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return s
 }
 
 // worstOf is the worst sc4n verdict among the listed files, or "-".

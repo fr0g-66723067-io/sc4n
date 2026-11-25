@@ -391,12 +391,9 @@ func TestWalkerTables(t *testing.T) {
 				tstr(13, "overload"),
 				tbytes(14, tentry("k", "v")),
 			))),
-			want: []string{"SC4N-ONNX-FUNCTION"},
+			want: []string{"SC4N-ONNX-FUNCTION", "SC4N-ONNX-CUSTOM-DOMAIN"},
 			forbid: []string{
 				"SC4N-ONNX-STRUCT",
-				// A model-local function domain is not a runtime-supplied operator
-				// domain, so "local" must not be reported as a custom domain.
-				"SC4N-ONNX-CUSTOM-DOMAIN",
 			},
 		},
 		{
@@ -1134,5 +1131,94 @@ func TestPackedDimsPastRankCapAreNotDecoded(t *testing.T) {
 	fs := parseFindings(t, "rank.onnx", model, "")
 	if !ids(fs)["SC4N-ONNX-STRUCT"] {
 		t.Fatalf("rank cap was silent; findings=%v", fs)
+	}
+}
+
+func TestWalkTensorChecksExternalDataOnEarlyAbort(t *testing.T) {
+	// Tensor carries external_data traversal followed by a truncated trailing tag.
+	badTensor := tcat(
+		tv(2, 1),
+		tbytes(13, tentry("location", "../../etc/passwd")),
+		[]byte{0xff, 0xff}, // trailing malformed tag aborts walkTensor early
+	)
+	model := tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tbytes(5, badTensor)))
+	got := ids(parseFindings(t, "abort.onnx", model, ""))
+	if !got["SC4N-ONNX-EXTERNAL-TRAVERSAL"] {
+		t.Fatalf("external_data traversal lost on trailing wire error; got %v", sortedKeys(got))
+	}
+
+	// Same on a partial slice: must still check external_data without emitting STRUCT.
+	c := report.NewCollector(0)
+	l := limits.Default()
+	sess := artifact.NewSession(c, "", l)
+	sess.SetPartial([]string{"slice.onnx"})
+	src := source.Mem("slice.onnx", model)
+	defer src.Close()
+	if err := (parser{}).Parse(sess.NewCtx("slice.onnx", l), src); err != nil {
+		t.Fatal(err)
+	}
+	gotSlice := ids(c.Findings())
+	if !gotSlice["SC4N-ONNX-EXTERNAL-TRAVERSAL"] {
+		t.Fatalf("external_data traversal lost on partial slice; got %v", sortedKeys(gotSlice))
+	}
+}
+
+func TestCheckDomainEmitsLimitStringWhenOversized(t *testing.T) {
+	longDomain := strings.Repeat("d", 64)
+	data := tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tbytes(1, tnode("n", "Op", longDomain))))
+	l := limits.Default()
+	l.MaxStringBlob = 16
+	got := ids(parseFindingsLimits(t, "dom.onnx", data, "", l))
+	if !got["SC4N-LIMIT-STRING"] {
+		t.Fatalf("oversized domain did not emit SC4N-LIMIT-STRING; got %v", sortedKeys(got))
+	}
+}
+
+func TestReadEntryValueBeforeKeyPreservesUnreadable(t *testing.T) {
+	// Wire order: field 2 (value with NUL) BEFORE field 1 (key = "location").
+	reversedEntry := tcat(tstr(2, "w.bin\x00../../etc/passwd"), tstr(1, "location"))
+	tensor := tcat(tv(2, 1), tbytes(1, pbLocalVarint(1)), tbytes(13, reversedEntry), tv(14, 1))
+	model := tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tbytes(5, tensor)))
+	got := ids(parseFindings(t, "rev.onnx", model, ""))
+	if !got["SC4N-ONNX-EXTERNAL-TRAVERSAL"] {
+		t.Fatalf("reversed value-before-key clobbered unreadable flag; got %v", sortedKeys(got))
+	}
+}
+
+func TestResolutionPathsRelativeWithoutRootAndBasepathJoin(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	weightsDir := filepath.Join(sub, "weights")
+	if err := os.MkdirAll(weightsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(weightsDir, "w.bin"), make([]byte, 8), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	tensor := tcat(
+		tv(2, 1),
+		tbytes(1, pbLocalVarint(1)),
+		tbytes(13, tentry("basepath", "weights")),
+		tbytes(13, tentry("location", "w.bin")),
+		tbytes(13, tentry("offset", "0")),
+		tbytes(13, tentry("length", "64")),
+		tv(14, 1),
+	)
+	model := tcat(tv(1, 8), tbytes(8, toptset("", 17)), tbytes(7, tbytes(5, tensor)))
+	// Session.Root == "", model path is relative "sub/model.onnx".
+	got := ids(parseFindings(t, "sub/model.onnx", model, ""))
+	if !got["SC4N-ONNX-EXTERNAL-BOUNDS"] {
+		t.Fatalf("relative path without Session.Root + basepath join did not check bounds; got %v", sortedKeys(got))
+	}
+}
+
+func TestZeroLimitsDefaultedSafely(t *testing.T) {
+	got := ids(parseFindingsLimits(t, "zero.onnx", tinyModel(), "", limits.Limits{}))
+	for _, bad := range []string{"SC4N-LIMIT-ENTRIES", "SC4N-LIMIT-DEPTH", "SC4N-LIMIT-STRING", "SC4N-ONNX-STRUCT"} {
+		if got[bad] {
+			t.Fatalf("zero Limits produced unexpected %s; got %v", bad, sortedKeys(got))
+		}
 	}
 }

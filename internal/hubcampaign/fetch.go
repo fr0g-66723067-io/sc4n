@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -147,9 +146,6 @@ func (f *fetcher) repo(v RepoVerdict) RepoFetch {
 	var entries []planned
 	var dirs []FetchFile
 	for _, fi := range files {
-		if path.Base(fi.Path) == ".gitattributes" {
-			continue
-		}
 		if strings.HasSuffix(fi.Path, "/") {
 			dirs = append(dirs, FetchFile{Path: fi.Path, Size: fi.Size, Status: "dir"})
 			continue
@@ -195,7 +191,7 @@ func (f *fetcher) repo(v RepoVerdict) RepoFetch {
 	switch {
 	case n > 0 && gated == n:
 		r.Status = "gated"
-	case failed > 0 || refused > 0:
+	case gated > 0 || failed > 0 || refused > 0:
 		r.Status = "partial"
 	default:
 		r.Status = "ok"
@@ -244,6 +240,14 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 	}
 	*repoBudget -= need
 	f.left -= need
+	// Always refund any unused reservation (failure, 403 gated, 404 missing, or
+	// an unknown-size file smaller than SliceSize) so later files keep the budget.
+	defer func() {
+		if refund := need - ff.Bytes; refund > 0 {
+			*repoBudget += refund
+			f.left += refund
+		}
+	}()
 	if downgraded {
 		ff.Detail = fmt.Sprintf("whole file does not fit the byte budget; fetched a %s header slice",
 			humanBytes(need))
@@ -306,10 +310,17 @@ func (f *fetcher) file(id, owner, name string, e planned, repoBudget *int64) Fet
 		f.downloadFailure(&ff, id, res, derr)
 		return ff
 	}
+	// When the Hub did not declare a size (e.size < 0), we requested up to
+	// SliceSize bytes; receiving fewer bytes means the server hit EOF and sent
+	// the entire file.
 	if res.Bytes != need {
-		os.Remove(part)
-		ff.Detail = fmt.Sprintf("the Hub served %d bytes where %d were requested; the partial file was not renamed", res.Bytes, need)
-		return ff
+		if e.size < 0 && res.Bytes < need {
+			whole = true
+		} else {
+			os.Remove(part)
+			ff.Detail = fmt.Sprintf("the Hub served %d bytes where %d were requested; the partial file was not renamed", res.Bytes, need)
+			return ff
+		}
 	}
 	if err := os.Rename(part, target); err != nil {
 		os.Remove(part)

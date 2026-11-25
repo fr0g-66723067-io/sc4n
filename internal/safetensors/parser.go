@@ -21,6 +21,7 @@ package safetensors
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/bits"
 	"sort"
 	"strconv"
@@ -88,22 +89,28 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		ctx.Sink.Emit(RuleStruct, 0, "file is shorter than the 8-byte header length")
 		return nil
 	}
-	n := int64(uint64(nb[0]) | uint64(nb[1])<<8 | uint64(nb[2])<<16 | uint64(nb[3])<<24 |
-		uint64(nb[4])<<32 | uint64(nb[5])<<40 | uint64(nb[6])<<48 | uint64(nb[7])<<56)
+	rawN := uint64(nb[0]) | uint64(nb[1])<<8 | uint64(nb[2])<<16 | uint64(nb[3])<<24 |
+		uint64(nb[4])<<32 | uint64(nb[5])<<40 | uint64(nb[6])<<48 | uint64(nb[7])<<56
 	cap := headerCap(ctx.Limits)
-	if n <= 0 {
+	if rawN == 0 {
 		// The sniffer rejects a non-positive length; the guard stays because this
 		// is the field every following read is sized from.
 		ctx.Sink.Emit(RuleStruct, 0, "declared header length is zero")
 		return nil
 	}
-	if n > cap {
+	if rawN > uint64(cap) {
 		// The header cap has its own rule: reporting a MaxHeaderBytes breach under
 		// the structural rule (or under MaxStringBlob) named a cap that did not
-		// apply.
-		limits.Emit(ctx.Sink, limits.RuleHeader, "MaxHeaderBytes", n, cap, "safetensors header length")
+		// apply. Compare as uint64 so lengths >= 1<<63 report exceeding MaxHeaderBytes
+		// instead of wrapping negative and reporting zero.
+		reported := int64(math.MaxInt64)
+		if rawN <= math.MaxInt64 {
+			reported = int64(rawN)
+		}
+		limits.Emit(ctx.Sink, limits.RuleHeader, "MaxHeaderBytes", reported, cap, "safetensors header length")
 		return nil
 	}
+	n := int64(rawN)
 
 	raw, _ := s.Bytes(8, n)
 	if int64(len(raw)) < n {
@@ -179,10 +186,10 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	case claimed > bufferLen:
 		if partial {
 			emitSlice(ctx.Sink, size, dataBase+claimed, "the last declared tensor")
-			return nil
+		} else {
+			ctx.Sink.Emit(RuleTruncated, dataBase+bufferLen,
+				fmt.Sprintf("last tensor ends at %d but the byte buffer is only %d bytes", claimed, bufferLen))
 		}
-		ctx.Sink.Emit(RuleTruncated, dataBase+bufferLen,
-			fmt.Sprintf("last tensor ends at %d but the byte buffer is only %d bytes", claimed, bufferLen))
 	}
 
 	// Content rules over the header strings.
@@ -250,8 +257,8 @@ func validateEntry(ctx *artifact.Ctx, e *entry, bufferLen int64) {
 			fmt.Sprintf("tensor %q: %d elements * %d bits is not byte-aligned", e.name, prod, bitWidth))
 		return
 	}
-	want := int64(totalBits / 8)
-	if got := e.end - e.begin; want != got {
+	want := totalBits / 8
+	if got := uint64(e.end) - uint64(e.begin); want != got {
 		ctx.Sink.Emit(RuleStruct, 8+e.off,
 			fmt.Sprintf("tensor %q: shape %d elements * %d bits = %d bytes but data_offsets span %d", e.name, prod, bitWidth, want, got))
 	}
@@ -264,6 +271,8 @@ func scanNativeRegion(ctx *artifact.Ctx, base int64, b []byte) {
 		return
 	}
 	if int64(len(b)) > maxNativeScan {
+		limits.Emit(ctx.Sink, limits.RuleString, "MaxNativeScan", int64(len(b)), maxNativeScan,
+			"safetensors native-magic scan region")
 		b = b[:maxNativeScan]
 	}
 	if kind, off, ok := bytescan.FindNative(b); ok {
@@ -331,14 +340,14 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if err != nil || len(nb) < 8 {
 		return artifact.FormatUnknown, false
 	}
-	n := int64(uint64(nb[0]) | uint64(nb[1])<<8 | uint64(nb[2])<<16 | uint64(nb[3])<<24 |
-		uint64(nb[4])<<32 | uint64(nb[5])<<40 | uint64(nb[6])<<48 | uint64(nb[7])<<56)
+	rawN := uint64(nb[0]) | uint64(nb[1])<<8 | uint64(nb[2])<<16 | uint64(nb[3])<<24 |
+		uint64(nb[4])<<32 | uint64(nb[5])<<40 | uint64(nb[6])<<48 | uint64(nb[7])<<56
 	avail := size - 8
 	cap := headerCap(l)
-	if n <= 0 {
+	if rawN == 0 {
 		return artifact.FormatUnknown, false
 	}
-	if n > cap {
+	if rawN > uint64(cap) {
 		// Over the cap the shape alone is not evidence: 38 of 73 000 real files
 		// under the reference corpus roots begin with 8 arbitrary bytes followed
 		// by '{' (devicetree .overlay sources, a shell completion script). Claim
@@ -346,7 +355,7 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		// parser can report SC4N-LIMIT-HEADER rather than the file falling
 		// silently through to a text sniffer. The header itself is never read
 		// here: the parser rejects it before its own read.
-		if n > avail {
+		if rawN > uint64(avail) {
 			return artifact.FormatUnknown, false
 		}
 		first, err := s.Bytes(8, 1)
@@ -355,6 +364,7 @@ func sniff(s source.Source, l limits.Limits) (artifact.Format, bool) {
 		}
 		return artifact.FormatSafetensors, true
 	}
+	n := int64(rawN)
 	got := n
 	if avail < got {
 		got = avail

@@ -147,11 +147,12 @@ func clampU64(v uint64) int64 {
 }
 
 func isTar(s source.Source) bool {
-	if s.Size() < 262 {
-		return false
+	if s.Size() >= 262 {
+		if b, err := s.Bytes(257, 5); (err == nil || len(b) >= 5) && len(b) >= 5 && string(b[:5]) == "ustar" {
+			return true
+		}
 	}
-	b, err := s.Bytes(257, 5)
-	return (err == nil || len(b) >= 5) && len(b) >= 5 && string(b[:5]) == "ustar"
+	return isV7Tar(s)
 }
 
 // Check emits the archive rules for ms (paths, links, name mismatch, encryption,
@@ -352,7 +353,13 @@ func scanZipMembers(ctx *artifact.Ctx, s source.Source, ms Members) {
 	max := maxBlob(ctx.Limits)
 	for i := range ms.Members {
 		m := ms.Members[i]
-		if m.IsDir || m.LinkKind != "" || m.Encrypted {
+		if m.IsDir || m.Encrypted {
+			continue
+		}
+		if m.LinkKind != "" && m.Size <= 0 && m.CompressedSize <= 0 {
+			// Check already emitted SC4N-ARCHIVE-LINK; when a symlink/device zip
+			// member carries non-empty bytes, Python's zipfile and PyTorch's miniz
+			// still read them, so scan them below.
 			continue
 		}
 		if m.localErr != "" {
@@ -448,6 +455,7 @@ func scanTarMembers(ctx *artifact.Ctx, s source.Source) {
 	for i := 0; ; i++ {
 		hdr, err := tr.Next()
 		if err == io.EOF {
+			checkTarTrailingData(ctx, s, cr.n)
 			return
 		}
 		if err != nil {
@@ -505,6 +513,36 @@ func scanTarMembers(ctx *artifact.Ctx, s source.Source) {
 		}
 		n := processReader(ctx, hdr.Name, hdr.Size, stretch, r, nil)
 		if chargeDecompressed(ctx, n) {
+			return
+		}
+	}
+}
+
+// checkTarTrailingData inspects bytes after archive/tar's EOF blocks. Standard
+// tar pads archives to a 10 KiB blocking factor with NUL bytes, which is normal;
+// any non-zero byte past EOF is trailing data (a polyglot or concatenated
+// payload hidden after the EOF zero blocks) and is reported.
+func checkTarTrailingData(ctx *artifact.Ctx, s source.Source, eofPos int64) {
+	if ctx == nil || ctx.Sink == nil || eofPos < 0 || eofPos >= s.Size() {
+		return
+	}
+	r := s.Reader(eofPos)
+	var buf [32 << 10]byte
+	off := eofPos
+	for {
+		n, err := r.Read(buf[:])
+		for i := 0; i < n; i++ {
+			if buf[i] != 0 {
+				nonZeroOff := off + int64(i)
+				trailing := s.Size() - nonZeroOff
+				ctx.Sink.EmitExtra(ruleArchiveTrailingData, nonZeroOff,
+					strconv.FormatInt(trailing, 10)+" byte(s) of non-zero trailing data follow the tar end-of-archive blocks",
+					map[string]string{"trailingBytes": strconv.FormatInt(trailing, 10)})
+				return
+			}
+		}
+		off += int64(n)
+		if err != nil {
 			return
 		}
 	}
@@ -575,7 +613,7 @@ func processReader(ctx *artifact.Ctx, name string, declared, stretch int64, r io
 	}
 	checkNativeShebang(ctx, name, probe)
 
-	if n > max && !unjustified {
+	if n > max && !unjustified && rerr == nil {
 		capBytes := spillCap(ctx.Limits)
 		if remaining := ctx.RemainingSpill(); remaining < capBytes {
 			capBytes = remaining
@@ -589,11 +627,19 @@ func processReader(ctx *artifact.Ctx, name string, declared, stretch int64, r io
 		if err != nil {
 			emitSpillError(ctx, name, declared, capBytes, err)
 			scanPrefix(ctx, name, probe)
-			// The spill wrote at most capBytes+1 bytes before refusing; charge
-			// that rather than the probe length so the cumulative budget is not
-			// undercharged by the spill/probe ratio.
-			ctx.ChargeSpill(capBytes + 1)
-			return capBytes + 1
+			// Only charge capBytes+1 when Spill actually refused for MaxSpillBytes;
+			// a CRC or corrupt-deflate error on a member did not exhaust the spill
+			// budget.
+			var st *source.SpillTooLargeError
+			if errors.As(err, &st) {
+				ctx.ChargeSpill(capBytes + 1)
+				return capBytes + 1
+			}
+			var le *LimitError
+			if errors.As(err, &le) && le.Value > n {
+				return le.Value
+			}
+			return n
 		}
 		artifact.ScanMember(ctx, name, src)
 		sn := src.Size()
@@ -759,8 +805,14 @@ func scanCompressed(ctx *artifact.Ctx, s source.Source) error {
 		emitUnsupportedFormat(ctx, s, ctx.Format)
 		return nil
 	}
+	if ctx.RemainingDecompressed() == 0 {
+		reportDecompressed(ctx)
+		return nil
+	}
+	l := ctx.Limits
+	l.MaxDecompressedBytes = ctx.RemainingDecompressed()
 	cr := &countingReader{r: s.Reader(0)}
-	r, closer, err := decompressorReader(cr, s.Size(), ctx.Limits, c)
+	r, closer, err := decompressorReader(cr, s.Size(), l, c)
 	if err != nil {
 		EmitOpenError(ctx, ctx.Sink.Artifact(), err)
 		return nil
@@ -780,9 +832,17 @@ func scanCompressed(ctx *artifact.Ctx, s source.Source) error {
 	// payload used to be scanned as the stream alone, so the payload after it —
 	// a template, a pickle, another archive — produced no finding at all.
 	// Whatever the decoder did not consume is the artifact's remainder and is
-	// dispatched like any other member.
+	// dispatched as a zero-copy Section rather than spilled.
 	if tail := s.Size() - cr.n; tail > 0 {
-		processReader(ctx, ctx.Sink.Artifact()+" tail", tail, -1, s.Reader(cr.n), nil)
+		tailName := ctx.Sink.Artifact() + " tail"
+		sec, serr := source.Section(s, cr.n, tail, tailName)
+		if serr != nil {
+			EmitOpenError(ctx, tailName, serr)
+			return nil
+		}
+		checkNativeShebang(ctx, tailName, sourcePrefix(sec))
+		artifact.ScanMember(ctx, tailName, sec)
+		_ = sec.Close()
 	}
 	return nil
 }
@@ -797,6 +857,9 @@ func decompressorReader(r io.Reader, compressed int64, l limits.Limits, c Compre
 		if err != nil {
 			return nil, nil, err
 		}
+		// Disable multistream so gzip stops at the exact end of the first member's
+		// trailer instead of over-reading 10 bytes into any trailing payload.
+		zr.Multistream(false)
 		return capReader(zr, l, compressed, "gzip layer"), zr, nil
 	case CompressorZlib:
 		zr, err := zlib.NewReader(r)
@@ -939,7 +1002,7 @@ func sniffZlib(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 	if !zlibShape(b) {
 		return artifact.FormatUnknown, false
 	}
-	zr, zerr := zlib.NewReader(s.Reader(0))
+	zr, zerr := zlib.NewReader(io.LimitReader(s.Reader(0), 64<<10))
 	if zerr != nil {
 		return artifact.FormatUnknown, false
 	}
@@ -959,12 +1022,21 @@ func sniffZip(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	return artifact.FormatUnknown, false
 }
 
+func sniffTarV7(s source.Source, _ limits.Limits) (artifact.Format, bool) {
+	if isV7Tar(s) {
+		return artifact.FormatTar, true
+	}
+	return artifact.FormatUnknown, false
+}
+
 func init() {
 	// Priority 60 sits below the built-in magic/tarkind/pickle sniffers, so a
 	// zip whose members identify it as torch/keras/npz/pt2 is claimed by a
 	// higher-priority sniffer from those packages, and this one catches only a
 	// still-generic zip (including a prefixed archive the magic table misses).
 	artifact.RegisterSniffer("archive-zip", 60, sniffZip)
+	// Priority 55 claims pre-USTAR V7 tar archives (no "ustar" magic at 257).
+	artifact.RegisterSniffer("archive-tar-v7", 55, sniffTarV7)
 	// zlib's built-in magic entry lists 78 01|9c|da, which is the set a level-6
 	// compressor and its neighbours emit; 78 5e (level 2-5) is equally valid and
 	// was not claimed at all, so a zlib-compressed pickle reported clean as

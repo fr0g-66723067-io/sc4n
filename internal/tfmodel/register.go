@@ -25,9 +25,10 @@ package tfmodel
 //     does not contain. Still above ONNX (60) for the same reason the ONNX probe
 //     exists: a field-1 varint reads as a plausible ir_version.
 //
-// HDF5 and TFLite need no sniffer: both have fixed magics that the magic table
-// already claims (HDF5 at offset 0, "TFL3" at offset 4), so only the parsers and
-// capability rows are registered here.
+// HDF5 needs no sniffer: it has an unambiguous 8-byte magic at offset 0.
+// TFLite registers a validated header sniffer at priority 100 checking "TFL3"
+// at offset 4 plus a valid FlatBuffers root table offset and vtable, so a
+// pickle/JSON/.py that happens to contain "TFL3" at offset 4 is not hijacked.
 
 import (
 	"os"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/bytescan"
+	"github.com/fr0g-66723067-io/sc4n/internal/polyglot"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
 )
 
@@ -93,6 +95,7 @@ func init() {
 	})
 
 	artifact.RegisterSniffer("keras-zip", 103, sniffKeras)
+	artifact.RegisterSniffer("tflite-header", 100, sniffTFLite)
 	artifact.RegisterSniffer("tfjs-model", 64, sniffTFJS)
 	artifact.RegisterSniffer("tf-checkpoint", 61, sniffCheckpoint)
 	artifact.RegisterSniffer("tf-savedmodel", 70, sniffSavedModel)
@@ -120,10 +123,20 @@ func assetsUniversal(ctx *artifact.Ctx, s source.Source, f artifact.Format) {
 	if strings.ContainsRune(name, ':') {
 		return // an archive member: the on-disk ancestor check does not apply
 	}
-	if !strings.Contains(name, "/assets/") && !strings.Contains(name, "/assets.extra/") {
+	slashed := filepath.ToSlash(name)
+	if !strings.HasPrefix(slashed, "assets/") &&
+		!strings.HasPrefix(slashed, "assets.extra/") &&
+		!strings.Contains(slashed, "/assets/") &&
+		!strings.Contains(slashed, "/assets.extra/") {
 		return
 	}
 	if !savedModelAncestor(name) {
+		return
+	}
+	if kind, ok := polyglot.ValidateNativeHeader(s, s.Size(), 0); ok {
+		ctx.Sink.EmitExtra(ruleTFAssetExecutable, 0,
+			"validated "+kind.String()+" under a SavedModel assets directory",
+			map[string]string{"kind": kind.String(), "path": baseNameOf(name)})
 		return
 	}
 	n := s.Size()
@@ -132,12 +145,6 @@ func assetsUniversal(ctx *artifact.Ctx, s source.Source, f artifact.Format) {
 	}
 	b, err := s.Bytes(0, n)
 	if err != nil && len(b) == 0 {
-		return
-	}
-	if kind, ok := bytescan.ValidNative(b); ok {
-		ctx.Sink.EmitExtra(ruleTFAssetExecutable, 0,
-			"validated "+kind.String()+" under a SavedModel assets directory",
-			map[string]string{"kind": kind.String(), "path": baseNameOf(name)})
 		return
 	}
 	if interp, ok := bytescan.ShebangAt(b); ok {
@@ -157,7 +164,7 @@ func savedModelAncestor(name string) bool {
 			return true
 		}
 		parent := filepath.Dir(dir)
-		if parent == dir || parent == "." {
+		if parent == dir {
 			return false
 		}
 		dir = parent

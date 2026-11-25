@@ -2,6 +2,7 @@ package archive
 
 import (
 	"archive/tar"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,50 @@ const (
 
 func newTarReader(s source.Source) *tar.Reader { return tar.NewReader(s.Reader(0)) }
 
+// isV7Tar reports whether s begins with a valid V7 (pre-USTAR) 512-byte tar
+// header. V7 headers carry no "ustar" magic at offset 257, so the check verifies
+// a non-empty printable name, a valid octal checksum matching the header bytes, a
+// V7 typeflag, and a clean parse by archive/tar.
+func isV7Tar(s source.Source) bool {
+	if s == nil || s.Size() < 512 {
+		return false
+	}
+	b, err := s.Bytes(0, 512)
+	if len(b) < 512 {
+		_ = err
+		return false
+	}
+	if b[0] == 0 {
+		return false
+	}
+	// Require a printable non-empty name before the first NUL so binary blobs
+	// that happen to match the 16-bit header checksum are not claimed.
+	for i := 0; i < 100 && b[i] != 0; i++ {
+		if b[i] < 0x20 || b[i] >= 0x7f {
+			return false
+		}
+	}
+	switch b[156] {
+	case 0, '0', '1', '2', '3', '4', '5', '6', '7':
+	default:
+		return false
+	}
+	// Verify checksum field contains octal digits before handing to archive/tar.
+	hasDigit := false
+	for _, c := range b[148:156] {
+		if c >= '0' && c <= '7' {
+			hasDigit = true
+		} else if c != ' ' && c != 0 {
+			return false
+		}
+	}
+	if !hasDigit {
+		return false
+	}
+	hdr, terr := tar.NewReader(bytes.NewReader(b)).Next()
+	return terr == nil && hdr != nil && hdr.Name != "" && hdr.Size >= 0
+}
+
 // collectTar reads the tar header stream once, without reading any member data
 // (archive/tar skips unread member data on the next Next call).
 func collectTar(s source.Source, l limits.Limits) (Members, error) {
@@ -29,6 +74,8 @@ func collectTar(s source.Source, l limits.Limits) (Members, error) {
 	if max <= 0 {
 		max = limits.Default().MaxEntries
 	}
+	nameCap := retainedCap(l)
+	retained := int64(0)
 	for i := 0; ; i++ {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -49,6 +96,12 @@ func collectTar(s source.Source, l limits.Limits) (Members, error) {
 		}
 		if len(ms.Members) >= max {
 			ms.Truncated = true
+			break
+		}
+		retained += int64(len(hdr.Name)) + int64(len(hdr.Linkname))
+		if retained > nameCap {
+			ms.NamesCapped = true
+			ms.NameBytes = retained
 			break
 		}
 		ms.Members = append(ms.Members, tarMember(hdr, i))

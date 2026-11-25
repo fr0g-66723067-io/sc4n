@@ -24,7 +24,9 @@ if [ -e "$marker" ]; then
 	exit 1
 fi
 
-for bad in "1.0.0" "v1.0" "v1.0.0;id" 'v1.0.0-$(id)' "v1.0.0/../x" "v1.0.0-\`id\`"; do
+nl='
+'
+for bad in "1.0.0" "v1.0" "v1.0.0;id" 'v1.0.0-$(id)' "v1.0.0/../x" "v1.0.0-\`id\`" "v1.0.0${nl}\$(id)" "bad${nl}v1.0.0"; do
 	if sh tools/release/tag-check.sh "$bad" >/dev/null 2>&1; then
 		echo "tag-check_test: accepted $bad" >&2
 		exit 1

@@ -43,21 +43,19 @@ func (h *mmapHandle) release() error {
 // Bytes returns sub-slices of the mapping, so the mapping MUST outlive every
 // slice it handed out; a caller that retains one past Close has a bug, which is
 // why the contract is stated on the Source interface.
+//
+// Ownership: on success the returned Source owns f and closes it on release.
+// On error the caller retains ownership of f, so OpenFile can fall back to
+// reading from the same descriptor and Spill can close it without double-closing.
 func mmapSource(name string, f *os.File, size int64) (Source, error) {
 	if size <= 0 {
-		_ = f.Close()
 		return nil, errors.New("source: refusing to map empty range")
 	}
 	if int64(int(size)) != size {
-		_ = f.Close()
 		return nil, errors.New("source: file too large to map on this platform")
 	}
 	b, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_PRIVATE)
 	if err != nil {
-		// The caller keeps ownership when this returns an error, but every
-		// current caller closes on error too; closing here as well makes the
-		// function safe for a caller that does not.
-		_ = f.Close()
 		return nil, err
 	}
 	if int64(len(b)) < size {

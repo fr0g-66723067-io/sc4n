@@ -255,24 +255,93 @@ func ValidNative(b []byte) (NativeKind, bool) {
 		return NativeMachO, false
 	case NativeArchive:
 		// archive/tar and archive/zip do not read ar archives; the 8-byte magic
-		// plus a plausible first member name is enough to call it an object
-		// archive rather than random bytes.
-		return NativeArchive, len(b) > 68 && b[58] == '`' && b[59] == '\n'
+		// plus the 60-byte first member header's terminating "`\n" at offsets
+		// 66..67 is enough to call it an object archive rather than random bytes.
+		return NativeArchive, len(b) >= 68 && b[66] == '`' && b[67] == '\n'
 	case NativeAPE:
-		// An APE is a valid PE by construction; validate the PE header.
+		// An "MZqFpD='" APE is a valid PE by construction; a "jartsr='" APE
+		// carries a POSIX shell-script header instead of a DOS/PE header.
+		if bytes.HasPrefix(b, []byte("jartsr='")) {
+			return NativeAPE, validJartsrAPE(b)
+		}
 		if f, err := pe.NewFile(bytes.NewReader(b)); err == nil {
 			_ = f.Close()
 			return NativeAPE, true
 		}
 		return NativeAPE, false
 	case NativeOLE:
-		// An OLE compound file's header declares 512-byte sectors and a small
-		// sector shift of 9 or 12; checking the shift is enough to separate a real
-		// header from four bytes that happen to match.
-		return NativeOLE, len(b) >= 32 && (b[30] == 9 || b[30] == 12)
+		// Compound File Binary Format (MS-CFB): full 8-byte signature,
+		// little-endian byte-order mark 0xfe 0xff at offsets 28..29, and uint16
+		// sector shift 9 (512B) or 12 (4096B) at offsets 30..31.
+		return NativeOLE, len(b) >= 32 &&
+			bytes.HasPrefix(b, []byte("\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")) &&
+			b[28] == 0xfe && b[29] == 0xff &&
+			(b[30] == 9 || b[30] == 12) && b[31] == 0
 	default:
 		return NativeNone, false
 	}
+}
+
+// apeShellTokens are POSIX shell markers expected in the script section of a
+// "jartsr='" APE header right after the closing single quote.
+var apeShellTokens = [][]byte{
+	[]byte("#!/"),
+	[]byte("/bin/sh"),
+	[]byte("exec "),
+	[]byte("eval "),
+	[]byte("printf "),
+	[]byte("dd "),
+	[]byte("if "),
+	[]byte("export "),
+	[]byte("TMPDIR"),
+	[]byte("APE"),
+	[]byte("sh -c"),
+}
+
+// validJartsrAPE validates the POSIX shell-script header structure of a
+// "jartsr='" Actually Portable Executable without passing non-MZ bytes to
+// debug/pe.
+func validJartsrAPE(b []byte) bool {
+	if !bytes.HasPrefix(b, []byte("jartsr='")) || len(b) < 24 {
+		return false
+	}
+	hdr := b
+	if len(hdr) > 4096 {
+		hdr = hdr[:4096]
+	}
+	closeOff := bytes.IndexByte(hdr[8:], '\'')
+	if closeOff < 0 {
+		return false
+	}
+	q := 8 + closeOff
+	if q+1 >= len(hdr) {
+		return false
+	}
+	switch hdr[q+1] {
+	case '\n', '\r', ';', ' ', '\t':
+	default:
+		return false
+	}
+	rest := hdr[q+1:]
+	end := 0
+	for end < len(rest) && end < 512 {
+		c := rest[end]
+		if (c >= 0x20 && c < 0x7f) || c == '\n' || c == '\r' || c == '\t' {
+			end++
+			continue
+		}
+		break
+	}
+	script := rest[:end]
+	if len(bytes.TrimSpace(script)) < 8 || bytes.IndexByte(script, '\n') < 0 {
+		return false
+	}
+	for _, tok := range apeShellTokens {
+		if bytes.Contains(script, tok) {
+			return true
+		}
+	}
+	return false
 }
 
 // FindNative scans b for the first *validated* native header and returns its kind
@@ -281,7 +350,7 @@ func ValidNative(b []byte) (NativeKind, bool) {
 // search is O(n) and allocation-free.
 func FindNative(b []byte) (NativeKind, int, bool) {
 	for i := 0; i+8 <= len(b); i++ {
-		if b[i] != 0x7f && b[i] != 'M' && b[i] != '\xfe' && b[i] != '\xce' && b[i] != '\xcf' && b[i] != '\xca' && b[i] != 0xd0 && b[i] != '!' {
+		if b[i] != 0x7f && b[i] != 'M' && b[i] != 'j' && b[i] != '\xfe' && b[i] != '\xce' && b[i] != '\xcf' && b[i] != '\xca' && b[i] != 0xd0 && b[i] != '!' {
 			continue
 		}
 		if kind := MagicAt(b[i:]); kind != NativeNone {
@@ -308,7 +377,7 @@ func ShebangAt(b []byte) (string, bool) {
 		line = line[:512]
 	}
 	rest := bytes.TrimSpace(line[2:])
-	if i := bytes.IndexByte(rest, ' '); i >= 0 {
+	if i := bytes.IndexAny(rest, " \t"); i >= 0 {
 		rest = rest[:i]
 	}
 	if len(rest) == 0 {

@@ -157,7 +157,7 @@ var (
 			"\"\".join([...]) of many literals, a long run of \\x escapes, a long bytes([...]) literal, or " +
 			"an f-string with nested replacement fields. Each is a way to keep a command out of the readable " +
 			"text a reviewer greps for; the finding names which construct was seen.",
-		Refs: []string{"https://cwe.mitre.org/data/definitions/1336.html"},
+		Refs: []string{"https://cwe.mitre.org/data/definitions/506.html"},
 		Tags: []string{"obfuscation"},
 	})
 
@@ -172,7 +172,7 @@ var (
 			"also calls a decoder (base64.b64decode, codecs.decode, bytes.fromhex, binascii.*, zlib). The " +
 			"pairing is the standard second-stage shape: the literal alone is opaque data and the decoder " +
 			"alone is ordinary library use.",
-		Refs: []string{"https://cwe.mitre.org/data/definitions/1336.html"},
+		Refs: []string{"https://cwe.mitre.org/data/definitions/506.html"},
 		Tags: []string{"obfuscation"},
 	})
 
@@ -456,22 +456,77 @@ func Analyze(ctx *artifact.Ctx, src []byte) { analyze(ctx, src, nil) }
 // at the .ipynb line the reviewer will open.
 func analyze(ctx *artifact.Ctx, src []byte, cellLines []int) {
 	src = capSource(ctx, src)
+	root := taintScope{
+		indent:     -1,
+		tainted:    map[string]bool{},
+		netTainted: map[string]bool{},
+		aliases:    map[string]string{},
+	}
 	a := &analyzer{
 		ctx:        ctx,
 		src:        src,
 		li:         newLineIndex(src),
 		cell:       cellLines,
-		tainted:    map[string]bool{},
-		netTainted: map[string]bool{},
+		scopes:     []taintScope{root},
+		tainted:    root.tainted,
+		netTainted: root.netTainted,
+		aliases:    root.aliases,
 		callBudget: maxCallTokens,
 	}
 	a.reverseShell()
 	a.agentCodeExec()
-	stmts := Statements(src, Lex(src))
+	stmts := statementsWithIndent(src, Lex(src))
 	for _, st := range stmts {
-		a.stmt(st)
+		a.stmt(st.toks, st.indent)
 	}
 	a.finish()
+}
+
+type indentedStmt struct {
+	toks   []Token
+	indent int
+}
+
+// statementsWithIndent groups tokens into statements while recording each
+// statement's indentation depth so the analyser can maintain a lexical scope
+// stack across nested def/class blocks.
+func statementsWithIndent(src []byte, toks []Token) []indentedStmt {
+	var out []indentedStmt
+	var cur []Token
+	depth := 0
+	flush := func() {
+		if len(cur) > 0 {
+			out = append(out, indentedStmt{toks: cur, indent: depth})
+			cur = nil
+		}
+	}
+	for i := range toks {
+		t := toks[i]
+		switch t.Kind {
+		case TokEnd, TokComment:
+			continue
+		case TokIndent:
+			flush()
+			depth++
+		case TokDedent:
+			flush()
+			if depth > 0 {
+				depth--
+			}
+		case TokNewline:
+			flush()
+		case TokOp:
+			if t.Len() == 1 && t.Bytes(src)[0] == ';' {
+				flush()
+				continue
+			}
+			cur = append(cur, t)
+		default:
+			cur = append(cur, t)
+		}
+	}
+	flush()
+	return out
 }
 
 // agentCodeExec reports an agent constructed with a code executor and a tool
@@ -643,18 +698,30 @@ func (li lineIndex) at(off int32) (int, int) {
 	return line, col
 }
 
+type taintScope struct {
+	indent     int
+	tainted    map[string]bool
+	netTainted map[string]bool
+	aliases    map[string]string
+	reducing   bool
+}
+
 type analyzer struct {
 	ctx  *artifact.Ctx
 	src  []byte
 	li   lineIndex
 	cell []int
-	// tainted holds the names assigned from a source since the last function
-	// boundary. It is deliberately coarse: no containers, no attribute paths.
+	// scopes is the lexical scope stack; tainted, netTainted, aliases and
+	// reducing mirror the top frame.
+	scopes     []taintScope
 	tainted    map[string]bool
 	taintSites map[string]*taintSite
 	// netTainted is the subset of tainted assigned from a network/download source,
 	// used by the pickle-load-of-remote-data rule.
 	netTainted map[string]bool
+	// aliases maps local imported names to their canonical dotted module/symbol
+	// name (`import subprocess as sp` -> sp:subprocess, `from os import system` -> system:os.system).
+	aliases map[string]string
 	// callBudget is the statement tokens the call analysis may still scan; see
 	// maxCallTokens. callRead and callReported exist so the truncation is reported
 	// once, with the amount actually read.
@@ -670,6 +737,50 @@ type analyzer struct {
 	// dumped records that the file serialises an object with a pickle-family dump,
 	// which is what turns a reducing class into an on-disk payload.
 	dumped bool
+}
+
+func cloneBoolMap(m map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneStringMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func (a *analyzer) syncTopScope() {
+	top := &a.scopes[len(a.scopes)-1]
+	a.tainted = top.tainted
+	a.netTainted = top.netTainted
+	a.aliases = top.aliases
+	a.reducing = top.reducing
+}
+
+func (a *analyzer) pushScope(indent int, reducing bool) {
+	parent := a.scopes[len(a.scopes)-1]
+	child := taintScope{
+		indent:     indent,
+		tainted:    cloneBoolMap(parent.tainted),
+		netTainted: cloneBoolMap(parent.netTainted),
+		aliases:    cloneStringMap(parent.aliases),
+		reducing:   reducing,
+	}
+	a.scopes = append(a.scopes, child)
+	a.syncTopScope()
+}
+
+func (a *analyzer) popScopesTo(indent int) {
+	for len(a.scopes) > 1 && a.scopes[len(a.scopes)-1].indent >= indent {
+		a.scopes = a.scopes[:len(a.scopes)-1]
+	}
+	a.syncTopScope()
 }
 
 // reduceHit is one __reduce__ return that names a code-executing callable.
@@ -814,30 +925,41 @@ func (a *analyzer) emitAt(r *report.Rule, off int32, ev string) {
 	a.ctx.Sink.EmitAt(r, line, col, report.TruncateEvidence(ev, 160))
 }
 
-func (a *analyzer) stmt(st []Token) {
+func (a *analyzer) stmt(st []Token, indent int) {
 	if len(st) == 0 {
 		return
 	}
+	a.popScopesTo(indent)
 	if st[0].Kind == TokKeyword {
-		switch kw := st[0].Text(a.src); kw {
-		case "def", "class":
-			// A new function body starts with a clean taint set: sc4n does not model
-			// closure capture across a def boundary.
-			a.tainted = map[string]bool{}
-			a.netTainted = map[string]bool{}
-			// A reducing method is reducing only inside its own body: a nested def
-			// ends the state, as does any other def or class.
-			a.reducing = kw == "def" && len(st) > 1 &&
-				(st[1].Text(a.src) == "__reduce__" || st[1].Text(a.src) == "__reduce_ex__")
-		case "return":
+		kw := st[0].Text(a.src)
+		switch {
+		case kw == "def" || kw == "class" || (kw == "async" && len(st) > 1 && st[1].Text(a.src) == "def"):
+			isDef := kw == "def"
+			nameIdx := 1
+			if kw == "async" {
+				isDef = true
+				nameIdx = 2
+			}
+			reducing := isDef && len(st) > nameIdx &&
+				(st[nameIdx].Text(a.src) == "__reduce__" || st[nameIdx].Text(a.src) == "__reduce_ex__")
+			a.pushScope(indent, reducing)
+		case kw == "import" || kw == "from":
+			recordImportAliases(a.src, st, a.aliases)
+		case kw == "return":
 			if a.reducing {
-				if name, off, ok := reducedCallable(a.src, st); ok && isReduceSink(name) {
-					a.reduceHits = append(a.reduceHits, reduceHit{off: off, callable: name})
+				if name, off, ok := reducedCallable(a.src, st); ok {
+					resolved := resolveDottedAlias(name, a.aliases)
+					if isReduceSink(resolved) {
+						a.reduceHits = append(a.reduceHits, reduceHit{off: off, callable: resolved})
+					}
 				}
 			}
 		}
 	}
 	calls := a.callsFor(st)
+	for i := range calls {
+		calls[i].Dotted = resolveDottedAlias(calls[i].Dotted, a.aliases)
+	}
 	if !a.dumped && isSerializerDump(calls) {
 		a.dumped = true
 	}
@@ -846,7 +968,7 @@ func (a *analyzer) stmt(st []Token) {
 	// Loader lint and standalone obfuscation detectors run on every statement.
 	a.loaderRules(st, calls, text)
 	a.obfuscationRules(st, calls)
-	a.encodedPayloadRules(st, text)
+	a.encodedPayloadRules(st, calls, text)
 	a.compileExecRules(st, calls)
 
 	// Taint rules: a sink is reported when one of its arguments expresses a
@@ -857,6 +979,105 @@ func (a *analyzer) stmt(st []Token) {
 	if a.rangeTainted(st, 0, len(st)-1) {
 		a.markAssigned(st, a.rangeNetworkTainted(st, 0, len(st)-1))
 	}
+}
+
+// recordImportAliases extracts lightweight `import X [as Y]` and
+// `from X import Y [as Z]` mappings into aliases so aliased sinks and sources
+// (`from os import system`, `import subprocess as sp`, `import torch as t`,
+// `from yaml import load`) resolve to their canonical dotted names.
+func recordImportAliases(src []byte, st []Token, aliases map[string]string) {
+	if len(st) < 2 || st[0].Kind != TokKeyword {
+		return
+	}
+	switch st[0].Text(src) {
+	case "import":
+		i := 1
+		for i < len(st) {
+			if st[i].Kind != TokName && st[i].Kind != TokKeyword {
+				i++
+				continue
+			}
+			end := chainEnd(src, st, i)
+			mod := joinChain(src, st, i, end)
+			i = end + 1
+			if i+1 < len(st) && st[i].Kind == TokKeyword && st[i].Text(src) == "as" && st[i+1].Kind == TokName {
+				alias := st[i+1].Text(src)
+				if alias != mod {
+					aliases[alias] = mod
+				}
+				i += 2
+			}
+			if i < len(st) && st[i].Kind == TokOp && st[i].Text(src) == "," {
+				i++
+			}
+		}
+	case "from":
+		// Skip relative imports (`from . import ...`, `from ..pkg import ...`).
+		if st[1].Kind == TokOp && isDot(src, st[1]) {
+			return
+		}
+		if st[1].Kind != TokName && st[1].Kind != TokKeyword {
+			return
+		}
+		modEnd := chainEnd(src, st, 1)
+		mod := joinChain(src, st, 1, modEnd)
+		i := modEnd + 1
+		if i >= len(st) || st[i].Kind != TokKeyword || st[i].Text(src) != "import" {
+			return
+		}
+		i++
+		for i < len(st) {
+			if st[i].Kind == TokOp {
+				b := st[i].Text(src)
+				if b == "(" || b == ")" || b == "," {
+					i++
+					continue
+				}
+				if b == "*" {
+					return
+				}
+			}
+			if st[i].Kind != TokName && st[i].Kind != TokKeyword {
+				i++
+				continue
+			}
+			orig := st[i].Text(src)
+			local := orig
+			i++
+			if i+1 < len(st) && st[i].Kind == TokKeyword && st[i].Text(src) == "as" && st[i+1].Kind == TokName {
+				local = st[i+1].Text(src)
+				i += 2
+			}
+			aliases[local] = mod + "." + orig
+		}
+	}
+}
+
+func joinChain(src []byte, st []Token, start, end int) string {
+	var b strings.Builder
+	for k := start; k <= end; k += 2 {
+		if k > start {
+			b.WriteByte('.')
+		}
+		b.WriteString(st[k].Text(src))
+	}
+	return b.String()
+}
+
+// resolveDottedAlias rewrites the leading identifier of d through aliases.
+func resolveDottedAlias(d string, aliases map[string]string) string {
+	if d == "" || len(aliases) == 0 {
+		return d
+	}
+	head, rest, hasDot := strings.Cut(d, ".")
+	target, ok := aliases[head]
+	if !ok {
+		return d
+	}
+	if hasDot {
+		return target + "." + rest
+	}
+	return target
 }
 
 // ---- source / taint detection -------------------------------------------------
@@ -975,6 +1196,15 @@ func (a *analyzer) rangeSource(st []Token, s, e int, tainted map[string]bool, is
 				return true
 			}
 		}
+		if len(elems) > 0 && len(a.aliases) > 0 {
+			if target, ok := a.aliases[elems[0]]; ok {
+				prefix := strings.Split(target, ".")
+				expanded := make([]string, 0, len(prefix)+len(elems)-1)
+				expanded = append(expanded, prefix...)
+				expanded = append(expanded, elems[1:]...)
+				elems = expanded
+			}
+		}
 		// An exact name has at most three elements, so only the chain itself and
 		// its last two element-aligned suffixes can match one.
 		for i := len(elems) - 1; i >= 0 && i >= len(elems)-3; i-- {
@@ -1021,10 +1251,66 @@ func (a *analyzer) callArgNetworkTainted(st []Token, c Call) bool {
 	return false
 }
 
-// markAssigned adds the simple names on the left of a top-level `=` to the taint
-// set. It deliberately ignores attribute targets (`self.x =`), because resolving
+// markAssigned adds the simple names on the left of a top-level `=` (or the
+// target variable(s) of a `with ... as var:` statement) to the taint set. It
+// deliberately ignores attribute targets (`self.x =`), because resolving
 // attribute taint needs type information.
 func (a *analyzer) markAssigned(st []Token, network bool) {
+	if len(st) > 0 && st[0].Kind == TokKeyword {
+		kw := st[0].Text(a.src)
+		if kw == "with" || (kw == "async" && len(st) > 1 && st[1].Text(a.src) == "with") {
+			depth := 0
+			for i := 0; i < len(st); i++ {
+				if st[i].Kind == TokOp {
+					b := st[i].Bytes(a.src)
+					if len(b) > 0 {
+						switch b[0] {
+						case '(', '[', '{':
+							depth++
+						case ')', ']', '}':
+							if depth > 0 {
+								depth--
+							}
+						}
+					}
+					continue
+				}
+				if depth == 0 && st[i].Kind == TokKeyword && st[i].Text(a.src) == "as" {
+					// Mark target name(s) following `as` until `,` or `:` at depth 0.
+					tdepth := 0
+					for j := i + 1; j < len(st); j++ {
+						if st[j].Kind == TokOp {
+							b := st[j].Bytes(a.src)
+							if len(b) > 0 {
+								switch b[0] {
+								case '(', '[', '{':
+									tdepth++
+								case ')', ']', '}':
+									if tdepth > 0 {
+										tdepth--
+									}
+								case ',', ':':
+									if tdepth == 0 {
+										i = j
+										goto nextAs
+									}
+								}
+							}
+							continue
+						}
+						if st[j].Kind == TokName && (j == i+1 || !isDot(a.src, st[j-1])) {
+							a.tainted[st[j].Text(a.src)] = true
+							if network {
+								a.netTainted[st[j].Text(a.src)] = true
+							}
+						}
+					}
+				}
+			nextAs:
+			}
+			return
+		}
+	}
 	depth := 0
 	eq := -1
 	for i := range st {
@@ -1105,7 +1391,7 @@ func opaqueLiterals(st []Token, src []byte) bool {
 
 func (a *analyzer) taintRules(st []Token, calls []Call, stmtText string) {
 	for _, c := range calls {
-		r := a.sinkFor(c, stmtText)
+		r := a.sinkFor(st, c, stmtText)
 		if r == nil {
 			continue
 		}
@@ -1155,7 +1441,7 @@ func (a *analyzer) nameArgTainted(st []Token, c Call) bool {
 	return false
 }
 
-func (a *analyzer) sinkFor(c Call, stmtText string) *report.Rule {
+func (a *analyzer) sinkFor(st []Token, c Call, stmtText string) *report.Rule {
 	d := c.Dotted
 	last := dottedLast(d)
 	switch {
@@ -1178,7 +1464,7 @@ func (a *analyzer) sinkFor(c Call, stmtText string) *report.Rule {
 		return ruleTaintDelete
 	case d == "webbrowser.open" || isNetworkSink(d, last, stmtText):
 		return ruleTaintNetwork
-	case d == "open" && a.openIsWrite(c):
+	case d == "open" && a.openIsWrite(st, c):
 		return ruleTaintFile
 	}
 	return nil
@@ -1213,7 +1499,8 @@ func isDeserializeSink(d, last string) bool {
 	switch d {
 	case "pickle.load", "pickle.loads", "torch.load", "torch.jit.load", "torch.serialization.load",
 		"dill.load", "dill.loads", "cloudpickle.load", "cloudpickle.loads",
-		"marshal.loads", "yaml.unsafe_load", "yaml.load", "yaml.full_load":
+		"marshal.loads", "yaml.unsafe_load", "yaml.unsafe_load_all",
+		"yaml.load", "yaml.load_all", "yaml.full_load":
 		return true
 	}
 	if (dottedHasPackage(d, "pickle") || dottedHasPackage(d, "dill") || dottedHasPackage(d, "cloudpickle")) &&
@@ -1237,20 +1524,24 @@ func isNetworkSink(d, last, stmtText string) bool {
 	return false
 }
 
-func (a *analyzer) openIsWrite(c Call) bool {
-	var modes []Span
-	if sp, ok := c.Kwargs["mode"]; ok {
-		modes = append(modes, sp)
-	} else if len(c.Args) >= 2 {
-		modes = append(modes, c.Args[1])
-	}
-	for _, sp := range modes {
-		t := sp.Text(a.src)
-		if strings.ContainsAny(t, "wax") {
-			return true
+func (a *analyzer) openIsWrite(st []Token, c Call) bool {
+	var rg [2]int32
+	var ok bool
+	if rg, ok = c.kwToks["mode"]; !ok {
+		if len(c.argToks) >= 2 {
+			rg = c.argToks[1]
+			ok = true
 		}
 	}
-	return false
+	if !ok {
+		return false
+	}
+	s, e := int(rg[0]), int(rg[1])
+	if s != e || s < 0 || s >= len(st) || st[s].Kind != TokString {
+		return false
+	}
+	mode := StringValue(st[s], a.src, 32)
+	return strings.ContainsAny(mode, "wax+")
 }
 
 // ---- loader lint --------------------------------------------------------------
@@ -1281,14 +1572,16 @@ func (a *analyzer) loaderRules(st []Token, calls []Call, stmtText string) {
 					a.emitAt(ruleLoaderNoLocalOnly, c.Off, "local path with no local_files_only: "+callEvidence(a.src, c))
 				}
 			}
-		case c.Dotted == "yaml.load":
+		case c.Dotted == "yaml.load" || c.Dotted == "yaml.load_all":
 			if !a.hasSafeLoader(st, c) {
-				a.emitAt(ruleLoaderYAMLUnsafe, c.Off, "yaml.load without SafeLoader: "+callEvidence(a.src, c))
+				a.emitAt(ruleLoaderYAMLUnsafe, c.Off, c.Dotted+" without SafeLoader: "+callEvidence(a.src, c))
 			}
-		case c.Dotted == "yaml.unsafe_load":
-			a.emitAt(ruleLoaderYAMLUnsafe, c.Off, "yaml.unsafe_load: "+callEvidence(a.src, c))
-		case dottedLast(c.Dotted) == "load_model" && strings.Contains(stmtText, "safe_mode") && strings.Contains(stmtText, "False"):
-			a.emitAt(ruleLoaderKerasSafeMode, c.Off, "load_model with safe_mode=False: "+callEvidence(a.src, c))
+		case c.Dotted == "yaml.unsafe_load" || c.Dotted == "yaml.unsafe_load_all":
+			a.emitAt(ruleLoaderYAMLUnsafe, c.Off, c.Dotted+": "+callEvidence(a.src, c))
+		case dottedLast(c.Dotted) == "load_model":
+			if v, ok := c.Kwargs["safe_mode"]; ok && spanIsFalse(a.src, v) {
+				a.emitAt(ruleLoaderKerasSafeMode, c.Off, "load_model with safe_mode=False: "+callEvidence(a.src, c))
+			}
 		case dottedLast(c.Dotted) == "Lambda" || strings.HasSuffix(c.Dotted, "layers.Lambda"):
 			a.emitAt(ruleLoaderKerasLambda, c.Off, "keras Lambda layer: "+callEvidence(a.src, c))
 		case dottedLast(c.Dotted) == "load_tool":
@@ -1402,27 +1695,33 @@ func (a *analyzer) localPathArg(c Call) bool {
 }
 
 func (a *analyzer) hasSafeLoader(st []Token, c Call) bool {
-	for _, rg := range c.argToks {
-		if a.rangeMentions(st, int(rg[0]), int(rg[1]), "SafeLoader") || a.rangeMentions(st, int(rg[0]), int(rg[1]), "CSafeLoader") {
-			return true
-		}
+	if rg, ok := c.kwToks["Loader"]; ok {
+		return a.rangeIsSafeLoader(st, int(rg[0]), int(rg[1]))
 	}
-	for _, rg := range c.kwToks {
-		if a.rangeMentions(st, int(rg[0]), int(rg[1]), "SafeLoader") || a.rangeMentions(st, int(rg[0]), int(rg[1]), "CSafeLoader") {
-			return true
-		}
+	if len(c.argToks) >= 2 {
+		rg := c.argToks[1]
+		return a.rangeIsSafeLoader(st, int(rg[0]), int(rg[1]))
 	}
 	return false
 }
 
-func (a *analyzer) rangeMentions(st []Token, s, e int, sub string) bool {
-	if e >= len(st) {
-		e = len(st) - 1
+// rangeIsSafeLoader reports whether st[s..e] is a dotted identifier naming one
+// of PyYAML's safe loader classes (SafeLoader, CSafeLoader, BaseLoader,
+// CBaseLoader). String literals (such as the YAML data argument) never match.
+func (a *analyzer) rangeIsSafeLoader(st []Token, s, e int) bool {
+	if s < 0 || e < s || e >= len(st) {
+		return false
 	}
-	for k := s; k <= e; k++ {
-		if strings.Contains(st[k].Text(a.src), sub) {
-			return true
-		}
+	if st[s].Kind != TokName && st[s].Kind != TokKeyword {
+		return false
+	}
+	if chainEnd(a.src, st, s) != e {
+		return false
+	}
+	name := resolveDottedAlias(joinChain(a.src, st, s, e), a.aliases)
+	switch dottedLast(name) {
+	case "SafeLoader", "CSafeLoader", "BaseLoader", "CBaseLoader":
+		return true
 	}
 	return false
 }
@@ -1505,8 +1804,17 @@ func (a *analyzer) listOfNumbers(st []Token, c Call) bool {
 	return countKindRange(st, TokNumber, int(rg[0]), int(rg[1])) >= 16
 }
 
-func (a *analyzer) encodedPayloadRules(st []Token, stmtText string) {
-	if !statementHasDecoder(stmtText) {
+func (a *analyzer) encodedPayloadRules(st []Token, calls []Call, stmtText string) {
+	hasDec := statementHasDecoder(stmtText)
+	if !hasDec {
+		for _, c := range calls {
+			if statementHasDecoder(c.Dotted) {
+				hasDec = true
+				break
+			}
+		}
+	}
+	if !hasDec {
 		return
 	}
 	for i := range st {
@@ -1656,6 +1964,11 @@ func callEvidence(src []byte, c Call) string {
 
 func spanIsTrue(src []byte, sp Span) bool {
 	return strings.TrimSpace(sp.Text(src)) == "True"
+}
+
+func spanIsFalse(src []byte, sp Span) bool {
+	t := strings.TrimSpace(sp.Text(src))
+	return t == "False" || t == "0"
 }
 
 func stmtTextOf(src []byte, st []Token) string {

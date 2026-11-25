@@ -25,11 +25,18 @@ import (
 //
 // Reference: torch/serialization.py `_legacy_save` / `_legacy_load` at the
 // PyTorch main branch (MAGIC_NUMBER, PROTOCOL_VERSION = 1001).
-var torchMagicLE = []byte{0x6C, 0xFC, 0x9C, 0x46, 0xF9, 0x20, 0x6A, 0xA8, 0x50, 0x19}
+var (
+	torchMagicLE        = []byte{0x6C, 0xFC, 0x9C, 0x46, 0xF9, 0x20, 0x6A, 0xA8, 0x50, 0x19}
+	torchMagicProto0L   = []byte("L119547037146038801333356L\n")
+	torchMagicProto0NoL = []byte("L119547037146038801333356\n")
+)
 
-// opProto is the pickle PROTO opcode, needed to recognise the start of a leading
-// pickle without importing internal/pickle's table.
-const opProto = 0x80
+// opProto and opFrame are the pickle PROTO/FRAME opcodes needed to recognise
+// the start of a leading pickle without importing internal/pickle's table.
+const (
+	opProto = 0x80
+	opFrame = 0x95
+)
 
 // detectLegacy reports whether head begins the legacy torch magic, and how many
 // bytes the magic occupies (its "after" offset). A pickled magic occupies 0
@@ -38,7 +45,15 @@ func detectLegacy(head []byte) (afterMagic int, ok bool) {
 	switch {
 	case len(head) >= 14 && head[0] == opProto && head[1] >= 2 && head[1] <= 5 &&
 		head[2] == 0x8a && head[3] == byte(len(torchMagicLE)) && bytes.Equal(head[4:14], torchMagicLE):
-		// Pickled magic: PROTO <proto> LONG1 <10> <ten little-endian bytes>.
+		// Pickled magic (protocol 2..5 without FRAME): PROTO <proto> LONG1 <10> <ten LE bytes>.
+		return 0, true
+	case len(head) >= 23 && head[0] == opProto && (head[1] == 4 || head[1] == 5) &&
+		head[2] == opFrame && head[11] == 0x8a && head[12] == byte(len(torchMagicLE)) &&
+		bytes.Equal(head[13:23], torchMagicLE):
+		// Pickled magic (protocol 4/5 with FRAME): PROTO <4|5> FRAME <8B> LONG1 <10> <ten LE bytes>.
+		return 0, true
+	case bytes.HasPrefix(head, torchMagicProto0L) || bytes.HasPrefix(head, torchMagicProto0NoL):
+		// Pickled magic (protocol 0/1): L119547037146038801333356L\n.
 		return 0, true
 	case len(head) >= len(torchMagicLE) && bytes.Equal(head[:len(torchMagicLE)], torchMagicLE):
 		return len(torchMagicLE), true
@@ -71,7 +86,7 @@ func (legacyParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 // container's payload. Walking the whole file as one window would either stop at
 // the first (harmless) pickle or misreport the storage tail as an attack suffix.
 func parseLegacyBinary(ctx *artifact.Ctx, s source.Source) error {
-	head, _ := s.Bytes(0, 16)
+	head, _ := s.Bytes(0, 32)
 	afterMagic, ok := detectLegacy(head)
 	if !ok {
 		ctx.Sink.Emit(ruleTorchStruct, 0, "legacy torch magic not present at offset 0")
@@ -131,14 +146,10 @@ func legacyPickleCount(afterMagic int) int {
 	return 4
 }
 
-// pickleStartAt reports whether a protocol-bearing pickle begins at off. Legacy
-// torch pickles are protocol 2+, so a PROTO with a valid protocol byte is the
-// whole test; the raw storage that follows the last pickle is not pickle-shaped
-// often enough for this to matter, and a false positive would only cause one more
-// (bounded, non-silent) walk of data that then fails to reach a STOP.
+// pickleStartAt reports whether a pickle stream (protocol 0..5) begins at off.
 func pickleStartAt(s source.Source, off int64) bool {
 	b, err := s.Bytes(off, 2)
-	return (err == nil || len(b) == 2) && len(b) == 2 && b[0] == opProto && b[1] >= 1 && b[1] <= 5
+	return (err == nil || len(b) == 2) && pickle.OpensAsPickle(b)
 }
 
 // parseLegacyTar walks the three members of the old tar layout. `pickle` is the
@@ -153,46 +164,60 @@ func parseLegacyTar(ctx *artifact.Ctx, s source.Source, ms archive.Members) erro
 		if m.IsDir || m.LinkKind != "" {
 			continue
 		}
-		data, ok := readMemberBounded(ctx, s, m)
+		allowPrefix := m.Name == "storages" || m.Name == "tensors"
+		data, truncated, ok := readMemberBounded(ctx, s, m, allowPrefix)
 		if !ok {
 			continue
 		}
-		sub, ok := ctx.Member(m.Name, artifact.FormatPickle)
-		if !ok {
-			limits.Emit(ctx.Sink, limits.RuleDepth, "MaxDepth", int64(ctx.Depth+1), int64(ctx.Session.TopLimits.MaxDepth), "stopped at "+m.Name)
-			continue
-		}
-		sec := source.Mem(m.Name, data)
 		switch m.Name {
-		case "pickle":
-			_, _ = pickle.Walk(sub, sec, pickle.Options{})
-		case "storages", "tensors":
-			_, _ = pickle.Walk(sub, sec, pickle.Options{
-				TrailingIsStorage:  true,
-				StorageDescription: "legacy torch tar raw storage",
-			})
+		case "pickle", "storages", "tensors":
+			sub, ok := ctx.Member(m.Name, artifact.FormatPickle)
+			if !ok {
+				limits.Emit(ctx.Sink, limits.RuleDepth, "MaxDepth", int64(ctx.Depth+1), int64(ctx.Session.TopLimits.MaxDepth), "stopped at "+m.Name)
+				continue
+			}
+			sec := source.Mem(m.Name, data)
+			if m.Name == "pickle" {
+				_, _ = pickle.Walk(sub, sec, pickle.Options{})
+			} else {
+				st, _ := pickle.Walk(sub, sec, pickle.Options{
+					TrailingIsStorage:  true,
+					StorageDescription: "legacy torch tar raw storage",
+				})
+				if truncated && (st == nil || !st.SawStop) {
+					max := ctx.Limits.MaxStringBlob
+					if max <= 0 {
+						max = limits.Default().MaxStringBlob
+					}
+					limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", m.Size, max, "torch tar member "+m.Name)
+				}
+			}
+			sec.Close()
 		default:
-			artifact.ScanMemberBytes(sub, m.Name, data)
+			artifact.ScanMemberBytes(ctx, m.Name, data)
 		}
-		sec.Close()
 	}
 	return nil
 }
 
-// readMemberBounded reads a member into memory up to MaxStringBlob. A member
-// above the cap is reported (never silently truncated) and skipped.
-func readMemberBounded(ctx *artifact.Ctx, s source.Source, m archive.Member) ([]byte, bool) {
+// readMemberBounded reads a member into memory up to MaxStringBlob. When
+// allowPrefix is true (for `storages` and `tensors`, which begin with a small
+// metadata pickle followed by gigabytes of raw tensor bytes), a member larger
+// than MaxStringBlob returns its leading MaxStringBlob bytes with truncated=true
+// so the metadata pickle is still scanned. Otherwise a member above the cap is
+// reported (never silently truncated) and skipped.
+func readMemberBounded(ctx *artifact.Ctx, s source.Source, m archive.Member, allowPrefix bool) ([]byte, bool, bool) {
 	max := ctx.Limits.MaxStringBlob
 	if max <= 0 {
 		max = limits.Default().MaxStringBlob
 	}
-	if m.Size > max {
+	if !allowPrefix && m.Size > max {
 		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", m.Size, max, "torch tar member "+m.Name)
-		return nil, false
+		return nil, false, false
 	}
 	if ctx.RemainingDecompressed() == 0 {
 		ctx.ReportDecompressedLimit(m.Size, ctx.Limits.MaxDecompressedBytes)
-		return nil, false
+		return nil, false, false
 	}
 	l := ctx.Limits
 	l.MaxDecompressedBytes = ctx.RemainingDecompressed()
@@ -203,18 +228,34 @@ func readMemberBounded(ctx *artifact.Ctx, s source.Source, m archive.Member) ([]
 		// truncated inside its pickle member is parsed as an empty structure with
 		// no findings.
 		archive.EmitOpenError(ctx, m.Name, err)
-		return nil, false
+		return nil, false, false
 	}
 	defer rc.Close()
+	if allowPrefix && m.Size > max {
+		data, err := io.ReadAll(io.LimitReader(rc, max))
+		if err != nil && len(data) == 0 {
+			archive.EmitOpenError(ctx, m.Name, err)
+			return nil, false, false
+		}
+		if err != nil {
+			archive.EmitOpenError(ctx, m.Name, err)
+		}
+		ctx.ChargeDecompressed(int64(len(data)))
+		return data, true, true
+	}
 	data, err := io.ReadAll(io.LimitReader(rc, max+1))
 	if err != nil {
 		archive.EmitOpenError(ctx, m.Name, err)
-		return nil, false
+		return nil, false, false
 	}
 	if int64(len(data)) > max {
+		if allowPrefix {
+			ctx.ChargeDecompressed(max)
+			return data[:max], true, true
+		}
 		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", int64(len(data)), max, "torch tar member "+m.Name)
-		return nil, false
+		return nil, false, false
 	}
 	ctx.ChargeDecompressed(int64(len(data)))
-	return data, true
+	return data, false, true
 }

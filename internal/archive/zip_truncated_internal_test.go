@@ -335,7 +335,7 @@ func TestRecoveredZipMembersShareTheDecompressionBudget(t *testing.T) {
 	if scanned != 1 {
 		t.Fatalf("scanned %d members, want 1 before the budget was spent", scanned)
 	}
-found := false
+	found := false
 	for _, f := range col.Findings() {
 		if f.RuleID == "SC4N-LIMIT-DECOMPRESSED" {
 			found = true

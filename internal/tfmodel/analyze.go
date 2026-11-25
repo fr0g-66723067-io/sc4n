@@ -25,76 +25,114 @@ import (
 	"github.com/fr0g-66723067-io/sc4n/internal/pysrc"
 )
 
-// safeClasses is the curated set of Keras-provided class names that a benign
-// model document uses. It is intentionally a mixture of exact names and the
-// prefix/suffix families below, because Keras spells its layer classes
-// systematically (Conv1D..Conv3D, GlobalAveragePooling2D, RandomFlip, the
-// preprocessing layers).
+// safeClasses is the exact curated set of Keras-provided class names that a
+// benign model document uses. Exact names (rather than broad wildcards such as
+// Random*, Conv*, *Dropout, *Normalization, Preprocessing*) prevent an attacker
+// from disguising a custom class by choosing a safe-looking prefix or suffix.
 var safeClasses = map[string]bool{
 	// Models and topology.
 	"Sequential": true, "Functional": true, "Model": true, "InputLayer": true,
-	// Core layers.
-	"Dense": true, "Activation": true, "Dropout": true, "Flatten": true,
-	"Reshape": true, "Permute": true, "RepeatVector": true, "Masking": true,
-	"Embedding": true, "Rescaling": true,
-	// Pooling / pooling helpers not caught by the suffix rules.
+	"Input": true, "InputSpec": true,
+	// Core and activation layers.
+	"Dense": true, "EinsumDense": true, "Activation": true, "Dropout": true,
+	"Flatten": true, "Reshape": true, "Permute": true, "RepeatVector": true,
+	"Masking": true, "Embedding": true, "Rescaling": true, "Identity": true,
+	"Softmax": true, "ELU": true, "Elu": true, "PReLU": true, "LeakyReLU": true,
+	"ReLU": true, "ThresholdedReLU": true, "LogSoftmax": true,
+	// Convolution layers.
+	"Conv1D": true, "Conv2D": true, "Conv3D": true,
+	"Conv1DTranspose": true, "Conv2DTranspose": true, "Conv3DTranspose": true,
+	"SeparableConv1D": true, "SeparableConv2D": true,
+	"DepthwiseConv1D": true, "DepthwiseConv2D": true,
+	"LocallyConnected1D": true, "LocallyConnected2D": true,
+	"ConvLSTM1D": true, "ConvLSTM2D": true, "ConvLSTM3D": true,
+	"Convolution1D": true, "Convolution2D": true, "Convolution3D": true,
+	"Deconvolution2D": true, "Deconvolution3D": true,
+	// Upsampling, padding, cropping.
+	"UpSampling1D": true, "UpSampling2D": true, "UpSampling3D": true,
+	"ZeroPadding1D": true, "ZeroPadding2D": true, "ZeroPadding3D": true,
+	"Cropping1D": true, "Cropping2D": true, "Cropping3D": true,
+	// Pooling layers.
 	"MaxPool1D": true, "MaxPool2D": true, "MaxPool3D": true,
+	"MaxPooling1D": true, "MaxPooling2D": true, "MaxPooling3D": true,
 	"AvgPool1D": true, "AvgPool2D": true, "AvgPool3D": true,
-	// Normalisation families.
-	"Normalization": true, "Discretization": true, "CategoryEncoding": true,
+	"AveragePooling1D": true, "AveragePooling2D": true, "AveragePooling3D": true,
+	"GlobalMaxPool1D": true, "GlobalMaxPool2D": true, "GlobalMaxPool3D": true,
+	"GlobalMaxPooling1D": true, "GlobalMaxPooling2D": true, "GlobalMaxPooling3D": true,
+	"GlobalAvgPool1D": true, "GlobalAvgPool2D": true, "GlobalAvgPool3D": true,
+	"GlobalAveragePooling1D": true, "GlobalAveragePooling2D": true, "GlobalAveragePooling3D": true,
+	"AdaptiveAveragePooling1D": true, "AdaptiveAveragePooling2D": true, "AdaptiveAveragePooling3D": true,
+	"AdaptiveMaxPooling1D": true, "AdaptiveMaxPooling2D": true, "AdaptiveMaxPooling3D": true,
+	// Normalisation layers.
+	"Normalization": true, "BatchNormalization": true, "SyncBatchNormalization": true,
+	"LayerNormalization": true, "UnitNormalization": true, "GroupNormalization": true,
+	"SpectralNormalization": true, "InstanceNormalization": true, "RMSNormalization": true,
+	"PreprocessingNormalization": true,
+	// Preprocessing and image augmentation layers.
+	"Discretization": true, "CategoryEncoding": true,
 	"IntegerLookup": true, "StringLookup": true, "TextVectorization": true,
-	"Hashing": true,
-	// Recurrent helpers.
-	"RNN": true, "SimpleRNN": true, "TimeDistributed": true, "Bidirectional": true,
+	"Hashing": true, "HashedCrossing": true, "FeatureSpace": true,
+	"Resizing": true, "CenterCrop": true, "MelSpectrogram": true, "STFTSpectrogram": true,
+	"RandomCrop": true, "RandomFlip": true, "RandomTranslation": true,
+	"RandomRotation": true, "RandomZoom": true, "RandomHeight": true,
+	"RandomWidth": true, "RandomContrast": true, "RandomBrightness": true,
+	"RandomColorDegeneration": true, "RandomColorJitter": true, "RandomErasing": true,
+	"RandomGaussianBlur": true, "RandomGrayscale": true, "RandomHue": true,
+	"RandomInvert": true, "RandomPerspective": true, "RandomPosterization": true,
+	"RandomSaturation": true, "RandomSharpness": true, "RandomShear": true,
+	"RandomSolarization": true, "AutoContrast": true, "Equalization": true,
+	"Solarization": true, "MixUp": true, "CutMix": true, "AugMix": true,
+	"RandAugment": true,
+	// Recurrent layers.
+	"RNN": true, "SimpleRNN": true, "SimpleRNNCell": true,
+	"GRU": true, "GRUCell": true, "LSTM": true, "LSTMCell": true,
+	"StackedRNNCells": true, "TimeDistributed": true, "Bidirectional": true,
+	"CuDNNGRU": true, "CuDNNLSTM": true,
 	// Merge layers.
 	"Add": true, "Subtract": true, "Multiply": true, "Average": true,
 	"Maximum": true, "Minimum": true, "Concatenate": true, "Dot": true,
 	// Attention.
 	"Attention": true, "AdditiveAttention": true, "MultiHeadAttention": true,
-	// Regularisation / noise.
+	"GroupQueryAttention": true,
+	// Regularisation / noise / dropout.
 	"GaussianNoise": true, "GaussianDropout": true, "AlphaDropout": true,
 	"ActivityRegularization": true, "SpatialDropout1D": true,
 	"SpatialDropout2D": true, "SpatialDropout3D": true,
+	// Standard initializers, regularizers, constraints, dtype policies and optimizers.
+	"Zeros": true, "Ones": true, "Constant": true, "GlorotUniform": true,
+	"GlorotNormal": true, "HeNormal": true, "HeUniform": true, "LecunNormal": true,
+	"LecunUniform": true, "Orthogonal": true, "RandomNormal": true, "RandomUniform": true,
+	"TruncatedNormal": true, "VarianceScaling": true,
+	"L1": true, "L2": true, "L1L2": true, "OrthogonalRegularizer": true,
+	"MaxNorm": true, "MinMaxNorm": true, "NonNeg": true, "UnitNorm": true,
+	"DTypePolicy": true, "FloatDTypePolicy": true, "MixedPrecisionPolicy": true,
 	// Legacy serialization shims a Keras 2 document legitimately carries.
 	"TensorFlowOpLayer": true, "TFOpLambda": true, "SlicingOpLambda": true,
-	"Identity": true, "Softmax": true,
-}
-
-// safeClassPrefixes are the systematically named Keras families.
-var safeClassPrefixes = []string{
-	"Conv", "SeparableConv", "DepthwiseConv", "UpSampling", "ZeroPadding",
-	"Cropping", "GlobalMaxPooling", "GlobalAveragePooling", "MaxPooling",
-	"AveragePooling", "Random", "Preprocessing",
-}
-
-// safeClassSuffixes are families whose names vary only by rank or backend.
-var safeClassSuffixes = []string{
-	"Normalization", "Dropout", "Pooling1D", "Pooling2D", "Pooling3D",
 }
 
 // internalClasses are names the loader generates for itself; they are not
 // reported because the rule that owns the construct (Lambda) already fired.
 var internalClasses = map[string]bool{"__lambda__": true}
 
-// kerasClassSafe reports whether name is a class Keras itself provides.
+// kerasClassSafe reports whether bare class name is a class Keras itself provides.
 func kerasClassSafe(name string) bool {
 	if name == "" || internalClasses[name] {
 		return true
 	}
-	if safeClasses[name] {
+	return safeClasses[name]
+}
+
+// isSafeKerasNamespace reports whether a module/package prefix belongs to Keras
+// or Python builtins. Arbitrary prefixes such as "evil_pkg>Dense" or
+// "evil.Dense" are rejected so an attacker cannot hide a custom object behind
+// a safe-looking short name.
+func isSafeKerasNamespace(ns string) bool {
+	if ns == "" || ns == "keras" || ns == "tensorflow.keras" || ns == "tf.keras" || ns == "builtins" {
 		return true
 	}
-	for _, p := range safeClassPrefixes {
-		if strings.HasPrefix(name, p) {
-			return true
-		}
-	}
-	for _, s := range safeClassSuffixes {
-		if strings.HasSuffix(name, s) {
-			return true
-		}
-	}
-	return false
+	return strings.HasPrefix(ns, "keras.") ||
+		strings.HasPrefix(ns, "tensorflow.keras.") ||
+		strings.HasPrefix(ns, "tf.keras.")
 }
 
 // classKeys are the keys that name a class Keras will reconstruct.
@@ -156,6 +194,7 @@ type kerasBudget struct {
 	runs, bytes   int64
 	runsReported  bool
 	bytesReported bool
+	depthReported bool
 }
 
 func (b *kerasBudget) charge(ctx *artifact.Ctx, n int64) bool {
@@ -188,6 +227,12 @@ const maxJSONDepth = 64
 // iteration order).
 func analyzeKerasValue(ctx *artifact.Ctx, base int64, what string, v any, depth int, budget *kerasBudget) {
 	if depth > maxJSONDepth {
+		if budget == nil || !budget.depthReported {
+			if budget != nil {
+				budget.depthReported = true
+			}
+			limits.Emit(ctx.Sink, limits.RuleDepth, "MaxJSONDepth", int64(depth), maxJSONDepth, "Keras JSON nesting in "+what)
+		}
 		return
 	}
 	switch t := v.(type) {
@@ -219,14 +264,17 @@ func analyzeKerasValue(ctx *artifact.Ctx, base int64, what string, v any, depth 
 	}
 }
 
-// checkKerasClass applies the allowlist and the two named criticals. name is
-// reduced to its last component first, because registered_name is often written
-// as "keras.layers.Dense" or "pkg>Class".
+// checkKerasClass applies the allowlist and the two named criticals.
+// Qualified names ("keras.layers.Dense", "pkg>Class") are split into namespace
+// and short class name: Lambda and TorchModuleWrapper always fire regardless of
+// prefix, and the allowlist only accepts bare names or Keras/builtins
+// namespaces so an arbitrary prefix like "evil_pkg>Dense" or "evil.Dense" is
+// never marked safe.
 func checkKerasClass(ctx *artifact.Ctx, base int64, what, key, name string) {
 	if name == "" {
 		return
 	}
-	short := lastClassComponent(name)
+	ns, short := splitClassRef(name)
 	switch {
 	case short == "Lambda":
 		ctx.Sink.Emit(ruleKerasLambda, base, key+" Lambda in "+what)
@@ -234,24 +282,34 @@ func checkKerasClass(ctx *artifact.Ctx, base int64, what, key, name string) {
 	case short == "TorchModuleWrapper":
 		ctx.Sink.Emit(ruleKerasTorchWrapper, base, key+" TorchModuleWrapper in "+what)
 		return
-	case kerasClassSafe(short):
+	case isSafeKerasNamespace(ns) && kerasClassSafe(short):
 		return
 	}
+	shown := clip(name, 120)
 	ctx.Sink.EmitExtra(ruleKerasClassUnknown, base,
-		key+" "+short+" is outside the Keras safe set (in "+what+")",
-		map[string]string{"class": short, "source": what})
+		key+" "+shown+" is outside the Keras safe set (in "+what+")",
+		map[string]string{"class": shown, "source": what})
 }
 
-// lastClassComponent reduces a fully-qualified class reference to its final
-// component: "keras.layers.Dense" -> "Dense", "pkg>MyLayer" -> "MyLayer".
-func lastClassComponent(name string) string {
-	if i := strings.IndexAny(name, ">"); i >= 0 {
-		name = name[i+1:]
+// splitClassRef splits a registered_name or class_name into (namespace, short).
+// Examples: "Dense" -> ("", "Dense"); "keras.layers.Dense" -> ("keras.layers", "Dense");
+// "evil_pkg>Dense" -> ("evil_pkg", "Dense").
+func splitClassRef(name string) (ns, short string) {
+	if i := strings.IndexByte(name, '>'); i >= 0 {
+		pkg := name[:i]
+		rest := name[i+1:]
+		if j := strings.LastIndexByte(rest, '.'); j >= 0 {
+			if pkg == "" {
+				return rest[:j], rest[j+1:]
+			}
+			return pkg + ">" + rest[:j], rest[j+1:]
+		}
+		return pkg, rest
 	}
 	if i := strings.LastIndexByte(name, '.'); i >= 0 {
-		name = name[i+1:]
+		return name[:i], name[i+1:]
 	}
-	return name
+	return "", name
 }
 
 // analyzeCodeValue scans one code-shaped string with the shared indicator engine
@@ -284,6 +342,7 @@ func analyzeCodeValue(ctx *artifact.Ctx, base int64, what, key, val string, budg
 	}
 	mctx, ok := ctx.Member(what, artifact.FormatPython)
 	if !ok {
+		limits.Emit(ctx.Sink, limits.RuleDepth, "MaxDepth", int64(ctx.Depth+1), int64(ctx.Limits.MaxDepth), "Keras embedded Python in "+what)
 		return
 	}
 	pysrc.Analyze(mctx, []byte(text))

@@ -23,6 +23,8 @@ import (
 	"sort"
 	"strings"
 
+	"google.golang.org/protobuf/encoding/protowire"
+
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
 	"github.com/fr0g-66723067-io/sc4n/internal/limits"
 	"github.com/fr0g-66723067-io/sc4n/internal/source"
@@ -64,7 +66,9 @@ type savedModelParser struct{}
 // ambiguity rather than guess.
 func sniffSavedModel(s source.Source, l limits.Limits) (artifact.Format, bool) {
 	if isJSONHead(s) {
-		return sniffTFJS(s, l)
+		// TF-JS JSON is handled by the dedicated tfjs-model sniffer at its own
+		// priority (64), below the Python/notebook sniffers.
+		return artifact.FormatUnknown, false
 	}
 	if s.Size() < 4 {
 		return artifact.FormatUnknown, false
@@ -117,13 +121,23 @@ func (savedModelParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		return nil
 	}
 	w := &graphWalker{ctx: ctx, s: s}
+	scope := w.pushGraphScope()
+	defer w.popGraphScope(scope)
+
 	r := newPBReader(s, 0, s.Size())
-	for {
+	var isSavedModel, isBareGraph bool
+	for r.remaining() > 0 {
 		num, typ, off, ok := r.next()
 		if !ok {
+			if r.remaining() > 0 {
+				w.structAt(off, "top-level protobuf tag is malformed or truncated")
+			}
 			break
 		}
 		if typ != protowireBytes {
+			if num == 1 && typ == protowire.VarintType {
+				isSavedModel = true
+			}
 			if !r.skipValue(typ) {
 				w.structAt(off, "top-level field "+itoa(int(num))+" has an unreadable value")
 				break
@@ -137,19 +151,52 @@ func (savedModelParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 		}
 		switch num {
 		case 1:
-			if !w.walkMetaGraph(o, n) {
+			if !isBareGraph && w.walkMetaGraph(o, n) {
+				isSavedModel = true
+			} else {
 				// A bare GraphDef puts NodeDef directly at the top level; a
 				// MetaGraphDef always has a graph_def we would have found.
+				isBareGraph = true
 				w.walkNode(o, n)
 			}
 		case 2:
-			// The SavedModel wrapper: field 2 is a MetaGraphDef (meta_graphs).
-			if !w.walkMetaGraph(o, n) {
-				w.structAt(off, "top-level field 2 does not decode as a MetaGraphDef")
+			switch {
+			case isBareGraph:
+				// Bare GraphDef: field 2 is FunctionDefLibrary (library).
+				w.walkFunctionLibrary(o, n)
+			case isSavedModel:
+				// SavedModel wrapper: field 2 is MetaGraphDef (meta_graphs).
+				if !w.walkMetaGraph(o, n) {
+					w.structAt(off, "top-level field 2 does not decode as a MetaGraphDef")
+				}
+			default:
+				if probeMetaGraph(s, o, n) {
+					isSavedModel = true
+					w.walkMetaGraph(o, n)
+				} else if probeFunctionLibrary(s, o, n) {
+					isBareGraph = true
+					w.walkFunctionLibrary(o, n)
+				} else if !w.walkMetaGraph(o, n) {
+					w.structAt(off, "top-level field 2 does not decode as a MetaGraphDef")
+				}
 			}
 		}
 	}
 	return nil
+}
+
+const maxScopeEntries = 65536
+
+type pendingFileIO struct {
+	off    int64
+	name   string
+	op     string
+	inputs []string
+}
+
+type graphScope struct {
+	consts  map[string][]string
+	fileIOs []pendingFileIO
 }
 
 // graphWalker carries the per-artifact walker state.
@@ -159,6 +206,46 @@ type graphWalker struct {
 	nodes int
 	// nodeCapReported guards the one limit finding the node cap emits.
 	nodeCapReported bool
+	scopes          []*graphScope
+}
+
+func (w *graphWalker) pushGraphScope() *graphScope {
+	sc := &graphScope{}
+	w.scopes = append(w.scopes, sc)
+	return sc
+}
+
+func (w *graphWalker) currentScope() *graphScope {
+	if len(w.scopes) == 0 {
+		return nil
+	}
+	return w.scopes[len(w.scopes)-1]
+}
+
+func (w *graphWalker) popGraphScope(sc *graphScope) {
+	if len(w.scopes) > 0 && w.scopes[len(w.scopes)-1] == sc {
+		w.scopes = w.scopes[:len(w.scopes)-1]
+	}
+	if sc == nil || len(sc.fileIOs) == 0 || len(sc.consts) == 0 {
+		return
+	}
+	for _, fio := range sc.fileIOs {
+		for _, in := range fio.inputs {
+			norm := normalizeInputNode(in)
+			vals := sc.consts[norm]
+			for _, v := range vals {
+				w.reportPath(fio.off, "node "+clip(fio.name, 60)+" op "+fio.op+" input "+clip(in, 60), v)
+			}
+		}
+	}
+}
+
+func normalizeInputNode(in string) string {
+	in = strings.TrimPrefix(in, "^")
+	if i := strings.IndexByte(in, ':'); i >= 0 {
+		in = in[:i]
+	}
+	return in
 }
 
 func (w *graphWalker) structAt(off int64, msg string) {
@@ -169,9 +256,12 @@ func (w *graphWalker) structAt(off int64, msg string) {
 func (w *graphWalker) walkMetaGraph(o, n int64) bool {
 	r := newPBReader(w.s, o, o+n)
 	found := false
-	for {
+	for r.remaining() > 0 {
 		num, typ, off, ok := r.next()
 		if !ok {
+			if r.remaining() > 0 {
+				w.structAt(off, "MetaGraphDef tag is malformed or truncated")
+			}
 			break
 		}
 		if typ != protowireBytes {
@@ -200,11 +290,16 @@ func (w *graphWalker) walkMetaGraph(o, n int64) bool {
 
 // walkGraphDef walks a GraphDef: its nodes and its function library.
 func (w *graphWalker) walkGraphDef(o, n int64) bool {
+	sc := w.pushGraphScope()
+	defer w.popGraphScope(sc)
 	r := newPBReader(w.s, o, o+n)
 	found := false
-	for {
+	for r.remaining() > 0 {
 		num, typ, off, ok := r.next()
 		if !ok {
+			if r.remaining() > 0 {
+				w.structAt(off, "GraphDef tag is malformed or truncated")
+			}
 			break
 		}
 		if typ != protowireBytes {
@@ -235,13 +330,17 @@ func (w *graphWalker) walkGraphDef(o, n int64) bool {
 // graph's.
 func (w *graphWalker) walkFunctionLibrary(o, n int64) {
 	r := newPBReader(w.s, o, o+n)
-	for {
+	for r.remaining() > 0 {
 		num, typ, off, ok := r.next()
 		if !ok {
+			if r.remaining() > 0 {
+				w.structAt(off, "FunctionDefLibrary tag is malformed or truncated")
+			}
 			break
 		}
 		if typ != protowireBytes {
 			if !r.skipValue(typ) {
+				w.structAt(off, "FunctionDefLibrary field "+itoa(int(num))+" has an unreadable value")
 				break
 			}
 			continue
@@ -259,14 +358,20 @@ func (w *graphWalker) walkFunctionLibrary(o, n int64) {
 
 // walkFunctionDef walks one FunctionDef; node_def is field 3.
 func (w *graphWalker) walkFunctionDef(o, n int64) {
+	sc := w.pushGraphScope()
+	defer w.popGraphScope(sc)
 	r := newPBReader(w.s, o, o+n)
-	for {
+	for r.remaining() > 0 {
 		num, typ, off, ok := r.next()
 		if !ok {
+			if r.remaining() > 0 {
+				w.structAt(off, "FunctionDef tag is malformed or truncated")
+			}
 			break
 		}
 		if typ != protowireBytes {
 			if !r.skipValue(typ) {
+				w.structAt(off, "FunctionDef field "+itoa(int(num))+" has an unreadable value")
 				break
 			}
 			continue
@@ -285,13 +390,17 @@ func (w *graphWalker) walkFunctionDef(o, n int64) {
 // walkAssetDef walks an AssetFileDef: filename is field 2.
 func (w *graphWalker) walkAssetDef(o, n int64) {
 	r := newPBReader(w.s, o, o+n)
-	for {
+	for r.remaining() > 0 {
 		num, typ, off, ok := r.next()
 		if !ok {
+			if r.remaining() > 0 {
+				w.structAt(off, "AssetFileDef tag is malformed or truncated")
+			}
 			break
 		}
 		if typ != protowireBytes {
 			if !r.skipValue(typ) {
+				w.structAt(off, "AssetFileDef field "+itoa(int(num))+" has an unreadable value")
 				break
 			}
 			continue
@@ -316,8 +425,8 @@ func (w *graphWalker) walkAssetDef(o, n int64) {
 // anyone runs.
 const maxGraphNodes = 1_000_000
 
-// walkNode walks one NodeDef. name is field 1, op is field 2, and the attributes
-// are field 5 (a map<string, AttrValue>).
+// walkNode walks one NodeDef. name is field 1, op is field 2, input is field 3,
+// and the attributes are field 5 (a map<string, AttrValue>).
 func (w *graphWalker) walkNode(o, n int64) {
 	if w.nodes++; w.nodes > maxGraphNodes {
 		// A GraphDef with more than a million nodes is a few MB of declared
@@ -333,10 +442,15 @@ func (w *graphWalker) walkNode(o, n int64) {
 	}
 	r := newPBReader(w.s, o, o+n)
 	nodeName, op := "", ""
+	var inputs []string
 	var attrStrings []string
-	for {
+	var tensorStrings []string
+	for r.remaining() > 0 {
 		num, typ, off, ok := r.next()
 		if !ok {
+			if r.remaining() > 0 {
+				w.structAt(off, "NodeDef tag is malformed or truncated")
+			}
 			break
 		}
 		if typ != protowireBytes {
@@ -360,34 +474,196 @@ func (w *graphWalker) walkNode(o, n int64) {
 			if s := smallString(r, oo, nn); s != "" {
 				op = s
 			}
+		case 3:
+			if len(inputs) < maxNodeStrings {
+				if s := smallString(r, oo, nn); s != "" {
+					inputs = append(inputs, s)
+				}
+			}
 		case 5:
 			if len(attrStrings) < maxNodeStrings {
 				attrStrings = append(attrStrings, w.collectAttrStrings(oo, nn, 0)...)
 			}
+			if len(tensorStrings) < maxNodeStrings {
+				tensorStrings = append(tensorStrings, w.extractAttrTensorStrings(oo, nn)...)
+			}
 		}
 	}
-	w.reportNode(o, nodeName, op, attrStrings)
+	if sc := w.currentScope(); sc != nil {
+		if op == "Const" && nodeName != "" && len(tensorStrings) > 0 {
+			if sc.consts == nil {
+				sc.consts = make(map[string][]string)
+			}
+			if len(sc.consts) < maxScopeEntries {
+				if len(tensorStrings) > maxNodeStrings {
+					tensorStrings = tensorStrings[:maxNodeStrings]
+				}
+				sc.consts[nodeName] = tensorStrings
+			}
+		}
+		if fileIOOps[op] && len(inputs) > 0 && len(sc.fileIOs) < maxScopeEntries {
+			sc.fileIOs = append(sc.fileIOs, pendingFileIO{off: o, name: nodeName, op: op, inputs: inputs})
+		}
+	}
+	w.reportNode(o, nodeName, op, attrStrings, tensorStrings)
+}
+
+// extractAttrTensorStrings decodes string tensor values from a NodeDef attr
+// map entry (key=1, AttrValue=2 -> TensorProto=8 -> string_val=8 or
+// varint-prefixed tensor_content=4 for DT_STRING).
+func (w *graphWalker) extractAttrTensorStrings(o, n int64) []string {
+	r := newPBReader(w.s, o, o+n)
+	var out []string
+	for r.remaining() > 0 {
+		num, typ, _, ok := r.next()
+		if !ok {
+			break
+		}
+		if typ != protowireBytes {
+			if !r.skipValue(typ) {
+				break
+			}
+			continue
+		}
+		oo, nn, ok := r.bytesValue()
+		if !ok {
+			break
+		}
+		if num == 2 { // AttrValue
+			out = append(out, w.extractAttrValueTensorStrings(oo, nn)...)
+		}
+	}
+	return out
+}
+
+func (w *graphWalker) extractAttrValueTensorStrings(o, n int64) []string {
+	r := newPBReader(w.s, o, o+n)
+	var out []string
+	for r.remaining() > 0 {
+		num, typ, _, ok := r.next()
+		if !ok {
+			break
+		}
+		if typ != protowireBytes {
+			if !r.skipValue(typ) {
+				break
+			}
+			continue
+		}
+		oo, nn, ok := r.bytesValue()
+		if !ok {
+			break
+		}
+		if num == 8 { // TensorProto
+			out = append(out, w.extractTensorProtoStrings(oo, nn)...)
+		}
+	}
+	return out
+}
+
+// dtString is TensorFlow's DataType.DT_STRING enum value.
+const dtString = 7
+
+func (w *graphWalker) extractTensorProtoStrings(o, n int64) []string {
+	r := newPBReader(w.s, o, o+n)
+	var (
+		dtype      uint64
+		hasDtype   bool
+		contentOff int64
+		contentLen int64
+		hasContent bool
+		out        []string
+	)
+	for r.remaining() > 0 {
+		num, typ, _, ok := r.next()
+		if !ok {
+			break
+		}
+		if num == 1 && typ == protowire.VarintType {
+			v, ok := r.varintValue()
+			if !ok {
+				break
+			}
+			dtype, hasDtype = v, true
+			continue
+		}
+		if typ != protowireBytes {
+			if !r.skipValue(typ) {
+				break
+			}
+			continue
+		}
+		oo, nn, ok := r.bytesValue()
+		if !ok {
+			break
+		}
+		switch num {
+		case 4: // tensor_content
+			contentOff, contentLen, hasContent = oo, nn, true
+		case 8: // repeated bytes string_val
+			if len(out) < maxNodeStrings && nn > 0 && nn <= maxScanString {
+				b := r.view(oo, nn)
+				if printableASCII(b) {
+					out = append(out, string(b))
+				}
+			}
+		}
+	}
+	if hasContent && (!hasDtype || dtype == dtString) && contentLen > 0 {
+		readLen := contentLen
+		if readLen > maxScanString*maxNodeStrings {
+			readLen = maxScanString * maxNodeStrings
+		}
+		buf := r.view(contentOff, readLen)
+		for len(buf) > 0 && len(out) < maxNodeStrings {
+			slen, k := protowire.ConsumeVarint(buf)
+			if k < 0 || slen > uint64(len(buf)-k) {
+				break
+			}
+			buf = buf[k:]
+			s := buf[:slen]
+			buf = buf[slen:]
+			if len(s) > 0 && int64(len(s)) <= maxScanString && printableASCII(s) {
+				out = append(out, string(s))
+			}
+		}
+	}
+	return out
 }
 
 // reportNode applies the op-name rules and the indicator engine.
-func (w *graphWalker) reportNode(off int64, name, op string, attrStrings []string) {
+func (w *graphWalker) reportNode(off int64, name, op string, attrStrings, tensorStrings []string) {
 	if name != "" {
 		scanTextCapped(w.ctx, off, "node name", name)
 	}
 	switch op {
-	case "PyFunc", "EagerPyFunc":
+	case "PyFunc", "EagerPyFunc", "PyFuncStateless":
 		w.ctx.Sink.EmitExtra(ruleTFPyFunc, off, "node "+clip(name, 80)+" runs op "+op,
 			map[string]string{"op": op, "node": clip(name, 80)})
 	}
 	fileIO := fileIOOps[op]
+	seen := make(map[string]bool, len(attrStrings))
 	for i, v := range attrStrings {
 		if i >= maxNodeStrings {
 			break
 		}
+		seen[v] = true
 		if fileIO {
 			w.reportPath(off, "node "+clip(name, 60)+" op "+op, v)
 		}
 		scanTextCapped(w.ctx, off, "op attribute", v)
+	}
+	for i, v := range tensorStrings {
+		if i >= maxNodeStrings {
+			break
+		}
+		if seen[v] {
+			continue
+		}
+		if fileIO {
+			w.reportPath(off, "node "+clip(name, 60)+" op "+op, v)
+		}
+		scanTextCapped(w.ctx, off, "op tensor", v)
 	}
 }
 
@@ -499,6 +775,54 @@ func probeGraph(s source.Source, o, n int64) bool {
 	return false
 }
 
+func probeFunctionLibrary(s source.Source, o, n int64) bool {
+	r := newPBProbe(s, o, n)
+	for range 16 {
+		num, typ, _, ok := r.next()
+		if !ok {
+			return false
+		}
+		if typ != protowireBytes {
+			if !r.skipValue(typ) {
+				return false
+			}
+			continue
+		}
+		oo, nn, ok := r.bytesValue()
+		if !ok {
+			return false
+		}
+		if num == 1 && probeFunctionDef(s, oo, nn) {
+			return true
+		}
+	}
+	return false
+}
+
+func probeFunctionDef(s source.Source, o, n int64) bool {
+	r := newPBProbe(s, o, n)
+	for range 16 {
+		num, typ, _, ok := r.next()
+		if !ok {
+			return false
+		}
+		if typ != protowireBytes {
+			if !r.skipValue(typ) {
+				return false
+			}
+			continue
+		}
+		oo, nn, ok := r.bytesValue()
+		if !ok {
+			return false
+		}
+		if num == 3 && probeNode(s, oo, nn) {
+			return true
+		}
+	}
+	return false
+}
+
 // probeNode reports whether [o,o+n) looks like a NodeDef: a name (field 1) and an
 // op (field 2), both short printable strings.
 func probeNode(s source.Source, o, n int64) bool {
@@ -578,17 +902,93 @@ func isJSONHead(s source.Source) bool {
 	return false
 }
 
-// sniffTFJS recognises a TF-JS model.json: a JSON object carrying the graph or
-// the weights manifest, distinguished from an ordinary config.json by those keys.
-func sniffTFJS(s source.Source, l limits.Limits) (artifact.Format, bool) {
+// sniffTFJS recognises a TF-JS model.json: a JSON object whose top-level keys
+// include "modelTopology" or "weightsManifest". Requiring JSON head AND parsing
+// top-level keys prevents hijacking tokenizer_config.json, config.json, .ipynb,
+// or non-JSON source files that merely mention those substrings.
+func sniffTFJS(s source.Source, _ limits.Limits) (artifact.Format, bool) {
+	if !isJSONHead(s) {
+		return artifact.FormatUnknown, false
+	}
 	head, err := s.Bytes(0, min64(s.Size(), 1<<20))
 	if err != nil && len(head) == 0 {
 		return artifact.FormatUnknown, false
 	}
-	if !strings.Contains(string(head), "modelTopology") && !strings.Contains(string(head), "weightsManifest") {
+	if !bytes.Contains(head, []byte("modelTopology")) &&
+		!bytes.Contains(head, []byte("weightsManifest")) &&
+		!bytes.Contains(head, []byte(`\u`)) {
 		return artifact.FormatUnknown, false
 	}
-	return artifact.FormatTFSavedModel, true
+	dec := json.NewDecoder(bytes.NewReader(head))
+	tok, err := dec.Token()
+	if err != nil {
+		return artifact.FormatUnknown, false
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return artifact.FormatUnknown, false
+	}
+	const (
+		maxTopKeys    = 1024
+		maxSkipTokens = 1 << 16
+	)
+	tokens := 0
+	for range maxTopKeys {
+		if !dec.More() {
+			break
+		}
+		kt, err := dec.Token()
+		if err != nil {
+			break
+		}
+		k, ok := kt.(string)
+		if !ok {
+			return artifact.FormatUnknown, false
+		}
+		if k == "modelTopology" || k == "weightsManifest" {
+			return artifact.FormatTFSavedModel, true
+		}
+		if !skipJSONValueBounded(dec, &tokens, maxSkipTokens) {
+			break
+		}
+	}
+	return artifact.FormatUnknown, false
+}
+
+// skipJSONValueBounded consumes one JSON value from dec, stopping if the token
+// budget is exhausted or the stream ends/errors.
+func skipJSONValueBounded(dec *json.Decoder, tokens *int, maxTokens int) bool {
+	if *tokens >= maxTokens {
+		return false
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	*tokens++
+	d, ok := tok.(json.Delim)
+	if !ok || (d != '{' && d != '[') {
+		return true
+	}
+	depth := 1
+	for depth > 0 {
+		if *tokens >= maxTokens {
+			return false
+		}
+		t, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		*tokens++
+		if dd, isDelim := t.(json.Delim); isDelim {
+			switch dd {
+			case '{', '[':
+				depth++
+			default:
+				depth--
+			}
+		}
+	}
+	return true
 }
 
 // parseTFJS walks a TF-JS model.json: the graph topology's op names and the
@@ -642,7 +1042,7 @@ func walkTopology(ctx *artifact.Ctx, topo map[string]any) {
 		op, _ := n["op"].(string)
 		name, _ := n["name"].(string)
 		switch op {
-		case "PyFunc", "EagerPyFunc":
+		case "PyFunc", "EagerPyFunc", "PyFuncStateless":
 			ctx.Sink.EmitExtra(ruleTFPyFunc, 0, "TF-JS node "+clip(name, 80)+" runs op "+op,
 				map[string]string{"op": op, "node": clip(name, 80)})
 		}

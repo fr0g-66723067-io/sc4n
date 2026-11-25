@@ -57,31 +57,30 @@ func TestParseReportsUnverified(t *testing.T) {
 	if got.Extra["head_bytes"] != "8" {
 		t.Errorf("head_bytes = %q", got.Extra["head_bytes"])
 	}
-	if got.Extra["tail_bytes"] != "8" {
-		t.Errorf("tail_bytes = %q", got.Extra["tail_bytes"])
+	if got.Extra["tail_bytes"] != "0" {
+		t.Errorf("tail_bytes = %q, want 0 when engine fits inside headWindow", got.Extra["tail_bytes"])
 	}
 }
 
-// A large engine exercises the two-window path: a name in the head is reported, a
-// marker in the middle of the weight region is not, a name in the tail is.
+// A large engine exercises the two-window path: a reachable indicator in the
+// head is reported, a marker in the middle of the weight region is not, and a
+// marker in the tail is.
 func TestWindows(t *testing.T) {
 	data := make([]byte, 8<<20)
 	copy(data, "ftrt\x00\x00\x00\x00")
-	copy(data[1024:], "os.system")
+	copy(data[1024:], "hooks.slack.com/services/T/B/X")
 	copy(data[5<<20:], "discord.com/api/webhooks")
 	copy(data[len(data)-1024:], "api.telegram.org")
 	fs := parse(t, "big.engine", data)
 	var head, mid, tail bool
 	for _, f := range fs {
-		switch f.RuleID {
-		case "SC4N-METADATA-CODE", "SC4N-STRING-DECODER":
-			if f.Offset == 1024 {
+		if f.RuleID == "SC4N-STRING-C2" {
+			switch {
+			case f.Offset == 1024:
 				head = true
-			}
-		case "SC4N-STRING-C2":
-			if f.Offset == 5<<20 {
+			case f.Offset == 5<<20:
 				mid = true
-			} else if int64(f.Offset) >= int64(len(data))-1024 {
+			case f.Offset >= int64(len(data))-1024:
 				tail = true
 			}
 		}
@@ -94,6 +93,24 @@ func TestWindows(t *testing.T) {
 	}
 	if !tail {
 		t.Error("indicator in the tail window was not reported")
+	}
+}
+
+func TestNoDuplicateFindingsOnOverlappingSize(t *testing.T) {
+	// A 2 MiB engine fits inside headWindow (4 MiB); clamping tailOff to headLen
+	// guarantees no duplicate findings from overlapping head and tail windows.
+	data := make([]byte, 2<<20)
+	copy(data, "ftrt\x00\x00\x00\x00")
+	copy(data[(2<<20)-512:], "https://hooks.slack.com/services/T/B/X")
+	fs := parse(t, "mid.engine", data)
+	c2 := 0
+	for _, f := range fs {
+		if f.RuleID == "SC4N-STRING-C2" {
+			c2++
+		}
+	}
+	if c2 != 1 {
+		t.Fatalf("2 MiB engine emitted %d SC4N-STRING-C2 findings, want 1: %v", c2, fs)
 	}
 }
 

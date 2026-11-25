@@ -32,6 +32,7 @@ type CandidatesFile struct {
 type RankFile struct {
 	Sort     string               `json:"sort"`
 	Limit    int                  `json:"limit"`
+	Top      int                  `json:"top,omitempty"`
 	Captured []hubapi.RankedModel `json:"captured"`
 }
 
@@ -103,8 +104,15 @@ func universeDiff(cached CandidatesFile, o Options) string {
 		if cached.Rank == nil || cached.Rank.Sort != o.Rank {
 			return "rank " + o.Rank
 		}
-		if o.Top > 0 && len(cached.Repos) != o.Top {
+		wantLimit := o.Limit
+		if o.Top > wantLimit {
+			wantLimit = o.Top
+		}
+		if cached.Rank.Top != o.Top {
 			return fmt.Sprintf("top %d", o.Top)
+		}
+		if cached.Rank.Limit != wantLimit {
+			return fmt.Sprintf("limit %d", wantLimit)
 		}
 	}
 	if len(o.Repos) > 0 {
@@ -148,7 +156,7 @@ func writeRankCandidates(ctx context.Context, o Options) ([]Candidate, error) {
 		Version: Version,
 		Queries: []Sel{{Kind: "rank", Value: o.Rank}},
 		Repos:   repos,
-		Rank:    &RankFile{Sort: o.Rank, Limit: limit, Captured: rows},
+		Rank:    &RankFile{Sort: o.Rank, Limit: limit, Top: o.Top, Captured: rows},
 	}
 	if err := writeJSON(o.path(fileCandidates), file); err != nil {
 		return nil, err

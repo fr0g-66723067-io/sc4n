@@ -1080,3 +1080,236 @@ func TestTruncateEvidenceKeepsRunesWhole(t *testing.T) {
 		}
 	}
 }
+
+func TestSARIFUnregisteredRuleDeduplicatedAndRegionCompliance(t *testing.T) {
+	zeroLine := 0
+	c := NewCollector(0)
+	c.Add(Finding{
+		RuleID: "SC4N-UNREG-TEST", Title: "unreg", Severity: SeverityHigh,
+		Confidence: ConfidenceHigh, Artifact: "a:b.pkl", Offset: 0, Evidence: "ev1",
+	})
+	c.Add(Finding{
+		RuleID: "SC4N-UNREG-TEST", Title: "unreg", Severity: SeverityHigh,
+		Confidence: ConfidenceHigh, Artifact: "a:b.pkl", Offset: 10, Evidence: "ev2",
+	})
+	c.Add(Finding{
+		RuleID: testRuleInfo.ID, Title: testRuleInfo.Title, Severity: SeverityInfo,
+		Confidence: ConfidenceLow, Artifact: "a:b.pkl", Line: &zeroLine, Evidence: "line-only",
+	})
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "", []ArtifactSummary{{Path: "a:b.pkl", Format: "pickle"}}, c, Limits{}, nil, 0)
+
+	var buf bytes.Buffer
+	if err := rep.WriteSARIF(&buf); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.String()
+	if strings.Contains(raw, `\u0000`) {
+		t.Fatalf("SARIF output contains literal NUL escape: %s", raw)
+	}
+
+	var doc struct {
+		Runs []struct {
+			Tool struct {
+				Driver struct {
+					Rules []struct {
+						ID string `json:"id"`
+					} `json:"rules"`
+				} `json:"driver"`
+			} `json:"tool"`
+			Results []struct {
+				RuleID    string `json:"ruleId"`
+				RuleIndex int    `json:"ruleIndex"`
+				Locations []struct {
+					PhysicalLocation struct {
+						ArtifactLocation struct{ URI string } `json:"artifactLocation"`
+						Region           struct {
+							StartLine  int    `json:"startLine"`
+							ByteOffset *int64 `json:"byteOffset"`
+							ByteLength *int   `json:"byteLength"`
+						} `json:"region"`
+					} `json:"physicalLocation"`
+				} `json:"locations"`
+				PartialFingerprints map[string]string `json:"partialFingerprints"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	unregCount := 0
+	for _, ru := range doc.Runs[0].Tool.Driver.Rules {
+		if ru.ID == "SC4N-UNREG-TEST" {
+			unregCount++
+		}
+	}
+	if unregCount != 1 {
+		t.Fatalf("unregistered rule emitted %d descriptors, want 1", unregCount)
+	}
+	for _, res := range doc.Runs[0].Results {
+		loc := res.Locations[0].PhysicalLocation
+		if loc.ArtifactLocation.URI != "./a:b.pkl" {
+			t.Errorf("URI for a:b.pkl = %q, want ./a:b.pkl", loc.ArtifactLocation.URI)
+		}
+		if loc.Region.StartLine < 1 {
+			t.Errorf("StartLine = %d, want >= 1", loc.Region.StartLine)
+		}
+		if loc.Region.ByteLength != nil && loc.Region.ByteOffset == nil {
+			t.Errorf("SARIF §3.30.14 violation: byteLength=%d without byteOffset", *loc.Region.ByteLength)
+		}
+		if res.RuleID == testRuleInfo.ID {
+			if loc.Region.ByteOffset != nil || loc.Region.ByteLength != nil {
+				t.Errorf("line-only finding carried byteOffset/byteLength: %+v", loc.Region)
+			}
+		} else if res.RuleID == "SC4N-UNREG-TEST" && loc.Region.ByteOffset == nil {
+			t.Errorf("offset finding missing byteOffset (including 0)")
+		}
+		if strings.ContainsRune(res.PartialFingerprints["primaryLocationLineHash"], '\x00') {
+			t.Errorf("primaryLocationLineHash contains NUL: %q", res.PartialFingerprints["primaryLocationLineHash"])
+		}
+	}
+}
+
+func TestSARIFPathURI(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"dir/m.pkl", "dir/m.pkl"},
+		{"./dir/m.pkl", "dir/m.pkl"},
+		{"a:b.pkl", "./a:b.pkl"},
+		{"./a:b.pkl", "./a:b.pkl"},
+		{"dir/a:b.pkl", "dir/a:b.pkl"},
+		{"http://example.com/a.pkl", "http://example.com/a.pkl"},
+	}
+	for _, tc := range cases {
+		if got := pathURI(tc.in); got != tc.want {
+			t.Errorf("pathURI(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestTextCancelledSummaryAndBidiC1Masking(t *testing.T) {
+	rep := Build(Tool{Name: "sc4n", Version: "t"}, "", nil, NewCollector(0), Limits{}, nil, 0)
+	rep.Cancelled = true
+	if !strings.Contains(rep.SummaryLine(), "cancelled") {
+		t.Fatalf("SummaryLine() = %q, missing cancelled", rep.SummaryLine())
+	}
+	raw := "a\u0085b\u009fc\u202ed\u2066e\u2069f"
+	got := collapseControl(raw)
+	if got != "a·b·c·d·e·f" {
+		t.Fatalf("collapseControl(%q) = %q, want %q", raw, got, "a·b·c·d·e·f")
+	}
+}
+
+func TestCycloneDXSerialNumberCWEsAndEmptyArtifact(t *testing.T) {
+	render := func(mod func(*Report)) (string, []byte) {
+		c := NewCollector(0)
+		c.For("m.pkl").Emit(testRuleCritical, 1, "os.system")
+		rep := Build(Tool{Name: "sc4n", Version: "t"}, "",
+			[]ArtifactSummary{{Path: "m.pkl", SHA256: "aa", SHA256Scope: "full", Format: "pickle"}}, c, Limits{}, nil, 0)
+		if mod != nil {
+			mod(rep)
+		}
+		var buf bytes.Buffer
+		if err := rep.WriteCycloneDX(&buf); err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Serial string `json:"serialNumber"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Serial, buf.Bytes()
+	}
+
+	baseSerial, baseBytes := render(nil)
+	for name, mod := range map[string]func(*Report){
+		"cancelled":  func(r *Report) { r.Cancelled = true },
+		"unreadable": func(r *Report) { r.Unreadable = 1 },
+		"suppressed": func(r *Report) { r.Suppressed = 2 },
+		"dropped":    func(r *Report) { r.Dropped = 3 },
+		"art error":  func(r *Report) { r.Artifacts[0].Error = "boom" },
+		"art scope":  func(r *Report) { r.Artifacts[0].SHA256Scope = "prefix:16" },
+	} {
+		s, _ := render(mod)
+		if s == baseSerial {
+			t.Errorf("serialNumber did not change for %s", name)
+		}
+	}
+
+	var doc struct {
+		Vulnerabilities []struct {
+			CWEs    []int `json:"cwes"`
+			Affects []struct {
+				Ref string `json:"ref"`
+			} `json:"affects"`
+		} `json:"vulnerabilities"`
+	}
+	if err := json.Unmarshal(baseBytes, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Vulnerabilities) != 1 || len(doc.Vulnerabilities[0].CWEs) != 1 || doc.Vulnerabilities[0].CWEs[0] != 502 {
+		t.Fatalf("cwes = %+v, want [502]", doc.Vulnerabilities)
+	}
+
+	// Empty artifact must not produce a dangling "sc4n:" bom-ref.
+	cEmpty := NewCollector(0)
+	cEmpty.Add(Finding{RuleID: testRuleInfo.ID, Title: "t", Severity: SeverityInfo, Artifact: "", Evidence: "ev"})
+	repEmpty := Build(Tool{Name: "sc4n", Version: "t"}, "", nil, cEmpty, Limits{}, nil, 0)
+	var emptyBuf bytes.Buffer
+	if err := repEmpty.WriteCycloneDX(&emptyBuf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(emptyBuf.String(), `"sc4n:"`) {
+		t.Fatalf("dangling empty bom-ref emitted: %s", emptyBuf.String())
+	}
+}
+
+func TestCollectorSuppressAndNoteRuleMaintainHeap(t *testing.T) {
+	c := NewCollector(2)
+	c.Add(Finding{RuleID: testRuleInfo.ID, Severity: SeverityInfo, Artifact: "a", Offset: 1, Evidence: "i"})
+	c.Add(Finding{RuleID: testRuleHigh.ID, Severity: SeverityHigh, Artifact: "a", Offset: 2, Evidence: "h"})
+	fp := map[string]bool{Fingerprint(Finding{RuleID: testRuleHigh.ID, Artifact: "a", Offset: 2, Evidence: "h"}): true}
+	if n := c.Suppress(fp); n != 1 {
+		t.Fatalf("Suppress = %d, want 1", n)
+	}
+	if c.Suppressed() != 1 {
+		t.Fatalf("Suppressed() = %d, want 1", c.Suppressed())
+	}
+	// Adding two more findings after Suppress must still evict the lowest-severity
+	// finding (info) cleanly.
+	c.Add(Finding{RuleID: testRuleMedium.ID, Severity: SeverityMedium, Artifact: "a", Offset: 3, Evidence: "m"})
+	c.Add(Finding{RuleID: testRuleCritical.ID, Severity: SeverityCritical, Artifact: "a", Offset: 4, Evidence: "c"})
+	got := c.Findings()
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	for _, f := range got {
+		if f.Severity == SeverityInfo {
+			t.Fatalf("heap invariant broken: info finding survived over higher severities: %+v", got)
+		}
+	}
+	// NoteRule on a capped collector keeps the heap valid as well.
+	c.NoteRule(testRuleInfo, "a", 99, "notice", nil)
+	if c.Len() != 3 {
+		t.Fatalf("Len after NoteRule = %d, want 3", c.Len())
+	}
+}
+
+func TestSinkDuplicateDistinguishesExtraRedactedAndPositionKind(t *testing.T) {
+	c := NewCollector(0)
+	s := c.For("f.py")
+	s.Emit(testRuleInfo, 0, "same")
+	s.EmitAt(testRuleInfo, 0, 0, "same")
+	s.EmitExtra(testRuleInfo, 10, "ev", map[string]string{"k": "v1"})
+	s.EmitExtra(testRuleInfo, 10, "ev", map[string]string{"k": "v2"})
+	s.EmitExtra(testRuleInfo, 20, "secret", nil)
+	s.EmitRedacted(testRuleInfo, 20, "secret", nil)
+	// True duplicates are still collapsed.
+	s.EmitExtra(testRuleInfo, 10, "ev", map[string]string{"k": "v1"})
+	s.EmitRedacted(testRuleInfo, 20, "secret", nil)
+
+	if got := len(c.Findings()); got != 6 {
+		t.Fatalf("got %d findings, want 6 distinct findings: %+v", got, c.Findings())
+	}
+}

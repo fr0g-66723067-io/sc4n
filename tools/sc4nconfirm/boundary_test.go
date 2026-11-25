@@ -37,3 +37,24 @@ func TestScannerDoesNotImportTheHarness(t *testing.T) {
 		}
 	}
 }
+
+// TestScanPathStaysOffline enforces AGENTS.md Invariant #2: the only non-test
+// package under internal/ or cmd/ that may import net/http is internal/hubapi.
+func TestScanPathStaysOffline(t *testing.T) {
+	root := filepath.Join("..", "..")
+	for _, tc := range []struct {
+		dir   string
+		allow []string
+	}{
+		{"internal", []string{"hubapi"}},
+		{"cmd", nil},
+	} {
+		offenders, err := boundary.NoNetOutside(filepath.Join(root, tc.dir), tc.allow...)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.dir, err)
+		}
+		for _, f := range offenders {
+			t.Errorf("%s/%s imports net/http: only internal/hubapi may dial", tc.dir, f)
+		}
+	}
+}

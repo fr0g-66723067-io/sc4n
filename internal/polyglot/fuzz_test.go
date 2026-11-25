@@ -33,7 +33,11 @@ func FuzzPolyglot(f *testing.F) {
 
 		// The helpers behind Scan are exported and are the ones a future caller
 		// reaches for; they must be total too.
-		_ = MagicWindows(s, s.Size())
+		ws := MagicWindows(s, s.Size())
 		EachValidatedNative(data, func(bytescan.NativeKind, int) {})
+		for _, w := range ws {
+			EachValidatedNativeInWindow(s, s.Size(), w, func(bytescan.NativeKind, int64) {})
+		}
+		_ = ExecImportNames(s, s.Size(), 0)
 	})
 }

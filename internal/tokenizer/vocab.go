@@ -52,10 +52,11 @@ func walkValue(dec *json.Decoder, path []string, skipAll bool, spans *[]stringsc
 	if err != nil {
 		return err
 	}
-	skip := skipAll || isVocabPath(path)
+	entering := !skipAll && isVocabPath(path)
+	skip := skipAll || entering
 	d, delim := tok.(json.Delim)
 	if !delim {
-		if skip {
+		if entering {
 			*spans = append(*spans, stringscan.Span{Start: start, End: dec.InputOffset()})
 		}
 		return nil
@@ -67,14 +68,22 @@ func walkValue(dec *json.Decoder, path []string, skipAll bool, spans *[]stringsc
 			if err != nil {
 				return err
 			}
-			key, _ := kt.(string)
-			if err := walkValue(dec, append(path, key), skip, spans); err != nil {
+			var nextPath []string
+			if !skip {
+				key, _ := kt.(string)
+				nextPath = append(path, key)
+			}
+			if err := walkValue(dec, nextPath, skip, spans); err != nil {
 				return err
 			}
 		}
 	case '[':
 		for i := 0; dec.More(); i++ {
-			if err := walkValue(dec, append(path, strconv.Itoa(i)), skip, spans); err != nil {
+			var nextPath []string
+			if !skip {
+				nextPath = append(path, strconv.Itoa(i))
+			}
+			if err := walkValue(dec, nextPath, skip, spans); err != nil {
 				return err
 			}
 		}
@@ -85,7 +94,7 @@ func walkValue(dec *json.Decoder, path []string, skipAll bool, spans *[]stringsc
 	if _, err := dec.Token(); err != nil {
 		return err
 	}
-	if skip {
+	if entering {
 		*spans = append(*spans, stringscan.Span{Start: start, End: dec.InputOffset()})
 	}
 	return nil

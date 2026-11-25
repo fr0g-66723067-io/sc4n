@@ -191,3 +191,80 @@ func TestHarnessExecIsDroppedByPIDNotPosition(t *testing.T) {
 		t.Fatalf("Exec = %v, want only the shell", r.Exec)
 	}
 }
+
+func TestQuietPathCleansTraversal(t *testing.T) {
+	for _, p := range []string{
+		"/dev/../home/worker/.aws/credentials",
+		"/usr/lib/../../../home/worker/.ssh/id_rsa",
+		"/etc/../home/worker/secret.txt",
+	} {
+		if quietPath(p, false) {
+			t.Errorf("quietPath(%q, false) = true, want false (traversal must not hide canary)", p)
+		}
+	}
+}
+
+func TestApplyTraceDropsOnlyFirstExecEvenForSamePID(t *testing.T) {
+	r := &malice.Run{}
+	applyTrace(r, `1 execve("/usr/local/bin/python3", ["python3", "/opt/sc4nconfirm/load.py", "/w/a.pkl", "/tmp/result.json"], 0x0) = 0
+1 execve("/usr/local/bin/python3", ["python3", "/opt/sc4nconfirm/load.py", "/w/evil.pkl", "/tmp/result.json"], 0x0) = 0
+`, "1")
+	if len(r.Exec) != 1 || !strings.Contains(r.Exec[0], "/w/evil.pkl") {
+		t.Fatalf("Exec = %v, want second in-place exec by same PID kept", r.Exec)
+	}
+}
+
+func TestApplyTraceReassemblesUnfinishedResumed(t *testing.T) {
+	trace := `100 openat(AT_FDCWD, "/home/worker/.aws/credentials", O_RDONLY <unfinished ...>
+101 connect(3, {sa_family=AF_INET6, sin6_port=htons(443), sin6_addr=inet_pton(AF_INET6, "2001:db8::1")}, 28 <unfinished ...>
+100 <... openat resumed>) = 3
+101 <... connect resumed>) = -1 ENETUNREACH
+102 execve("/bin/sh", ["/bin/sh", "-c" <unfinished ...>
+102 <... execve resumed>, "whoami"], 0x0) = 0
+`
+	r := &malice.Run{}
+	applyTrace(r, trace, "")
+	if len(r.OpenedOutside) != 1 || r.OpenedOutside[0] != "/home/worker/.aws/credentials" {
+		t.Fatalf("OpenedOutside = %v", r.OpenedOutside)
+	}
+	if len(r.Connect) != 1 || r.Connect[0] != "[2001:db8::1]:443" {
+		t.Fatalf("Connect = %v, want bracketed IPv6 [2001:db8::1]:443", r.Connect)
+	}
+	if len(r.Exec) != 1 || r.Exec[0] != "/bin/sh -c whoami" {
+		t.Fatalf("Exec = %v", r.Exec)
+	}
+}
+
+func TestOpenTargetChecksFlagsAfterPath(t *testing.T) {
+	p, writing := openTarget(`AT_FDCWD, "/usr/lib/O_WRONLY_helper.py", O_RDONLY|O_CLOEXEC`)
+	if p != "/usr/lib/O_WRONLY_helper.py" || writing {
+		t.Fatalf("openTarget = (%q, %v), want writing=false when O_WRONLY is inside filename", p, writing)
+	}
+	p, writing = openTarget(`AT_FDCWD, "/tmp/out.txt", O_WRONLY|O_CREAT, 0666`)
+	if p != "/tmp/out.txt" || !writing {
+		t.Fatalf("openTarget = (%q, %v), want writing=true", p, writing)
+	}
+}
+
+func TestApplyTraceExtraSyscallsAndExecveatEmptyPath(t *testing.T) {
+	trace := `5 memfd_create("stage", MFD_CLOEXEC) = 3
+5 execveat(3, "", ["stage", "-c", "id"], 0x0, AT_EMPTY_PATH) = 0
+5 creat("/tmp/drop.sh", 0755) = 4
+5 unlinkat(AT_FDCWD, "/home/worker/.netrc", 0) = 0
+5 renameat2(AT_FDCWD, "/tmp/a", AT_FDCWD, "/home/worker/b", 0) = 0
+5 sendto(6, "hi", 2, 0, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("8.8.8.8")}, 16) = -1
+`
+	r := &malice.Run{}
+	applyTrace(r, trace, "")
+	if len(r.Exec) != 1 || r.Exec[0] != "fd:3 stage -c id" {
+		t.Fatalf("Exec = %v, want fd:3 stage -c id", r.Exec)
+	}
+	if len(r.Connect) != 1 || r.Connect[0] != "8.8.8.8:53" {
+		t.Fatalf("Connect = %v, want 8.8.8.8:53", r.Connect)
+	}
+	for _, want := range []string{"memfd:stage", "/tmp/drop.sh", "/home/worker/.netrc", "/tmp/a", "/home/worker/b"} {
+		if !contains(r.Wrote, want) {
+			t.Errorf("Wrote = %v, missing %q", r.Wrote, want)
+		}
+	}
+}

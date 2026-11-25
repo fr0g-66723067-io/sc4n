@@ -90,11 +90,11 @@ func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	}
 	headLen := minInt64(int64(len(b)), headWindow)
 	head := b[:headLen]
-	tailOff := maxInt64(0, int64(len(b))-tailWindow)
+	tailOff := maxInt64(headLen, int64(len(b))-tailWindow)
 	tail := b[tailOff:]
 
 	stringscan.Emit(ctx.Sink, 0, head)
-	if tailOff > 0 {
+	if len(tail) > 0 {
 		stringscan.Emit(ctx.Sink, tailOff, tail)
 	}
 

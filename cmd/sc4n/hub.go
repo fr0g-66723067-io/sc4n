@@ -257,6 +257,13 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		return exitUnreadable
 	}
 
+	// Early single stages do not produce or refresh campaign.json; return
+	// directly so a re-run never prints stale totals from an older campaign.
+	switch *stage {
+	case "candidates", "verdicts", "fetch":
+		return exitClean
+	}
+
 	rep := freshScan
 	if rep == nil {
 		rep, err = hubcampaign.Load(o)
@@ -266,7 +273,10 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 		// progress line is the result, so this is not an error.
 		return exitClean
 	}
-	printCampaign(stdout, rep, *jsonOut)
+	if err := printCampaign(stdout, stderr, rep, *jsonOut); err != nil {
+		fmt.Fprintf(stderr, "sc4n hub: %v\n", err)
+		return exitUnreadable
+	}
 	if gate != nil {
 		worst := report.SeverityInfo
 		clean := rep.Totals.Findings.Max == "none"
@@ -287,18 +297,28 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 }
 
 // printCampaign writes the summary line and, with -json, the whole report.
-func printCampaign(w io.Writer, rep *hubcampaign.CampaignReport, asJSON bool) {
+// When -json is set the human summary goes to stderr so stdout is pure JSON.
+func printCampaign(stdout, stderr io.Writer, rep *hubcampaign.CampaignReport, asJSON bool) error {
+	summaryOut := stdout
+	if asJSON {
+		summaryOut = stderr
+	}
 	t := rep.Totals
-	fmt.Fprintf(w, "sc4n hub: %d repos, %d flagged files (%d full, %d partial, %d none), %d findings [%d critical, %d high], max %s\n",
+	if _, err := fmt.Fprintf(summaryOut, "sc4n hub: %d repos, %d flagged files (%d full, %d partial, %d none), %d findings [%d critical, %d high], max %s\n",
 		t.Repos, t.Files, t.CoveredFull, t.CoveredPartial, t.NotCovered,
 		t.Findings.Critical+t.Findings.High+t.Findings.Medium+t.Findings.Low+t.Findings.Info,
-		t.Findings.Critical, t.Findings.High, t.Findings.Max)
+		t.Findings.Critical, t.Findings.High, t.Findings.Max); err != nil {
+		return err
+	}
 	if asJSON {
-		enc := json.NewEncoder(w)
+		enc := json.NewEncoder(stdout)
 		enc.SetEscapeHTML(false)
 		enc.SetIndent("", "  ")
-		enc.Encode(rep)
+		if err := enc.Encode(rep); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // listLabel names where an explicit universe came from, for candidates.json.

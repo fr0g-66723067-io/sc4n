@@ -77,7 +77,8 @@ type cdxVulnerability struct {
 	Description string        `json:"description,omitempty"`
 	Detail      string        `json:"detail,omitempty"`
 	Ratings     []cdxRating   `json:"ratings,omitempty"`
-	Affects     []cdxAffect   `json:"affects"`
+	CWEs        []int         `json:"cwes,omitempty"`
+	Affects     []cdxAffect   `json:"affects,omitempty"`
 	Properties  []cdxProperty `json:"properties,omitempty"`
 }
 
@@ -176,11 +177,19 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 
 	ix := newArtifactIndex(r.Artifacts)
 	for _, f := range r.Findings {
-		path, member, resolved := ix.resolve(f.Artifact)
-		ref, ok := refs[path]
-		if !resolved || !ok {
-			ref = "sc4n:" + f.Artifact
-			member = ""
+		var (
+			member  string
+			affects []cdxAffect
+		)
+		if f.Artifact != "" {
+			path, m, resolved := ix.resolve(f.Artifact)
+			ref, ok := refs[path]
+			if !resolved || !ok {
+				ref = "sc4n:" + f.Artifact
+				m = ""
+			}
+			member = m
+			affects = []cdxAffect{{Ref: ref}}
 		}
 		v := cdxVulnerability{
 			ID: f.RuleID,
@@ -195,7 +204,8 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 				Method:   "other",
 				Vector:   strings.Join(f.CWE, ","),
 			}},
-			Affects: []cdxAffect{{Ref: ref}},
+			CWEs:    parseCWEs(f.CWE),
+			Affects: affects,
 			Properties: []cdxProperty{
 				{Name: "sc4n:confidence", Value: f.Confidence.String()},
 				{Name: "sc4n:fingerprint", Value: Fingerprint(f)},
@@ -227,16 +237,31 @@ func (r *Report) WriteCycloneDX(w io.Writer) error {
 // run.
 func serialNumber(r *Report, version string) string {
 	h := sha256.New()
-	h.Write([]byte(r.SchemaVersion))
-	h.Write([]byte(r.Tool.Name))
-	h.Write([]byte(version))
+	write := func(s string) {
+		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	write(r.SchemaVersion)
+	write(r.Tool.Name)
+	write(version)
+	if r.Cancelled {
+		write("cancelled=1")
+	} else {
+		write("cancelled=0")
+	}
+	write(strconv.Itoa(r.Unreadable))
+	write(strconv.Itoa(r.Suppressed))
+	write(strconv.Itoa(r.Dropped))
 	for _, a := range r.Artifacts {
-		h.Write([]byte(a.Path))
-		h.Write([]byte(a.SHA256))
-		h.Write([]byte(a.Format))
+		write(a.Path)
+		write(a.SHA256)
+		write(a.SHA256Scope)
+		write(a.Format)
+		write(a.SubFormat)
+		write(a.Error)
 	}
 	for _, f := range r.Findings {
-		h.Write([]byte(Fingerprint(f)))
+		write(Fingerprint(f))
 	}
 	sum := h.Sum(nil)
 	var b [16]byte
@@ -254,6 +279,30 @@ func serialNumber(r *Report, version string) string {
 	dst[23] = '-'
 	hex.Encode(dst[24:36], b[10:16])
 	return "urn:uuid:" + string(dst)
+}
+
+// parseCWEs extracts positive integer CWE identifiers from strings of the form
+// "CWE-NNN" (or bare "NNN"), sorted and deduplicated for deterministic output.
+func parseCWEs(in []string) []int {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[int]bool, len(in))
+	var out []int
+	for _, raw := range in {
+		s := strings.TrimSpace(raw)
+		if len(s) >= 4 && strings.EqualFold(s[:4], "CWE-") {
+			s = s[4:]
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return out
 }
 
 func cdxSeverity(s Severity) string {

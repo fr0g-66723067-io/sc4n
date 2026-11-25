@@ -486,38 +486,67 @@ func scanFExpr(src []byte, i int) int {
 	return n
 }
 
-// scanNumber consumes a numeric literal. It is permissive (it accepts the union
-// of the integer, float, hexadecimal, octal, binary, exponent and imaginary
-// forms, plus `_` separators) because the rules never depend on a number's value,
-// only on it being a single token.
+// scanNumber consumes a numeric literal. It stops before `.` followed by an
+// identifier start (so `1.0.__class__` leaves `.__class__` intact) and only
+// consumes valid radix/float/exponent/imaginary parts.
 func scanNumber(src []byte, i int) int {
 	n := len(src)
 	j := i
 	// Radix prefix.
-	if j+1 < n && src[j] == '0' && (src[j+1] == 'x' || src[j+1] == 'X' || src[j+1] == 'o' || src[j+1] == 'O' || src[j+1] == 'b' || src[j+1] == 'B') {
-		j += 2
-		for j < n && isIdentCont(src[j]) {
-			j++
-		}
-		return j
-	}
-	for j < n {
-		c := src[j]
-		switch {
-		case isDigit(c) || c == '_' || c == '.' || c == 'j' || c == 'J':
-			j++
-		case c == 'e' || c == 'E':
-			j++
-			if j < n && (src[j] == '+' || src[j] == '-') {
+	if j+1 < n && src[j] == '0' {
+		switch src[j+1] {
+		case 'x', 'X':
+			j += 2
+			for j < n && (isHexByte(src[j]) || (src[j] == '_' && j+1 < n && isHexByte(src[j+1]))) {
 				j++
 			}
-		case isIdentStart(c):
-			// A trailing unit-like suffix we do not know: consume it so we make
-			// progress, and stop at the next delimiter.
-			j++
-		default:
+			return j
+		case 'o', 'O':
+			j += 2
+			for j < n && ((src[j] >= '0' && src[j] <= '7') || (src[j] == '_' && j+1 < n && src[j+1] >= '0' && src[j+1] <= '7')) {
+				j++
+			}
+			return j
+		case 'b', 'B':
+			j += 2
+			for j < n && ((src[j] == '0' || src[j] == '1') || (src[j] == '_' && j+1 < n && (src[j+1] == '0' || src[j+1] == '1'))) {
+				j++
+			}
 			return j
 		}
+	}
+	seenDot := false
+	if j < n && src[j] == '.' {
+		seenDot = true
+		j++
+	}
+	for j < n && (isDigit(src[j]) || (src[j] == '_' && j+1 < n && isDigit(src[j+1]))) {
+		j++
+	}
+	if !seenDot && j < n && src[j] == '.' {
+		// Stop before `.` when followed by an identifier start (e.g. `1.__class__`).
+		if j+1 < n && isIdentStart(src[j+1]) {
+			return j
+		}
+		j++
+		for j < n && (isDigit(src[j]) || (src[j] == '_' && j+1 < n && isDigit(src[j+1]))) {
+			j++
+		}
+	}
+	if j < n && (src[j] == 'e' || src[j] == 'E') {
+		k := j + 1
+		if k < n && (src[k] == '+' || src[k] == '-') {
+			k++
+		}
+		if k < n && isDigit(src[k]) {
+			j = k
+			for j < n && (isDigit(src[j]) || (src[j] == '_' && j+1 < n && isDigit(src[j+1]))) {
+				j++
+			}
+		}
+	}
+	if j < n && (src[j] == 'j' || src[j] == 'J') && (j+1 >= n || !isIdentCont(src[j+1])) {
+		j++
 	}
 	return j
 }
@@ -601,10 +630,19 @@ func StringValue(t Token, src []byte, max int) string {
 		return ""
 	}
 	q := b[qpos]
+	isRaw := false
+	for k := 0; k < qpos; k++ {
+		if lowerByte(b[k]) == 'r' {
+			isRaw = true
+			break
+		}
+	}
 	body := b[qpos+1:]
 	if len(body) >= 2 && body[0] == q && body[1] == q {
-		if len(body) >= 6 && body[len(body)-3] == q && body[len(body)-2] == q && body[len(body)-1] == q {
-			body = body[3 : len(body)-3]
+		if len(body) >= 5 && body[len(body)-3] == q && body[len(body)-2] == q && body[len(body)-1] == q {
+			body = body[2 : len(body)-3]
+		} else {
+			body = body[2:]
 		}
 	} else if len(body) >= 1 && body[len(body)-1] == q {
 		body = body[:len(body)-1]
@@ -612,6 +650,9 @@ func StringValue(t Token, src []byte, max int) string {
 	limit := len(body)
 	if max > 0 && max < limit {
 		limit = max
+	}
+	if isRaw {
+		return string(body[:limit])
 	}
 	out := make([]byte, 0, limit)
 	for i := 0; i < len(body) && len(out) < limit; i++ {

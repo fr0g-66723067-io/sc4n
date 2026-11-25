@@ -59,9 +59,13 @@ func (hdf5Parser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	}
 	scanHDF5Region(ctx, 0, region)
 
-	if size > hdf5MaxPrefix+hdf5MaxSuffix {
+	if size > hdf5MaxPrefix {
 		suffix := size - hdf5MaxSuffix
-		if tail, err := s.Bytes(suffix, hdf5MaxSuffix); err == nil && len(tail) > 0 {
+		if suffix < hdf5MaxPrefix {
+			suffix = hdf5MaxPrefix
+		}
+		tailLen := size - suffix
+		if tail, err := s.Bytes(suffix, tailLen); err == nil && len(tail) > 0 {
 			scanHDF5Region(ctx, suffix, tail)
 		}
 	}

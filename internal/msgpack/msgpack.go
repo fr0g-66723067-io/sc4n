@@ -14,6 +14,7 @@
 package msgpack
 
 import (
+	"encoding/binary"
 	"errors"
 	"strconv"
 
@@ -415,32 +416,13 @@ func (w *walker) bin(n int) error {
 	if !w.emitting() {
 		return nil
 	}
-	cap := w.maxBlob()
-	if int64(len(body)) > cap {
-		limits.Emit(w.ctx.Sink, limits.RuleString, "MaxStringBlob", int64(len(body)), cap, "msgpack blob")
-	}
-	w.nanRuns(start, body)
-	// Route a blob that begins with a native magic or a pickle protocol byte to
-	// the normal member machinery; the member's own parser validates the header,
-	// so a bare magic without a valid executable is not reported as one. Only the
-	// header is inspected here — a whole-blob native search would double the cost
-	// of every weight blob, and the universal polyglot layer already scans whole
-	// artifacts.
-	if bytescan.MagicAt(body) != bytescan.NativeNone {
-		artifact.ScanMemberBytes(w.ctx, "blob", body)
-		return nil
-	}
-	if len(body) >= 2 && body[0] == 0x80 && body[1] >= 1 && body[1] <= 5 {
-		artifact.ScanMemberBytes(w.ctx, "blob", body)
-		return nil
-	}
-	if _, ok := bytescan.ShebangAt(body); ok {
-		artifact.ScanMemberBytes(w.ctx, "blob", body)
-	}
+	w.scanBlob(start, body, "msgpack blob", "blob", false)
 	return nil
 }
 
-// ext skips an extension of payload length n (plus its one-byte type code).
+// ext reads an extension of payload length n (plus its one-byte type code) and
+// scans its payload bytes for indicators, NaN runs, native magic, pickles and
+// shebangs rather than skipping them blindly.
 func (w *walker) ext(n int) error {
 	if n < 0 {
 		return errTruncated
@@ -449,8 +431,45 @@ func (w *walker) ext(n int) error {
 	if total > len(w.data)-w.idx {
 		return errTruncated
 	}
+	payloadStart := w.idx + 1
+	payload := w.data[payloadStart : payloadStart+n]
 	w.idx += total
+	if !w.emitting() || len(payload) == 0 {
+		return nil
+	}
+	w.scanBlob(payloadStart, payload, "msgpack ext", "ext", true)
 	return nil
+}
+
+// scanBlob inspects a bin or ext payload up to MaxStringBlob.
+func (w *walker) scanBlob(start int, body []byte, limitDesc, memberName string, scanStrings bool) {
+	cap := w.maxBlob()
+	scan := body
+	if int64(len(body)) > cap {
+		limits.Emit(w.ctx.Sink, limits.RuleString, "MaxStringBlob", int64(len(body)), cap, limitDesc)
+		scan = body[:cap]
+	}
+	if scanStrings {
+		stringscan.Emit(w.ctx.Sink, int64(start), scan)
+	}
+	w.nanRuns(start, scan)
+	// Route a blob that begins with a native magic or a pickle protocol byte to
+	// the normal member machinery; the member's own parser validates the header,
+	// so a bare magic without a valid executable is not reported as one. Only the
+	// header is inspected here — a whole-blob native search would double the cost
+	// of every weight blob, and the universal polyglot layer already scans whole
+	// artifacts.
+	if bytescan.MagicAt(scan) != bytescan.NativeNone {
+		artifact.ScanMemberBytes(w.ctx, memberName, scan)
+		return
+	}
+	if len(scan) >= 2 && scan[0] == 0x80 && scan[1] >= 1 && scan[1] <= 5 {
+		artifact.ScanMemberBytes(w.ctx, memberName, scan)
+		return
+	}
+	if _, ok := bytescan.ShebangAt(scan); ok {
+		artifact.ScanMemberBytes(w.ctx, memberName, scan)
+	}
 }
 
 func (w *walker) skip(n int) error {
@@ -491,13 +510,15 @@ func (w *walker) maxBlob() int64 {
 	return limits.Default().MaxStringBlob
 }
 
-// nanRuns reports a run of NaN-shaped byte pairs in the blob that begins at base.
-// A double NaN has 0x7ff8 or 0xfff8 in its exponent/top-mantissa bytes, so the
-// two-byte prefix 0x7f 0xf8 / 0xff 0xf8 can recur at stride two once per value;
-// four consecutive pairs is a run, not a single accidental NaN. base is the
-// blob's offset in the artifact: every other finding this walker emits carries an
-// absolute offset, and a blob-relative one pointed the reader at the container
-// header instead of the payload.
+// nanRuns reports a run of NaN-shaped values in the blob that begins at base.
+// It checks three layouts:
+//   - stride-2 NaN prefix pairs (0x7f/0xff 0xf8),
+//   - stride-8 IEEE 754 float64 NaNs (little- and big-endian), and
+//   - stride-4 IEEE 754 float32 NaNs (little- and big-endian).
+//
+// All-0xff words (two's-complement -1 in int32/int64 tensors and masks) are
+// excluded from the float32/float64 checks to avoid false positives on integer
+// arrays. base is the blob's absolute offset in the artifact.
 func (w *walker) nanRuns(base int, b []byte) {
 	pair := func(i int) bool {
 		return i+1 < len(b) && (b[i] == 0x7f || b[i] == 0xff) && b[i+1] == 0xf8
@@ -521,4 +542,72 @@ func (w *walker) nanRuns(base int, b []byte) {
 		}
 		i = j
 	}
+	// Check stride-8 float64 NaNs (LE and BE) and stride-4 float32 NaNs (LE and BE).
+	if off, count, kind := findFloatNaNRun(b); count >= 4 {
+		w.ctx.Sink.EmitExtra(RuleNaNPayload, int64(base+off),
+			strconv.Itoa(count)+" consecutive "+kind+" NaN values in a MessagePack blob",
+			map[string]string{"count": strconv.Itoa(count), "encoding": kind})
+	}
+}
+
+func isNaN64LE(b []byte) bool {
+	u := binary.LittleEndian.Uint64(b)
+	return u != ^uint64(0) && u&0x7ff0000000000000 == 0x7ff0000000000000 && u&0x000fffffffffffff != 0
+}
+
+func isNaN64BE(b []byte) bool {
+	u := binary.BigEndian.Uint64(b)
+	return u != ^uint64(0) && u&0x7ff0000000000000 == 0x7ff0000000000000 && u&0x000fffffffffffff != 0
+}
+
+func isNaN32LE(b []byte) bool {
+	u := binary.LittleEndian.Uint32(b)
+	return u != ^uint32(0) && u&0x7f800000 == 0x7f800000 && u&0x007fffff != 0
+}
+
+func isNaN32BE(b []byte) bool {
+	u := binary.BigEndian.Uint32(b)
+	return u != ^uint32(0) && u&0x7f800000 == 0x7f800000 && u&0x007fffff != 0
+}
+
+func findFloatNaNRun(b []byte) (off, count int, kind string) {
+	checks := []struct {
+		stride int
+		kind   string
+		match  func([]byte) bool
+	}{
+		{8, "float64-le", isNaN64LE},
+		{8, "float64-be", isNaN64BE},
+		{4, "float32-le", isNaN32LE},
+		{4, "float32-be", isNaN32BE},
+	}
+	bestOff := -1
+	bestCount := 0
+	bestKind := ""
+	for _, c := range checks {
+		if len(b) < c.stride*4 {
+			continue
+		}
+		for rem := 0; rem < c.stride; rem++ {
+			for i := rem; i+c.stride <= len(b); {
+				if !c.match(b[i : i+c.stride]) {
+					i += c.stride
+					continue
+				}
+				n := 0
+				j := i
+				for j+c.stride <= len(b) && c.match(b[j:j+c.stride]) {
+					n++
+					j += c.stride
+				}
+				if n >= 4 && (bestOff < 0 || i < bestOff) {
+					bestOff = i
+					bestCount = n
+					bestKind = c.kind
+				}
+				i = j
+			}
+		}
+	}
+	return bestOff, bestCount, bestKind
 }

@@ -1,7 +1,5 @@
 package pysrc
 
-import "bytes"
-
 // Import-time statement selection.
 //
 // A module named by a config's auto_map is imported when the model is loaded
@@ -14,32 +12,35 @@ import "bytes"
 //	                           corpus ships, and a depth-0 filter misses it
 //	except:
 //	    pass
+//	class C:                   the class body runs at import (only def methods
+//	    os.system(…)           inside it are deferred)
 //	if __name__ == "__main__": does not run at import
 //	    os.system(…)
 //	def f():                   the body does not run at import
 //	    os.system(…)
 //
 // So the block *kind* matters, not the indentation level: the suites of if, try,
-// for, while, with, except, else and finally run, and the bodies of def and class
-// do not. The lexer already emits INDENT/DEDENT, so this is a stack of header
-// kinds over the token stream, and Statements - which drops INDENT/DEDENT - is
-// deliberately not reused.
+// for, while, with, except, else, finally and class run, and the bodies of def
+// (and async def) do not. The lexer already emits INDENT/DEDENT, so this is a
+// stack of header kinds over the token stream, and Statements - which drops
+// INDENT/DEDENT - is deliberately not reused.
 
 // Sink is one call expression found in import-time code.
 type Sink struct {
-	// Dotted is the callee as written; a call through an expression receiver
-	// carries the method name alone, because resolving the receiver is type
-	// inference pysrc does not do.
+	// Dotted is the callee as written (with lightweight import alias resolution);
+	// a call through an expression receiver carries the method name alone,
+	// because resolving the receiver is type inference pysrc does not do.
 	Dotted string
 	// Off is the byte offset of the callee name, for an evidence offset.
 	Off int32
 }
 
 const (
-	// maxModuleStatements bounds the statements returned for one module. A model
+	// MaxModuleStatements bounds the statements returned for one module. A model
 	// module that exceeds it is analysed up to the bound; the caller reports the
 	// truncation rather than silently analysing a prefix.
-	maxModuleStatements = 1024
+	MaxModuleStatements = 1024
+	maxModuleStatements = MaxModuleStatements
 	// moduleCallBudget bounds the tokens Calls may read across the whole module,
 	// which is the one quadratic walk in this package.
 	moduleCallBudget = 1 << 16
@@ -50,9 +51,9 @@ type blockKind uint8
 
 const (
 	// blockRuns is a suite that executes at import: if, try, for, while, with,
-	// and the else/elif/except/finally arms.
+	// class, and the else/elif/except/finally arms.
 	blockRuns blockKind = iota
-	// blockCode is a def or class body: defined at import, not executed.
+	// blockCode is a def or async def body: defined at import, not executed.
 	blockCode
 	// blockMain is an `if __name__ == "__main__":` suite, which the import
 	// machinery never enters.
@@ -60,17 +61,20 @@ const (
 )
 
 // ModuleStatements returns the statements that run when the file is imported, in
-// source order. The returned slices reference toks.
+// source order, together with whether the statement cap was reached. The
+// returned slices reference toks.
 //
-// A statement inside a def or class body is excluded, as is the body of an
-// `if __name__ == "__main__":` block. The header statements themselves are
-// included: a decorator and a class statement are executed at import.
-func ModuleStatements(src []byte, toks []Token) [][]Token {
+// A statement inside a def body is excluded, as is the body of a strict
+// `if __name__ == "__main__":` block. Class bodies execute at import in Python,
+// so statements directly inside a class body are included while methods (`def`)
+// inside the class are excluded.
+func ModuleStatements(src []byte, toks []Token) ([][]Token, bool) {
 	var (
-		out   [][]Token
-		cur   []Token
-		last  []Token
-		stack []blockKind
+		out       [][]Token
+		cur       []Token
+		last      []Token
+		stack     []blockKind
+		truncated bool
 	)
 	skipped := func() bool {
 		for _, b := range stack {
@@ -85,8 +89,12 @@ func ModuleStatements(src []byte, toks []Token) [][]Token {
 			return
 		}
 		last = cur
-		if !skipped() && len(out) < maxModuleStatements {
-			out = append(out, cur)
+		if !skipped() {
+			if len(out) < maxModuleStatements {
+				out = append(out, cur)
+			} else {
+				truncated = true
+			}
 		}
 		cur = nil
 	}
@@ -119,7 +127,7 @@ func ModuleStatements(src []byte, toks []Token) [][]Token {
 		}
 	}
 	flush()
-	return out
+	return out, truncated
 }
 
 // classifyBlock names the suite introduced by a header statement.
@@ -131,7 +139,7 @@ func classifyBlock(src []byte, header []Token) blockKind {
 		return blockRuns
 	}
 	switch header[0].Text(src) {
-	case "def", "class":
+	case "def":
 		return blockCode
 	case "async":
 		if len(header) > 1 && header[1].Text(src) == "def" {
@@ -145,59 +153,93 @@ func classifyBlock(src []byte, header []Token) blockKind {
 	return blockRuns
 }
 
-// isMainGuard reports whether an `if` header is `__name__ == "__main__"`. The
-// inverted form (`!=`) runs on import and must not be skipped.
+// isMainGuard reports whether an `if` header is strictly `__name__ == "__main__"`
+// (or `"__main__" == __name__`, optionally wrapped in matching outer
+// parentheses). Negated or compound conditions (`if not (__name__ == "__main__"):`,
+// `if True or __name__ == "__main__":`, `if (__name__ == "__main__") == False:`)
+// may execute on import and return false.
 func isMainGuard(src []byte, header []Token) bool {
-	var sawName, sawEq, sawMain bool
-	for _, t := range header {
-		switch t.Kind {
-		case TokName:
-			if t.Text(src) == "__name__" {
-				sawName = true
+	if len(header) < 4 || header[0].Text(src) != "if" {
+		return false
+	}
+	cond := header[1:]
+	if len(cond) > 0 && cond[len(cond)-1].Kind == TokOp && cond[len(cond)-1].Text(src) == ":" {
+		cond = cond[:len(cond)-1]
+	}
+	// Strip balanced outer parentheses wrapping the entire condition.
+	for len(cond) >= 2 && cond[0].Kind == TokOp && cond[0].Text(src) == "(" &&
+		cond[len(cond)-1].Kind == TokOp && cond[len(cond)-1].Text(src) == ")" {
+		depth := 0
+		wraps := true
+		for i := 0; i < len(cond)-1; i++ {
+			if cond[i].Kind == TokOp {
+				switch cond[i].Text(src) {
+				case "(":
+					depth++
+				case ")":
+					depth--
+					if depth == 0 {
+						wraps = false
+					}
+				}
 			}
-		case TokOp:
-			if t.Text(src) == "==" {
-				sawEq = true
-			} else if t.Text(src) == "!=" {
-				return false
-			}
-		case TokString:
-			if bytes.Contains(t.Bytes(src), []byte("__main__")) {
-				sawMain = true
+			if !wraps {
+				break
 			}
 		}
+		if !wraps {
+			break
+		}
+		cond = cond[1 : len(cond)-1]
 	}
-	return sawName && sawEq && sawMain
+	if len(cond) != 3 {
+		return false
+	}
+	if cond[1].Kind != TokOp || cond[1].Text(src) != "==" {
+		return false
+	}
+	isName := func(t Token) bool { return t.Kind == TokName && t.Text(src) == "__name__" }
+	isMainStr := func(t Token) bool { return t.Kind == TokString && StringValue(t, src, 32) == "__main__" }
+	return (isName(cond[0]) && isMainStr(cond[2])) || (isMainStr(cond[0]) && isName(cond[2]))
 }
 
-// Sinks returns the call expressions in the given statements, in source order.
-// It is bounded by moduleCallBudget tokens of argument scanning and stops at the
-// bound rather than growing with the module.
-func Sinks(src []byte, stmts [][]Token) []Sink {
+// Sinks returns the call expressions in the given statements, in source order,
+// together with whether the call-token budget was exhausted. It is bounded by
+// moduleCallBudget tokens of argument scanning and stops at the bound rather
+// than growing with the module.
+func Sinks(src []byte, stmts [][]Token) ([]Sink, bool) {
 	var out []Sink
+	aliases := map[string]string{}
 	budget := int64(moduleCallBudget)
+	truncated := false
 	for _, st := range stmts {
+		recordImportAliases(src, st, aliases)
 		if budget <= 0 {
+			truncated = true
 			break
 		}
 		calls, read, exhausted := Calls(src, st, budget)
 		budget -= read
 		for _, c := range calls {
 			if c.Dotted != "" {
-				out = append(out, Sink{Dotted: c.Dotted, Off: c.Off})
+				out = append(out, Sink{Dotted: resolveDottedAlias(c.Dotted, aliases), Off: c.Off})
 			}
 		}
 		if exhausted {
+			truncated = true
 			break
 		}
 	}
-	return out
+	return out, truncated
 }
 
 // ModuleScopeSinks lexes src and returns the sinks called by import-time
-// statements. It is the entry point for callers that do not already have the
+// statements, along with whether statement or call-token budgets truncated the
+// analysis. It is the entry point for callers that do not already have the
 // token stream.
-func ModuleScopeSinks(src []byte) []Sink {
+func ModuleScopeSinks(src []byte) ([]Sink, bool) {
 	toks := Lex(src)
-	return Sinks(src, ModuleStatements(src, toks))
+	stmts, stmtTrunc := ModuleStatements(src, toks)
+	sinks, callTrunc := Sinks(src, stmts)
+	return sinks, stmtTrunc || callTrunc
 }

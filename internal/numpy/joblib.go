@@ -2,7 +2,10 @@ package numpy
 
 import (
 	"bytes"
+	"errors"
+	"math"
 	"strconv"
+	"strings"
 
 	"github.com/fr0g-66723067-io/sc4n/internal/archive"
 	"github.com/fr0g-66723067-io/sc4n/internal/artifact"
@@ -139,27 +142,21 @@ func (joblibParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 
 	wrappers := walkWrappers(data)
 
-	// Mask every inline payload out of the copy handed to the pickle engine.
-	var masked []byte
+	// Pass every inline payload span to the pickle engine via SkipRanges so the
+	// walker jumps over them in O(1) without copying the file or disturbing the
+	// operand stack.
+	var skips [][2]int64
 	for _, w := range wrappers {
 		if !w.inline {
 			continue
 		}
-		if masked == nil {
-			masked = append([]byte(nil), data...)
-		}
-		maskPayload(masked[w.payloadStart:w.payloadEnd])
-	}
-	walkSrc := s
-	if masked != nil {
-		mem := source.Mem(s.Name(), masked)
-		defer mem.Close()
-		walkSrc = mem
+		skips = append(skips, [2]int64{w.payloadStart, w.payloadEnd})
 	}
 
-	stream, werr := pickle.Walk(ctx, walkSrc, pickle.Options{
+	stream, werr := pickle.Walk(ctx, s, pickle.Options{
 		TrailingIsStorage:  true,
 		StorageDescription: "joblib array payload",
+		SkipRanges:         skips,
 	})
 	if werr != nil && stream == nil {
 		return werr
@@ -291,26 +288,6 @@ func dispatchInline(ctx *artifact.Ctx, data []byte, wrappers []joblibWrapper) {
 			artifact.ScanMemberBytes(ctx, name, body)
 		}
 		n++
-	}
-}
-
-// maskPayload overwrites b in place with opcodes that stay inside the weights-only
-// set and keep the operand stack where the pickle engine expects it: "MARK TUPLE"
-// pairs, which are depth-neutral (MARK pushes a mark, TUPLE pops back to it and
-// pushes the tuple), plus a trailing NONE when the length is odd, which leaves one
-// surplus value. The walker bounds the operand stack (MaxStackDepth), so a mask that
-// grew it without bound would report a legitimate large payload as a stack overflow;
-// one leftover value is harmless, because the walker diagnoses stack underflow and
-// not a value nobody consumed. The mask used to write "NONE POP" pairs, and POP
-// (0x30) is *not* in the weights-only set, so masking an inline payload made the
-// scanner's own injection set RequiresUnsafeLoader and a joblib file whose opcodes
-// were all accepted was reported as SC4N-PICKLE-REQUIRES-UNSAFE-LOADER.
-func maskPayload(b []byte) {
-	for i := 0; i+1 < len(b); i += 2 {
-		b[i], b[i+1] = jbMark, jbTuple
-	}
-	if len(b)%2 == 1 {
-		b[len(b)-1] = jbNone
 	}
 }
 
@@ -467,6 +444,22 @@ const (
 	jbNone            = 0x4e
 	jbNewtrue         = 0x88
 	jbNewfalse        = 0x89
+	jbString          = 0x53
+	jbUnicode         = 0x56
+	jbInt             = 0x49
+	jbLong            = 0x4c
+	jbFloat           = 0x46
+	jbEmptySet        = 0x8f
+	jbAdditems        = 0x90
+	jbFrozenset       = 0x91
+	jbPersid          = 0x50
+	jbBinpersid       = 0x51
+	jbExt1            = 0x82
+	jbExt2            = 0x83
+	jbExt4            = 0x84
+	jbBytearray8      = 0x96
+	jbNextBuffer      = 0x97
+	jbReadonlyBuffer  = 0x98
 )
 
 // jkind is the shape of a value on the walk's shadow stack.
@@ -553,7 +546,7 @@ func walkWrappers(data []byte) []joblibWrapper {
 // nestedPickleLen returns the length of a complete nested pickle starting at
 // start, which is how long an object-dtype array's payload is.
 func nestedPickleLen(data []byte, start int) (int, bool) {
-	if start < 0 || start >= len(data) || !looksLikePickleStart(data[start:]) {
+	if start < 0 || start >= len(data) || !pickle.OpensAsPickle(data[start:]) {
 		return 0, false
 	}
 	n := &jwalk{data: data[start:], memo: map[int]jval{}, stopAt: -1}
@@ -679,11 +672,62 @@ func (d *jwalk) step() {
 		if _, ok := d.take(8); ok {
 			d.push(jval{kind: jOther})
 		}
+	case jbFloat:
+		if _, ok := d.readLine(); ok {
+			d.push(jval{kind: jOther})
+		}
+	case jbInt:
+		if s, ok := d.readLine(); ok {
+			switch s {
+			case "00":
+				d.push(jval{kind: jBool})
+			case "01":
+				d.push(jval{kind: jBool, i: 1})
+			default:
+				if v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+					d.push(jval{kind: jInt, i: v})
+				} else if errors.Is(err, strconv.ErrRange) {
+					if strings.HasPrefix(strings.TrimSpace(s), "-") {
+						d.push(jval{kind: jInt, i: math.MinInt64})
+					} else {
+						d.push(jval{kind: jInt, i: math.MaxInt64})
+					}
+				} else {
+					d.err = true
+				}
+			}
+		}
+	case jbLong:
+		if s, ok := d.readLine(); ok {
+			trimmed := strings.TrimSpace(strings.TrimSuffix(s, "L"))
+			if v, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+				d.push(jval{kind: jInt, i: v})
+			} else if errors.Is(err, strconv.ErrRange) {
+				if strings.HasPrefix(trimmed, "-") {
+					d.push(jval{kind: jInt, i: math.MinInt64})
+				} else {
+					d.push(jval{kind: jInt, i: math.MaxInt64})
+				}
+			} else {
+				d.err = true
+			}
+		}
+	case jbString:
+		if s, ok := d.readLine(); ok {
+			if len(s) >= 2 && ((s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"')) {
+				s = s[1 : len(s)-1]
+			}
+			d.push(jval{kind: jStr, s: s})
+		}
+	case jbUnicode:
+		if s, ok := d.readLine(); ok {
+			d.push(jval{kind: jStr, s: s})
+		}
 	case jbBinbytes:
 		d.readBlob(4, false)
 	case jbBinstring, jbBinunicode:
 		d.readBlob(4, true)
-	case jbBinbytes8:
+	case jbBinbytes8, jbBytearray8:
 		d.readBlob(8, false)
 	case jbBinunicode8:
 		d.readBlob(8, true)
@@ -691,6 +735,44 @@ func (d *jwalk) step() {
 		d.readBlob(1, false)
 	case jbShortBinstring, jbShortBinunicode:
 		d.readBlob(1, true)
+	case jbEmptySet, jbNextBuffer:
+		d.push(jval{kind: jOther})
+	case jbReadonlyBuffer:
+		if _, ok := d.top(); !ok {
+			d.err = true
+		}
+	case jbAdditems:
+		if _, ok := d.popToMark(); !ok {
+			d.err = true
+		}
+	case jbFrozenset:
+		if _, ok := d.popToMark(); !ok {
+			d.err = true
+			break
+		}
+		d.push(jval{kind: jOther})
+	case jbPersid:
+		if _, ok := d.readLine(); ok {
+			d.push(jval{kind: jOther})
+		}
+	case jbBinpersid:
+		if _, ok := d.pop(); !ok {
+			d.err = true
+			break
+		}
+		d.push(jval{kind: jOther})
+	case jbExt1:
+		if _, ok := d.take(1); ok {
+			d.push(jval{kind: jOther})
+		}
+	case jbExt2:
+		if _, ok := d.take(2); ok {
+			d.push(jval{kind: jOther})
+		}
+	case jbExt4:
+		if _, ok := d.take(4); ok {
+			d.push(jval{kind: jOther})
+		}
 	case jbEmptyTuple:
 		d.push(jval{kind: jTuple})
 	case jbTuple:

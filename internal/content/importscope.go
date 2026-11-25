@@ -38,20 +38,31 @@ func importScopeRule(ctx *artifact.Ctx, name, rel string, offset int64) {
 		// grade stays silent rather than guessing from the reference alone.
 		return
 	}
-	src, ok := readModuleFile(ctx, dir, rel+".py")
+	modRel := rel + ".py"
+	src, ok := readModuleFile(ctx, dir, modRel)
 	if !ok {
-		return
+		modRel = rel + "/__init__.py"
+		src, ok = readModuleFile(ctx, dir, modRel)
+		if !ok {
+			return
+		}
+	}
+	sinks, truncated := pysrc.ModuleScopeSinks(src)
+	if truncated {
+		limits.Emit(ctx.Sink, limits.RuleEntries, "MaxModuleStatements",
+			int64(pysrc.MaxModuleStatements)+1, int64(pysrc.MaxModuleStatements),
+			"module "+modRel+" import-scope analysis truncated")
 	}
 	seen := make(map[string]bool, 4)
-	for _, s := range pysrc.ModuleScopeSinks(src) {
+	for _, s := range sinks {
 		if !malice.IsLoadSink(s.Dotted) || seen[s.Dotted] {
 			continue
 		}
 		seen[s.Dotted] = true
 		malice.Constructed(ctx.Sink, offset, malice.FamilyImportScope,
-			"module "+rel+".py is imported when the model loads (auto_map with trust_remote_code) and calls "+
+			"module "+modRel+" is imported when the model loads (auto_map with trust_remote_code) and calls "+
 				s.Dotted+" while it is imported",
-			map[string]string{"module": rel + ".py", "callable": s.Dotted, "file": baseName(name)})
+			map[string]string{"module": modRel, "callable": s.Dotted, "file": baseName(name)})
 	}
 }
 

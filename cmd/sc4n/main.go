@@ -89,9 +89,10 @@ scan flags:
   -j N                         worker count (default: number of CPUs)
   -mem-budget BYTES            total artifact bytes mapped at once (default 1GiB)
   -max-artifact BYTES          largest single file to open (default 64GiB)
-  -max-depth N                 container nesting cap (default 4)
+  -max-depth N                 container nesting cap (default 4; 0 disables recursion)
   -max-decompress BYTES        cumulative decompression cap per archive (default 8GiB)
   -max-ratio N                 decompression ratio cap (default 200)
+  -max-hash BYTES              prefix byte cap for artifact sha256 (default 256MiB; 0 = full)
   -max-findings N              finding cap (keeps the most severe findings), applied after
                                -baseline suppression
                                (default 100000)

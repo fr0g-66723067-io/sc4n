@@ -63,6 +63,13 @@ func buildAutomaton() *acAutomaton {
 		out[state] = append(out[state], int16(idx))
 	}
 
+	if len(edges) > 32767 {
+		panic("stringscan: automaton state count overflows int16")
+	}
+	if len(indicatorTable) > 32767 {
+		panic("stringscan: indicator table length overflows int16")
+	}
+
 	a := &acAutomaton{out: make([][]int16, len(edges))}
 	for i := range edges {
 		if len(out[i]) > 0 {
@@ -70,18 +77,21 @@ func buildAutomaton() *acAutomaton {
 		}
 	}
 
-	// Class table: one column per byte value that occurs somewhere in the
-	// indicators, plus column 0 for everything else.
+	// Class table: column 0 is strictly reserved for bytes absent from every
+	// indicator; each byte that occurs in some indicator gets class 1..cols-1.
+	a.cols = 1
 	for i := range indicatorTable {
 		lit := strings.ToLower(indicatorTable[i].literal)
 		for j := 0; j < len(lit); j++ {
 			if a.class[lit[j]] == 0 {
+				if a.cols >= 256 {
+					panic("stringscan: distinct byte classes exceed byte range")
+				}
 				a.class[lit[j]] = byte(a.cols)
 				a.cols++
 			}
 		}
 	}
-	a.cols++ // column 0
 	var value [256]byte
 	for c := 0; c < 256; c++ {
 		if a.class[c] != 0 {

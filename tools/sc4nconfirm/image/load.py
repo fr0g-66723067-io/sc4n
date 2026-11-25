@@ -122,7 +122,8 @@ def pick(path):
                 if zipfile is not None:
                     sizes = {i.filename: i.file_size for i in zipfile.infolist()}
                 for name in z.files:
-                    if sizes.get(name, 0) > NPZ_MEMBER_CAP:
+                    member_size = sizes.get(name, sizes.get(name + ".npy", 0))
+                    if member_size > NPZ_MEMBER_CAP:
                         # Weights, not a payload: reading it would only cost the
                         # container's memory.
                         continue
@@ -145,8 +146,17 @@ def pick(path):
             def _render():
                 env = jinja2.Environment()
                 # A bounded render: a template that loops forever is a payload
-                # too, and the container timeout is the backstop.
-                return env.from_string(tmpl).render()
+                # too, and the container timeout is the backstop. Pass sample
+                # messages so templates iterating over messages execute their body.
+                return env.from_string(tmpl).render(
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": "Hello"},
+                    ],
+                    add_generation_prompt=True,
+                    bos_token="",
+                    eos_token="",
+                )
 
             return "jinja2.render(chat_template)", _render
     raise ValueError("no loader for this artifact type")

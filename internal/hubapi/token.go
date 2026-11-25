@@ -1,11 +1,20 @@
 package hubapi
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+func cleanToken(raw string) (string, error) {
+	tok := strings.TrimSpace(raw)
+	if strings.ContainsAny(tok, "\r\n") {
+		return "", errors.New("hubapi: token contains CR or LF")
+	}
+	return tok, nil
+}
 
 // Token resolves the Hub bearer token, in the order the Hub's own client uses:
 // the explicit file when one is given, then HF_TOKEN, then
@@ -19,14 +28,18 @@ func Token(explicitFile string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("hubapi: token file: %w", err)
 		}
-		if tok := strings.TrimSpace(string(b)); tok != "" {
+		tok, err := cleanToken(string(b))
+		if err != nil {
+			return "", err
+		}
+		if tok != "" {
 			return tok, nil
 		}
 		return "", fmt.Errorf("hubapi: token file %s is empty", explicitFile)
 	}
 	for _, k := range []string{"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"} {
-		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-			return v, nil
+		if v := os.Getenv(k); strings.TrimSpace(v) != "" {
+			return cleanToken(v)
 		}
 	}
 	home := os.Getenv("HF_HOME")
@@ -39,7 +52,10 @@ func Token(explicitFile string) (string, error) {
 	}
 	b, err := os.ReadFile(filepath.Join(home, "token"))
 	if err != nil {
-		return "", nil
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("hubapi: token file: %w", err)
 	}
-	return strings.TrimSpace(string(b)), nil
+	return cleanToken(string(b))
 }

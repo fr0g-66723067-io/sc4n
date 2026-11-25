@@ -56,3 +56,50 @@ func TestMachoLoadCommandSizeIsBounded(t *testing.T) {
 		t.Fatal("a Mach-O load-command table above the bound validated")
 	}
 }
+
+func TestFatMachOBoundsCheckedWhenOffsetNonZero(t *testing.T) {
+	// Case 1: arch table extends past EOF when embedded at off > 0.
+	// Total size = 120, off = 100, remaining = 20 (< 8 + 20 = 28).
+	// The old check (at+entry > off+size -> 128 > 220) wrongly let this pass.
+	buf1 := make([]byte, 120)
+	be := binary.BigEndian
+	be.PutUint32(buf1[100:], 0xcafebabe)
+	be.PutUint32(buf1[104:], 1)
+	s1 := source.Mem("embed1", buf1)
+	defer s1.Close()
+	if fatMachHeadersPlausible(s1, s1.Size(), 100) {
+		t.Fatal("fatMachHeadersPlausible accepted arch table extending past EOF when off > 0")
+	}
+
+	// Case 2: archOff points past remaining slice (off+archOff+24 > size), even
+	// though archOff+24 <= size.
+	buf2 := make([]byte, 200)
+	be.PutUint32(buf2[100:], 0xcafebabe)
+	be.PutUint32(buf2[104:], 1)
+	be.PutUint32(buf2[108+8:], 90) // relative to off=100 -> abs 190, 190+24=214 > 200
+	s2 := source.Mem("embed2", buf2)
+	defer s2.Close()
+	if fatMachHeadersPlausible(s2, s2.Size(), 100) {
+		t.Fatal("fatMachHeadersPlausible accepted archOff extending past EOF when off > 0")
+	}
+
+	// Case 3: valid fat Mach-O embedded at off = 100 validates cleanly.
+	thin := macho64WithImports([]string{"_system"})
+	const archOff = 32
+	fat := make([]byte, archOff+len(thin))
+	be.PutUint32(fat[0:], 0xcafebabe)
+	be.PutUint32(fat[4:], 1)
+	be.PutUint32(fat[8:], 0x01000007)
+	be.PutUint32(fat[12:], 3)
+	be.PutUint32(fat[16:], archOff)
+	be.PutUint32(fat[20:], uint32(len(thin)))
+	be.PutUint32(fat[24:], 3)
+	copy(fat[archOff:], thin)
+
+	buf3 := append(make([]byte, 100), fat...)
+	s3 := source.Mem("embed3", buf3)
+	defer s3.Close()
+	if _, ok := ValidateNativeHeader(s3, s3.Size(), 100); !ok {
+		t.Fatal("valid embedded fat Mach-O at off=100 failed ValidateNativeHeader")
+	}
+}

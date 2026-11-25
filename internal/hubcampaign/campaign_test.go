@@ -1228,3 +1228,288 @@ func TestJoinAttributesAColonNamedFile(t *testing.T) {
 		t.Fatalf("file = %+v", f)
 	}
 }
+
+func TestFetchUnknownSizeAndBudgetRefund(t *testing.T) {
+	bodySmall := []byte(pickleOSSystem)
+	bodyNext := bytes.Repeat([]byte("B"), 2048)
+	hub := &fakeHub{
+		repos: []string{"o/unknown"},
+		scans: map[string]string{
+			"o/unknown": `{"scansDone":true,"filesWithIssues":[{"path":"small.pkl","level":"unsafe"}]}`,
+		},
+		siblings: map[string][]map[string]any{
+			"o/unknown": {
+				{"rfilename": "small.pkl"}, // size omitted -> -1
+				sibling("gated.bin", 3000),
+				sibling("missing.bin", 3000),
+				sibling("next.bin", int64(len(bodyNext))),
+				sibling(".gitattributes", 12),
+			},
+		},
+		status: map[string]int{
+			"o/unknown/gated.bin":   http.StatusForbidden,
+			"o/unknown/missing.bin": http.StatusNotFound,
+		},
+		files: map[string][]byte{
+			"o/unknown/small.pkl":      bodySmall,
+			"o/unknown/next.bin":       bodyNext,
+			"o/unknown/.gitattributes": []byte("*.bin filter"),
+		},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.Level = LevelAny
+	o.SliceSize = 4096
+	// Total budget can only fit small.pkl + .gitattributes + next.bin if unused
+	// reservations from small.pkl (4096 - len(bodySmall)), gated.bin (3000), and
+	// missing.bin (3000) are refunded.
+	o.RepoBudget = 4096
+	o.TotalBudget = 4096
+
+	if _, err := Candidates(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verdicts(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fetch(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+
+	fd := readFetchDoc(t, dir)
+	if len(fd.Repos) != 1 {
+		t.Fatalf("repos = %+v", fd.Repos)
+	}
+	if fd.Repos[0].Status != "partial" {
+		t.Fatalf("repo status = %q, want partial", fd.Repos[0].Status)
+	}
+	byPath := map[string]FetchFile{}
+	for _, ff := range fd.Repos[0].Files {
+		byPath[ff.Path] = ff
+	}
+	if ff := byPath["small.pkl"]; ff.Status != "full" || ff.Bytes != int64(len(bodySmall)) {
+		t.Fatalf("unknown-size small.pkl = %+v, want full with %d bytes", ff, len(bodySmall))
+	}
+	if ff := byPath["next.bin"]; ff.Status != "full" || ff.Bytes != int64(len(bodyNext)) {
+		t.Fatalf("next.bin = %+v, want full (budget refunded from gated/missing/unknown-size)", ff)
+	}
+	if ff, ok := byPath[".gitattributes"]; !ok || ff.Status != "full" {
+		t.Fatalf(".gitattributes = %+v (present=%v), want fetched full", ff, ok)
+	}
+}
+
+func TestFetchMixedFetchedAndGatedIsPartial(t *testing.T) {
+	hub := &fakeHub{
+		repos: []string{"o/mixed"},
+		scans: map[string]string{
+			"o/mixed": `{"scansDone":true,"filesWithIssues":[]}`,
+		},
+		siblings: map[string][]map[string]any{
+			"o/mixed": {
+				sibling("ok.txt", 4),
+				sibling("secret.bin", 10),
+			},
+		},
+		status: map[string]int{"o/mixed/secret.bin": http.StatusForbidden},
+		files:  map[string][]byte{"o/mixed/ok.txt": []byte("good")},
+	}
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.Level = LevelAny
+	if _, err := Candidates(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verdicts(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fetch(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFetchDoc(t, dir).Repos[0].Status; got != "partial" {
+		t.Fatalf("mixed fetched+gated repo status = %q, want partial", got)
+	}
+}
+
+func TestCrossStageCacheStaleness(t *testing.T) {
+	pkl := []byte(pickleOSSystem)
+	hub := rankedHub(pkl)
+	hub.files["a/top/evil.pkl"] = pkl
+	hub.siblings["a/top"] = append(hub.siblings["a/top"], sibling("evil.pkl", int64(len(pkl))))
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	o := newOptions(t, srv, dir)
+	o.Queries = nil
+	o.UseDefaults = false
+	o.Rank = hubapi.SortDownloads
+	o.Top = 2
+	o.Level = LevelAny
+
+	// 1. Run with Top=2.
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+
+	// 2. Switching Top=2 -> Top=0 ("all rows up to Limit") must bust candidates cache
+	// AND verdicts cache (candidate repo set changed from 2 to 3).
+	o2 := o
+	o2.Top = 0
+	cands, err := Candidates(context.Background(), o2)
+	if err != nil {
+		t.Fatalf("Candidates(Top=0): %v", err)
+	}
+	if len(cands) != 3 {
+		t.Fatalf("Top=0 after Top=2 got %d candidates, want 3", len(cands))
+	}
+	vs, err := Verdicts(context.Background(), o2)
+	if err != nil {
+		t.Fatalf("Verdicts after candidate change: %v", err)
+	}
+	if len(vs) != 3 {
+		t.Fatalf("Verdicts reused stale 2-repo cache; got %d, want 3", len(vs))
+	}
+
+	// 3. Top > len(Hub rows) should cache cleanly on repeat without thrashing.
+	o3 := o
+	o3.Top = 10
+	if _, err := Candidates(context.Background(), o3); err != nil {
+		t.Fatalf("Candidates(Top=10): %v", err)
+	}
+	var cached CandidatesFile
+	if err := readJSON(filepath.Join(dir, fileCandidates), &cached); err != nil {
+		t.Fatal(err)
+	}
+	if why := universeDiff(cached, o3.withDefaults()); why != "" {
+		t.Fatalf("universeDiff(Top=10 with 3 rows) = %q, want empty (cache hit)", why)
+	}
+
+	// 4. ScanTree cache must bust when Baseline changes without -refresh.
+	base, err := policy.LoadBaseline(filepath.Join(dir, fileScan))
+	if err != nil {
+		t.Fatalf("LoadBaseline: %v", err)
+	}
+	oBase := o
+	oBase.Baseline = base
+	oBase.Refresh = false
+	sr, err := ScanTree(context.Background(), oBase)
+	if err != nil {
+		t.Fatalf("ScanTree with baseline: %v", err)
+	}
+	if sr.BySeverity[report.SeverityCritical] != 0 {
+		t.Fatalf("ScanTree reused un-baselined cache: critical=%d", sr.BySeverity[report.SeverityCritical])
+	}
+}
+
+func TestJoinHubLevelSeverityTopPathAndWindowsSlashes(t *testing.T) {
+	dir := t.TempDir()
+	o := Options{Dir: dir, Tool: report.Tool{Name: "sc4n", Version: "test"}, Level: LevelAny, Limit: 10}
+	must := func(name string, v any) {
+		t.Helper()
+		if err := writeJSON(filepath.Join(dir, name), v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(fileVerdicts, VerdictsFile{Version: Version, Level: LevelAny, Repos: []RepoVerdict{{
+		ID: "o/evil", Status: "ok", ScansDone: true,
+		Files: []hubapi.FileIssue{
+			{Path: "a:b.bin", Level: "caution"},
+			{Path: "a:b.bin", Level: "unsafe"},
+			{Path: "a:b.bin", Level: "suspicious"},
+			{Path: "a", Level: "error"},
+		},
+	}}})
+	must(fileFetch, FetchDoc{Version: Version, Level: LevelAny, Repos: []RepoFetch{{
+		ID: "o/evil", Status: "ok",
+		Files: []FetchFile{
+			{Path: "a", Status: "full", Bytes: 1},
+			{Path: "a:b.bin", Status: "full", Bytes: 10},
+		},
+	}}})
+	must(fileScan, map[string]any{
+		"findings": []map[string]any{
+			{"artifact": `o\evil\a:b.bin:archive/data.pkl`, "ruleId": "SC4N-PICKLE-REDUCE", "severity": "critical"},
+		},
+		"artifacts": []map[string]any{
+			{"path": `o\evil\a`, "format": "text"},
+			{"path": `o\evil\a:b.bin`, "format": "zip"},
+		},
+	})
+	rep, err := Join(o)
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	byPath := map[string]FileReport{}
+	for _, f := range rep.Repos[0].Files {
+		byPath[f.Path] = f
+	}
+	if got := byPath["a:b.bin"]; got.HF != "unsafe" || got.Sc4n != "critical" || got.Format != "zip" {
+		t.Fatalf("a:b.bin = %+v, want HF=unsafe Sc4n=critical Format=zip", got)
+	}
+	if got := byPath["a"]; got.Sc4n != "none" {
+		t.Fatalf("a = %+v, want finding attributed to longest match a:b.bin instead", got)
+	}
+}
+
+func TestPrefixBaselinePreservesContainerMemberPath(t *testing.T) {
+	base := t.TempDir()
+	k := "SC4N-PICKLE-REDUCE\x00o/evil/model.bin:archive/../data.pkl\x00ev"
+	got := prefixBaseline(base, map[string]bool{k: true})
+	want := "SC4N-PICKLE-REDUCE\x00" + filepath.Join(base, "o", "evil", "model.bin") + ":archive/../data.pkl\x00ev"
+	if !got[want] {
+		t.Fatalf("prefixBaseline = %v, want key %q", got, want)
+	}
+}
+
+func TestVerdictsCancellationDoesNotWritePoisonedFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeJSON(filepath.Join(dir, fileCandidates), CandidatesFile{
+		Version: Version,
+		Repos:   []Candidate{{ID: "o/one"}, {ID: "o/two"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := hubapi.New(hubapi.Config{BaseURL: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	o := Options{Dir: dir, Client: c, Queries: []Sel{{Kind: "search", Value: "x"}}}
+	if _, err := Verdicts(ctx, o); err == nil {
+		t.Fatal("Verdicts succeeded on cancelled context")
+	}
+	if _, err := os.Stat(filepath.Join(dir, fileVerdicts)); err == nil {
+		t.Fatal("cancelled Verdicts wrote a poisoned verdicts.json")
+	}
+}
+
+func TestCampaignMarkdownEscapesTableCells(t *testing.T) {
+	rep := &CampaignReport{
+		Campaign: CampaignInfo{Level: "unsafe", Queries: map[string][]string{}},
+		Totals:   Totals{BySc4n: map[string]int{}},
+		Repos: []RepoReport{{
+			ID:     "o/a|b\nc",
+			Status: "ok",
+			Files:  []FileReport{{Path: "x|y\nz.pkl", Sc4n: "none", Reason: "no-findings", Format: "pickle"}},
+			Extras: []ExtraReport{{Path: "e|f\ng.pkl", Sc4n: "high", Rules: []string{"R|1"}}},
+			Sc4n:   RepoSc4n{BySeverity: map[string]int{}},
+		}},
+	}
+	md := campaignMarkdown(rep)
+	if !strings.Contains(md, `| o/a\|b c |`) {
+		t.Errorf("repo cell not escaped:\n%s", md)
+	}
+	if !strings.Contains(md, `| x\|y z.pkl |`) {
+		t.Errorf("miss file cell not escaped:\n%s", md)
+	}
+	if !strings.Contains(md, `| e\|f g.pkl |`) {
+		t.Errorf("extra file cell not escaped:\n%s", md)
+	}
+}

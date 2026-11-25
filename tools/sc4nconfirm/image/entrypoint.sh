@@ -8,7 +8,7 @@
 #
 # The entrypoint stays root only long enough to plant canaries and run the root
 # strace tracer. load.py drops to uid 65534 before it opens the artifact, so the
-# payload cannot write the root-owned /out or the tracer's /tmp/trace.
+# payload cannot write the root-owned /out or the tracer's /out/trace.
 set -u
 
 # The image sets HOME=/home/worker; the default keeps the script usable when an
@@ -32,12 +32,12 @@ mkdir -p /out /tmp 2>/dev/null || true
 
 # -qq: no attach/detach noise. -s 512: enough argv to name what ran.
 # -f: follow the payload's children, which is where a shell ends up.
-# Do not exec: the shell must survive the tracer to copy the evidence out.
-strace -f -qq -o /tmp/trace -s 512 \
-     -e trace=execve,execveat,open,openat,openat2,connect \
+# Write directly to /out/trace so a timeout or OOM preserves all syscalls
+# recorded before termination.
+strace -f -qq -o /out/trace -s 512 \
+     -e trace=execve,execveat,open,openat,openat2,creat,unlinkat,renameat2,memfd_create,connect,sendto,sendmsg,sendmmsg \
      python3 /opt/sc4nconfirm/load.py "$@"
 rc=$?
 
-cp /tmp/trace /out/trace 2>/dev/null || true
 cp /tmp/result.json /out/result.json 2>/dev/null || true
 exit "$rc"

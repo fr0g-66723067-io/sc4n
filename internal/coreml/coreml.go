@@ -9,11 +9,12 @@
 // pairs with whatever host plugin the name resolves to, and the file itself looks
 // like ordinary weights. That pairing is what SC4N-COREML-CUSTOM-LAYER reports.
 //
-// The protobuf is walked with google.golang.org/protobuf/encoding/protowire. The
-// walk is targeted -- Model.description for metadata strings, field 555 for a
-// custom model, field 500 (and the regressor/classifier wrappers) for the neural
-// network's layers -- so it never descends into `WeightParams` payloads, and every
-// length is bounds-checked by protowire before use.
+// The protobuf is walked in place over source.Source with a windowed protowire
+// reader. The walk is targeted -- Model.description for metadata strings, field
+// 555 for a custom model, field 500 (and the regressor/classifier variants, plus
+// Branch/Loop subgraphs) for the neural network's layers -- so it never descends
+// into `WeightParams` payloads, streams models of any size without a 64 MiB cut,
+// and bounds-checks every length before use.
 //
 // A `.mlpackage` is a *directory*: the scan engine sees its member files
 // individually, and `model.mlmodel` inside it is dispatched here by content. The
@@ -40,38 +41,38 @@ const (
 	fieldIsUpdatable        = 10 // bool
 	fieldCustomModel        = 555
 	fieldNeuralNetwork      = 500 // NeuralNetwork
-	fieldNeuralRegr         = 303 // NeuralNetworkRegressor { NeuralNetwork = 1 }
-	fieldNeuralClass        = 403 // NeuralNetworkClassifier  { NeuralNetwork = 1 }
+	fieldNeuralRegr         = 303 // NeuralNetworkRegressor { repeated NeuralNetworkLayer layers = 1 }
+	fieldNeuralClass        = 403 // NeuralNetworkClassifier { repeated NeuralNetworkLayer layers = 1 }
 	fieldMLProgram          = 502 // MILSpec.Program
 	fieldPipelineClassifier = 200
 	fieldPipelineRegressor  = 201
 	fieldPipeline           = 202
 	pipelineFieldModels     = 1
 	maxPipelineDepth        = 8
+	maxSubgraphDepth        = 16
 )
 
 // NeuralNetwork / NeuralNetworkLayer / CustomLayerParams field numbers
 // (apple/coremltools mlmodel/format/NeuralNetwork.proto).
 const (
-	nnFieldLayers       = 1   // repeated NeuralNetworkLayer
-	layerFieldCustom    = 500 // CustomLayerParams
-	customFieldClass    = 10  // string className
-	customFieldParams   = 20  // map<string, WeightParams> (layer)
-	customModelParams   = 30  // map<string, CustomModelParamValue> (custom model)
-	customFieldDescr    = 30  // string description (layer custom)
-	modelCustomDescr    = 40  // string description (CustomModel)
-	paramValueStrField  = 20  // CustomModelParamValue.stringValue
-	paramValueByteField = 60  // CustomModelParamValue.bytesValue
+	nnFieldLayers       = 1    // repeated NeuralNetworkLayer
+	layerFieldCustom    = 500  // CustomLayerParams
+	layerFieldBranch    = 1360 // BranchLayerParams
+	layerFieldLoop      = 1370 // LoopLayerParams
+	branchIfField       = 1    // NeuralNetwork ifBranch
+	branchElseField     = 2    // NeuralNetwork elseBranch
+	loopCondField       = 3    // NeuralNetwork conditionNetwork
+	loopBodyField       = 4    // NeuralNetwork bodyNetwork
+	customFieldClass    = 10   // string className
+	customFieldWeights  = 20   // repeated WeightParams weights
+	customFieldParams   = 30   // map<string, CustomLayerParamValue> / CustomModelParamValue
+	customFieldDescr    = 40   // string description
+	paramValueStrField  = 20   // CustomModelParamValue/CustomLayerParamValue.stringValue
+	paramValueByteField = 60   // CustomModelParamValue.bytesValue
 )
 
-// maxProbe is how much of the head the sniffer reads to find a CoreML model-type
-// field. A ModelDescription is small in every real package; the bound exists so a
-// crafted prefix cannot make sniffing expensive.
+// maxProbe bounds the full-message probe for ModelDescription.
 const maxProbe = 64 << 10
-
-// maxWalkBytes caps the in-memory walk. Core ML packages are small; a model
-// larger than this is reported as only partly inspected rather than read whole.
-const maxWalkBytes = 64 << 20
 
 // maxTextDepth bounds the recursive metadata-string walk.
 const maxTextDepth = 6
@@ -102,25 +103,24 @@ func init() {
 type parser struct{}
 
 func (parser) Parse(ctx *artifact.Ctx, s source.Source) error {
-	size := s.Size()
-	n := size
-	if n > maxWalkBytes {
-		n = maxWalkBytes
-	}
-	data, err := s.Bytes(0, n)
-	if err != nil && len(data) == 0 {
-		return err
-	}
-	w := &walker{sink: ctx.Sink, l: ctx.Limits}
-	if size > maxWalkBytes {
-		w.sink.Emit(RuleStruct, 0,
-			"Core ML model is larger than the bounded walk window; only its first 64 MiB were inspected")
-	}
-	w.walkModel(data)
+	w := &walker{s: s, sink: ctx.Sink, l: defaultLimits(ctx.Limits)}
+	w.walkModel(newPBReader(s, 0, s.Size()))
 	return nil
 }
 
+func defaultLimits(l limits.Limits) limits.Limits {
+	d := limits.Default()
+	if l.MaxEntries <= 0 {
+		l.MaxEntries = d.MaxEntries
+	}
+	if l.MaxStringBlob <= 0 {
+		l.MaxStringBlob = d.MaxStringBlob
+	}
+	return l
+}
+
 type walker struct {
+	s    source.Source
 	sink *report.Sink
 	l    limits.Limits
 
@@ -128,6 +128,7 @@ type walker struct {
 	elemsHi       bool
 	structHi      bool
 	pipelineDepth int
+	subgraphDepth int
 }
 
 func (w *walker) count() bool {
@@ -150,47 +151,39 @@ func (w *walker) bad(msg string) {
 	w.sink.Emit(RuleStruct, 0, msg)
 }
 
-// walkModel walks the top-level ModelProto.
-func (w *walker) walkModel(b []byte) {
-	for len(b) > 0 {
+// walkModel walks the top-level ModelProto in place over source.Source.
+func (w *walker) walkModel(r *pbReader) {
+	for r.remaining() > 0 {
 		if !w.count() {
 			return
 		}
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
+		num, typ, _, ok := r.next()
+		if !ok {
 			w.bad("ModelProto field tag is malformed or truncated")
 			return
 		}
-		b = b[n:]
 		switch typ {
 		case protowire.VarintType:
-			if _, m := protowire.ConsumeVarint(b); m < 0 {
+			if _, ok := r.varintValue(); !ok {
 				w.bad("ModelProto varint field is truncated")
 				return
-			} else {
-				b = b[m:]
 			}
 		case protowire.BytesType:
-			v, m := protowire.ConsumeBytes(b)
-			if m < 0 {
+			off, n, ok := r.bytesValue()
+			if !ok {
 				w.bad("ModelProto length-delimited field is truncated")
 				return
 			}
-			b = b[m:]
-			w.modelField(num, v)
+			w.modelField(num, off, n)
 		case protowire.Fixed32Type:
-			if m := consumeFixed32(b); m < 0 {
+			if !r.fixedValue(4) {
 				w.bad("ModelProto fixed32 field is truncated")
 				return
-			} else {
-				b = b[m:]
 			}
 		case protowire.Fixed64Type:
-			if m := consumeFixed64(b); m < 0 {
+			if !r.fixedValue(8) {
 				w.bad("ModelProto fixed64 field is truncated")
 				return
-			} else {
-				b = b[m:]
 			}
 		default:
 			w.bad("ModelProto uses a protobuf group wire type, which is not valid here")
@@ -199,177 +192,380 @@ func (w *walker) walkModel(b []byte) {
 	}
 }
 
-func (w *walker) modelField(num protowire.Number, v []byte) {
+func (w *walker) modelField(num protowire.Number, off, n int64) {
 	switch num {
 	case fieldDescription:
-		w.walkStrings(v, 0)
+		w.walkStrings(newPBReader(w.s, off, off+n), 0)
 	case fieldPipelineClassifier, fieldPipelineRegressor:
-		if inner := w.findBytesField(v, pipelineFieldModels, "pipeline wrapper"); inner != nil {
-			w.walkPipeline(inner, 0)
-		}
+		w.eachBytesField(newPBReader(w.s, off, off+n), pipelineFieldModels, "pipeline wrapper", func(po, pn int64) {
+			w.walkPipeline(newPBReader(w.s, po, po+pn), 0)
+		})
 	case fieldPipeline:
-		w.walkPipeline(v, 0)
+		w.walkPipeline(newPBReader(w.s, off, off+n), 0)
 	case fieldCustomModel:
-		w.walkCustomModel(v)
+		w.walkCustomModel(newPBReader(w.s, off, off+n))
 	case fieldNeuralNetwork:
-		w.walkNeuralNetwork(v)
+		w.walkNeuralNetwork(newPBReader(w.s, off, off+n), false)
 	case fieldNeuralRegr, fieldNeuralClass:
-		// These wrappers carry the NeuralNetwork in field 1.
-		w.walkStrings(v, 0)
-		if inner := w.findBytesField(v, 1, "Network wrapper"); inner != nil {
-			w.walkNeuralNetwork(inner)
-		}
+		// NeuralNetworkClassifier and NeuralNetworkRegressor carry
+		// `repeated NeuralNetworkLayer layers = 1` directly alongside
+		// classifier/regressor metadata fields.
+		w.walkNeuralNetwork(newPBReader(w.s, off, off+n), true)
 	case fieldMLProgram:
 		w.sink.Emit(RuleProgramUnverified, 0,
 			"Model.type is mlProgram (field 502): the MIL operator graph and its weight blobs are not "+
 				"decoded by sc4n v1, so this model is recognised but only shallowly analysed")
 	default:
-		// Every other model-type field (trees, GLM, SVM, pipeline, ...) names no
+		// Every other model-type field (trees, GLM, SVM, ...) names no
 		// host-provided class and carries no code; its strings are still worth
 		// scanning for indicators.
 		if num >= 200 {
-			w.walkStrings(v, 0)
+			w.walkStrings(newPBReader(w.s, off, off+n), 0)
 		}
 	}
 }
 
-func (w *walker) walkNeuralNetwork(b []byte) {
-	w.eachBytesField(b, nnFieldLayers, "NeuralNetwork.layers", w.walkLayer)
-}
-
-func (w *walker) walkLayer(b []byte) {
-	if v := w.findBytesField(b, layerFieldCustom, "NeuralNetworkLayer"); v != nil {
-		w.walkCustomLayer(v)
+func (w *walker) walkNeuralNetwork(r *pbReader, scanMeta bool) {
+	if w.subgraphDepth >= maxSubgraphDepth {
+		w.bad("Core ML neural network subgraph nests deeper than the internal cap")
+		return
+	}
+	w.subgraphDepth++
+	defer func() { w.subgraphDepth-- }()
+	for r.remaining() > 0 {
+		if !w.count() {
+			return
+		}
+		num, typ, _, ok := r.next()
+		if !ok {
+			w.bad("Core ML NeuralNetwork.layers field tag is malformed or truncated")
+			return
+		}
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
+				w.bad("Core ML NeuralNetwork.layers length-delimited field is truncated")
+				return
+			}
+			if num == nnFieldLayers {
+				w.walkLayer(newPBReader(w.s, off, off+n))
+			} else if scanMeta {
+				w.scanBytesOrStrings(off, n, 0)
+			}
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
+			w.bad("Core ML NeuralNetwork.layers field is malformed or truncated")
+			return
+		}
 	}
 }
 
-func (w *walker) walkCustomLayer(b []byte) {
-	if v := w.findBytesField(b, customFieldClass, "CustomLayerParams.className"); v != nil {
-		w.emitCustom("custom layer", v)
+// walkLayer walks all fields of one NeuralNetworkLayer in a single pass so
+// protobuf singular-field merging cannot hide a second custom/branch/loop field.
+func (w *walker) walkLayer(r *pbReader) {
+	for r.remaining() > 0 {
+		if !w.count() {
+			return
+		}
+		num, typ, _, ok := r.next()
+		if !ok {
+			w.bad("Core ML NeuralNetworkLayer field tag is malformed or truncated")
+			return
+		}
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
+				w.bad("Core ML NeuralNetworkLayer length-delimited field is truncated")
+				return
+			}
+			switch num {
+			case layerFieldCustom:
+				w.walkCustomLayer(newPBReader(w.s, off, off+n))
+			case layerFieldBranch:
+				w.walkBranchLayer(newPBReader(w.s, off, off+n))
+			case layerFieldLoop:
+				w.walkLoopLayer(newPBReader(w.s, off, off+n))
+			}
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
+			w.bad("Core ML NeuralNetworkLayer field is malformed or truncated")
+			return
+		}
 	}
-	if v := w.findBytesField(b, customFieldDescr, "CustomLayerParams.description"); v != nil {
-		w.walkStrings(v, 0)
-	}
-	w.eachBytesField(b, customFieldParams, "CustomLayerParams.params", w.scanMapEntry)
 }
 
-func (w *walker) walkCustomModel(b []byte) {
-	if v := w.findBytesField(b, customFieldClass, "CustomModel.className"); v != nil {
-		w.emitCustom("custom model", v)
+func (w *walker) walkBranchLayer(r *pbReader) {
+	for r.remaining() > 0 {
+		if !w.count() {
+			return
+		}
+		num, typ, _, ok := r.next()
+		if !ok {
+			w.bad("Core ML BranchLayerParams field tag is malformed or truncated")
+			return
+		}
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
+				w.bad("Core ML BranchLayerParams length-delimited field is truncated")
+				return
+			}
+			if num == branchIfField || num == branchElseField {
+				w.walkNeuralNetwork(newPBReader(w.s, off, off+n), false)
+			}
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
+			w.bad("Core ML BranchLayerParams field is malformed or truncated")
+			return
+		}
 	}
-	if v := w.findBytesField(b, modelCustomDescr, "CustomModel.description"); v != nil {
-		w.walkStrings(v, 0)
+}
+
+func (w *walker) walkLoopLayer(r *pbReader) {
+	for r.remaining() > 0 {
+		if !w.count() {
+			return
+		}
+		num, typ, _, ok := r.next()
+		if !ok {
+			w.bad("Core ML LoopLayerParams field tag is malformed or truncated")
+			return
+		}
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
+				w.bad("Core ML LoopLayerParams length-delimited field is truncated")
+				return
+			}
+			if num == loopCondField || num == loopBodyField {
+				w.walkNeuralNetwork(newPBReader(w.s, off, off+n), false)
+			}
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
+			w.bad("Core ML LoopLayerParams field is malformed or truncated")
+			return
+		}
 	}
-	// CustomModel parameters are map<string, CustomModelParamValue>; the value is a
-	// message whose string/bytes members may carry data.
-	w.eachBytesField(b, customModelParams, "CustomModel.params", w.scanParamEntry)
+}
+
+// walkCustomLayer walks CustomLayerParams:
+//
+//	10: string className
+//	20: repeated WeightParams weights (skipped by length)
+//	30: map<string, CustomLayerParamValue> parameters
+//	40: string description
+func (w *walker) walkCustomLayer(r *pbReader) {
+	w.walkCustom(r, "custom layer")
+}
+
+// walkCustomModel walks CustomModel:
+//
+//	10: string className
+//	30: map<string, CustomModelParamValue> parameters
+//	40: string description
+func (w *walker) walkCustomModel(r *pbReader) {
+	w.walkCustom(r, "custom model")
+}
+
+func (w *walker) walkCustom(r *pbReader, what string) {
+	for r.remaining() > 0 {
+		if !w.count() {
+			return
+		}
+		num, typ, _, ok := r.next()
+		if !ok {
+			w.bad("Core ML " + what + " field tag is malformed or truncated")
+			return
+		}
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
+				w.bad("Core ML " + what + " length-delimited field is truncated")
+				return
+			}
+			switch num {
+			case customFieldClass:
+				w.emitCustomRange(what, off, n)
+			case customFieldWeights:
+				// WeightParams payloads are skipped by length.
+			case customFieldParams:
+				w.scanParamEntry(newPBReader(w.s, off, off+n))
+			case customFieldDescr:
+				w.scanTextRange(off, n)
+			}
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
+			w.bad("Core ML " + what + " field is malformed or truncated")
+			return
+		}
+	}
 }
 
 // walkPipeline walks a Pipeline model wrapper. The depth is carried on the
 // walker so a nested pipeline inside one of its models also charges the cap.
-func (w *walker) walkPipeline(b []byte, depth int) {
+func (w *walker) walkPipeline(r *pbReader, depth int) {
 	if depth >= maxPipelineDepth || w.pipelineDepth >= maxPipelineDepth {
 		w.bad("Core ML pipeline nests deeper than the internal cap")
 		return
 	}
 	w.pipelineDepth++
 	defer func() { w.pipelineDepth-- }()
-	w.eachBytesField(b, pipelineFieldModels, "Pipeline.models", func(v []byte) {
-		w.walkModel(v)
+	w.eachBytesField(r, pipelineFieldModels, "Pipeline.models", func(off, n int64) {
+		w.walkModel(newPBReader(w.s, off, off+n))
 	})
 }
 
-func (w *walker) emitCustom(what string, className []byte) {
-	// The cap is applied to the bytes: `string(className)` copies the whole
-	// attacker-sized value, so checking the length afterwards still materialised
-	// it once at the walk window's 64 MiB before truncating to MaxStringBlob.
+func (w *walker) emitCustomRange(what string, off, n int64) {
 	cap := w.l.MaxStringBlob
 	if cap <= 0 {
 		cap = limits.Default().MaxStringBlob
 	}
-	if int64(len(className)) > cap {
-		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", int64(len(className)), cap, "Core ML "+what+" class name")
-		className = className[:cap]
+	readLen := n
+	if readLen > cap {
+		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, cap, "Core ML "+what+" class name")
+		readLen = cap
+	}
+	var className []byte
+	if readLen > 0 {
+		b, err := w.s.Bytes(off, readLen)
+		if err == nil || len(b) > 0 {
+			className = b
+		}
 	}
 	name := string(className)
 	w.sink.EmitExtra(RuleCustomLayer, 0,
 		"the model declares a "+what+" named "+report.TruncateEvidence(name, 256)+"; the implementation is supplied by the host "+
 			"application, not by this file",
 		map[string]string{"kind": what, "class": report.TruncateEvidence(name, 256)})
-	if len(name) > 0 {
-		w.scanText([]byte(name))
+	if len(className) > 0 {
+		stringscan.EmitString(w.sink, 0, name)
 	}
 }
 
-// scanMapEntry walks a map<string,string> entry (key=1, value=2).
-func (w *walker) scanMapEntry(b []byte) {
-	w.eachBytesField(b, 1, "map entry key", w.scanText)
-	w.eachBytesField(b, 2, "map entry value", w.scanText)
-}
-
-// scanParamEntry walks a CustomModel parameters entry (key=1, value=2 message);
-// the value's string/bytes members (20/60) are scanned.
-func (w *walker) scanParamEntry(b []byte) {
-	w.eachBytesField(b, 1, "param entry key", w.scanText)
-	w.eachBytesField(b, 2, "param entry value", func(v []byte) {
-		if s := w.findBytesField(v, paramValueStrField, "CustomModelParamValue.stringValue"); s != nil {
-			w.scanText(s)
-		}
-		if s := w.findBytesField(v, paramValueByteField, "CustomModelParamValue.bytesValue"); s != nil {
-			w.scanText(s)
-		}
-	})
-}
-
-// walkStrings recursively scans length-delimited leaves that look like text.
-func (w *walker) walkStrings(b []byte, depth int) {
-	if depth > maxTextDepth {
-		return
-	}
-	for len(b) > 0 {
+// scanParamEntry walks a CustomLayer/CustomModel parameters entry
+// (key=1, value=2 message); the value's string/bytes members (20/60) are
+// scanned across every occurrence.
+func (w *walker) scanParamEntry(r *pbReader) {
+	for r.remaining() > 0 {
 		if !w.count() {
 			return
 		}
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
+		num, typ, _, ok := r.next()
+		if !ok {
+			w.bad("Core ML param entry field tag is malformed or truncated")
 			return
 		}
-		b = b[n:]
-		switch typ {
-		case protowire.VarintType:
-			if _, m := protowire.ConsumeVarint(b); m < 0 {
-				return
-			} else {
-				b = b[m:]
-			}
-		case protowire.BytesType:
-			v, m := protowire.ConsumeBytes(b)
-			if m < 0 {
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
+				w.bad("Core ML param entry length-delimited field is truncated")
 				return
 			}
-			b = b[m:]
-			if w.isText(v) {
-				w.scanText(v)
-			} else {
-				w.walkStrings(v, depth+1)
+			switch num {
+			case 1:
+				w.scanTextRange(off, n)
+			case 2:
+				w.scanParamValue(newPBReader(w.s, off, off+n))
 			}
-		case protowire.Fixed32Type:
-			if m := consumeFixed32(b); m < 0 {
-				return
-			} else {
-				b = b[m:]
-			}
-		case protowire.Fixed64Type:
-			if m := consumeFixed64(b); m < 0 {
-				return
-			} else {
-				b = b[m:]
-			}
-		default:
-			_ = num
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
+			w.bad("Core ML param entry field is malformed or truncated")
 			return
 		}
 	}
+}
+
+func (w *walker) scanParamValue(r *pbReader) {
+	for r.remaining() > 0 {
+		if !w.count() {
+			return
+		}
+		num, typ, _, ok := r.next()
+		if !ok {
+			w.bad("Core ML CustomParamValue field tag is malformed or truncated")
+			return
+		}
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
+				w.bad("Core ML CustomParamValue length-delimited field is truncated")
+				return
+			}
+			if num == paramValueStrField || num == paramValueByteField {
+				w.scanTextRange(off, n)
+			}
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
+			w.bad("Core ML CustomParamValue field is malformed or truncated")
+			return
+		}
+	}
+}
+
+// walkStrings recursively scans length-delimited leaves that look like text.
+func (w *walker) walkStrings(r *pbReader, depth int) {
+	if depth > maxTextDepth {
+		return
+	}
+	for r.remaining() > 0 {
+		if !w.count() {
+			return
+		}
+		num, typ, _, ok := r.next()
+		if !ok {
+			return
+		}
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
+				return
+			}
+			w.scanBytesOrStrings(off, n, depth)
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
+			return
+		}
+	}
+}
+
+func (w *walker) scanBytesOrStrings(off, n int64, depth int) {
+	if n <= 0 {
+		return
+	}
+	if n <= w.l.MaxStringBlob {
+		b, err := w.s.Bytes(off, n)
+		if err != nil && int64(len(b)) < n {
+			return
+		}
+		if w.isText(b) {
+			w.scanText(b)
+			return
+		}
+	}
+	w.walkStrings(newPBReader(w.s, off, off+n), depth+1)
+}
+
+func (w *walker) scanTextRange(off, n int64) {
+	if n <= 0 {
+		return
+	}
+	if n > w.l.MaxStringBlob {
+		limits.Emit(w.sink, limits.RuleString, "MaxStringBlob", n, w.l.MaxStringBlob, "coreml string")
+		return
+	}
+	b, err := w.s.Bytes(off, n)
+	if err != nil && len(b) == 0 {
+		return
+	}
+	w.scanText(b)
 }
 
 // scanText runs the indicator engine over a string/blob, bounded by MaxStringBlob.
@@ -408,142 +604,40 @@ func (w *walker) isText(v []byte) bool {
 	return float64(control) < 0.10*float64(len(v))
 }
 
-// eachBytesField invokes fn for every length-delimited value of the given field
-// number, without materialising a slice of them. Element counting is shared with
-// the rest of the walk so a crafted message with a million repeated fields stops at
-// MaxEntries rather than allocating a slice per field.
-func (w *walker) eachBytesField(b []byte, want protowire.Number, what string, fn func([]byte)) {
-	for len(b) > 0 {
+// eachBytesField invokes fn for every length-delimited value of field want,
+// streaming in place over r.
+func (w *walker) eachBytesField(r *pbReader, want protowire.Number, what string, fn func(off, n int64)) {
+	for r.remaining() > 0 {
 		if !w.count() {
 			return
 		}
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
+		num, typ, _, ok := r.next()
+		if !ok {
 			w.bad("Core ML " + what + " field tag is malformed or truncated")
 			return
 		}
-		b = b[n:]
-		switch typ {
-		case protowire.VarintType:
-			_, m := protowire.ConsumeVarint(b)
-			if m < 0 {
-				w.bad("Core ML " + what + " varint field is truncated")
-				return
-			}
-			b = b[m:]
-		case protowire.BytesType:
-			v, m := protowire.ConsumeBytes(b)
-			if m < 0 {
+		if typ == protowire.BytesType {
+			off, n, ok := r.bytesValue()
+			if !ok {
 				w.bad("Core ML " + what + " length-delimited field is truncated")
 				return
 			}
-			b = b[m:]
 			if num == want {
-				fn(v)
+				fn(off, n)
 			}
-		case protowire.Fixed32Type:
-			m := consumeFixed32(b)
-			if m < 0 {
-				w.bad("Core ML " + what + " fixed32 field is truncated")
-				return
-			}
-			b = b[m:]
-		case protowire.Fixed64Type:
-			m := consumeFixed64(b)
-			if m < 0 {
-				w.bad("Core ML " + what + " fixed64 field is truncated")
-				return
-			}
-			b = b[m:]
-		case protowire.StartGroupType:
-			_, m := protowire.ConsumeGroup(num, b)
-			if m < 0 {
-				w.bad("Core ML " + what + " field is malformed or truncated")
-				return
-			}
-			b = b[m:]
-		default:
+			continue
+		}
+		if !r.skipFieldValue(num, typ, 0) {
 			w.bad("Core ML " + what + " field is malformed or truncated")
 			return
 		}
 	}
 }
 
-// findBytesField returns the first length-delimited value of field want, or nil.
-//
-// A record it cannot parse is reported, not read as "the field is absent". The
-// absent reading is what a truncated nested message got, so a layer whose custom
-// block was cut short produced neither the custom-layer finding nor a structural
-// one: the walker declined to walk and nothing said so.
-func (w *walker) findBytesField(b []byte, want protowire.Number, what string) []byte {
-	fail := func() []byte {
-		w.bad("Core ML " + what + " field is malformed or truncated")
-		return nil
-	}
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			return fail()
-		}
-		b = b[n:]
-		switch typ {
-		case protowire.VarintType:
-			_, m := protowire.ConsumeVarint(b)
-			if m < 0 {
-				return fail()
-			}
-			b = b[m:]
-		case protowire.BytesType:
-			v, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				return fail()
-			}
-			if num == want {
-				return v
-			}
-			b = b[m:]
-		case protowire.Fixed32Type:
-			m := consumeFixed32(b)
-			if m < 0 {
-				return fail()
-			}
-			b = b[m:]
-		case protowire.Fixed64Type:
-			m := consumeFixed64(b)
-			if m < 0 {
-				return fail()
-			}
-			b = b[m:]
-		case protowire.StartGroupType:
-			_, m := protowire.ConsumeGroup(num, b)
-			if m < 0 {
-				return fail()
-			}
-			b = b[m:]
-		default:
-			return fail()
-		}
-	}
-	return nil
-}
-
-func consumeFixed32(b []byte) int {
-	_, n := protowire.ConsumeFixed32(b)
-	return n
-}
-
-func consumeFixed64(b []byte) int {
-	_, n := protowire.ConsumeFixed64(b)
-	return n
-}
-
 // isProtoMessage reports whether b is a sequence of well-formed protobuf field
 // records that consumes exactly b. It separates CoreML's nested ModelDescription
 // (field 2) from ONNX's producer_name (also field 2), which is a UTF-8 string:
 // "pytorch" parses as tag 14 wire type 0 and then fails on the next byte.
-//
-// protowire.ConsumeField returns (number, wire type, length) and a negative
-// length on error; it validates the outer field structure, not a nested payload.
 func isProtoMessage(b []byte) bool {
 	fields := 0
 	for len(b) > 0 {
@@ -557,53 +651,48 @@ func isProtoMessage(b []byte) bool {
 	return fields > 0
 }
 
-// sniff recognises a CoreML ModelProto by its shape: field 1 must be a plausible
-// specificationVersion varint, and either a Model.type field (number >= 200,
-// bytes wire type) or a field-2 description that is itself a well-formed
-// protobuf message must appear within the probe window. The second shape is what
-// a CoreML model whose weights live in a sibling file looks like.
+// sniff recognises a CoreML ModelProto of any size by streaming top-level field
+// headers over source.Source: field 1 must be a plausible specificationVersion
+// varint, and either a Model.type field (number >= 200, bytes wire type whose
+// declared length fits within s.Size()) or a field-2 ModelDescription that is a
+// plausible protobuf message must appear.
 func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 	size := s.Size()
 	if size < 4 {
 		return artifact.FormatUnknown, false
 	}
-	head, err := s.Bytes(0, minInt64(size, maxProbe))
-	if err != nil && len(head) == 0 {
+	r := newPBReader(s, 0, size)
+	num, typ, _, ok := r.next()
+	if !ok || num != fieldSpecVersion || typ != protowire.VarintType {
 		return artifact.FormatUnknown, false
 	}
-	num, typ, n := protowire.ConsumeTag(head)
-	if n < 0 || num != fieldSpecVersion || typ != protowire.VarintType {
+	ver, ok := r.varintValue()
+	if !ok || ver == 0 || ver > 1000 {
 		return artifact.FormatUnknown, false
 	}
-	ver, m := protowire.ConsumeVarint(head[n:])
-	if m < 0 || ver == 0 || ver > 1000 {
-		return artifact.FormatUnknown, false
-	}
-	b := head[n+m:]
 	sawType, sawDesc, sawONNX := false, false, false
-	for len(b) > 0 {
-		fnum, ftyp, k := protowire.ConsumeTag(b)
-		if k < 0 {
+	for range maxSniffFields {
+		if r.remaining() <= 0 {
+			break
+		}
+		fnum, ftyp, _, ok := r.next()
+		if !ok {
 			return artifact.FormatUnknown, false
 		}
-		b = b[k:]
 		switch ftyp {
 		case protowire.VarintType:
-			if _, z := protowire.ConsumeVarint(b); z < 0 {
+			if _, ok := r.varintValue(); !ok {
 				return artifact.FormatUnknown, false
-			} else {
-				b = b[z:]
 			}
 		case protowire.BytesType:
-			v, z := protowire.ConsumeBytes(b)
-			if z < 0 {
+			off, n, ok := r.bytesValue()
+			if !ok {
 				return artifact.FormatUnknown, false
 			}
-			b = b[z:]
-			if fnum >= 200 && len(v) > 0 {
+			if fnum >= 200 && n > 0 {
 				sawType = true
 			}
-			if fnum == fieldDescription && len(v) > 0 && isProtoMessage(v) {
+			if fnum == fieldDescription && n > 0 && probeProtoMessage(s, off, n) {
 				sawDesc = true
 			}
 			switch fnum {
@@ -611,16 +700,12 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 				sawONNX = true
 			}
 		case protowire.Fixed32Type:
-			if z := consumeFixed32(b); z < 0 {
+			if !r.fixedValue(4) {
 				return artifact.FormatUnknown, false
-			} else {
-				b = b[z:]
 			}
 		case protowire.Fixed64Type:
-			if z := consumeFixed64(b); z < 0 {
+			if !r.fixedValue(8) {
 				return artifact.FormatUnknown, false
-			} else {
-				b = b[z:]
 			}
 		default:
 			return artifact.FormatUnknown, false
@@ -633,11 +718,4 @@ func sniff(s source.Source, _ limits.Limits) (artifact.Format, bool) {
 		return artifact.FormatCoreML, true
 	}
 	return artifact.FormatUnknown, false
-}
-
-func minInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }

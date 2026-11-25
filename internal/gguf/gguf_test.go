@@ -962,3 +962,167 @@ func TestSliceCutInsideAStringLengthIsASlice(t *testing.T) {
 		t.Fatalf("a marked slice must report SC4N-PARTIAL-SLICE; got %v", got)
 	}
 }
+
+func TestSniffValidatesVersionAndDoesNotHijackSource(t *testing.T) {
+	// Python/text starting with "GGUF=1" must NOT be claimed as GGUF.
+	py := source.Mem("x.py", []byte("GGUF=1\nprint(GGUF)\n"))
+	defer py.Close()
+	if f, _ := artifact.Sniff(py, limits.Default()); f == artifact.FormatGGUF {
+		t.Fatal("Python file starting with GGUF=1 was hijacked as GGUF")
+	}
+	// Version 2 LE, 3 LE, and 3 BE are accepted.
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"v2-le", build(spec{version: 2})},
+		{"v3-le", build(spec{version: 3})},
+		{"v3-be", build(spec{version: 3, bigEndian: true})},
+	} {
+		src := source.Mem(tc.name+".gguf", tc.data)
+		f, _ := artifact.Sniff(src, limits.Default())
+		src.Close()
+		if f != artifact.FormatGGUF {
+			t.Errorf("%s sniffed as %v, want GGUF", tc.name, f)
+		}
+	}
+}
+
+func TestZeroTensorGGUFChecksNonZeroTrailing(t *testing.T) {
+	// Non-zero trailing payload on a 0-tensor GGUF must report TRAILING-DATA.
+	bad := build(spec{version: 3, kvs: []kv{{key: "general.name", valType: 8, val: strb("v", binary.LittleEndian)}}, trailer: []byte("SMUGGLED_PAYLOAD")})
+	if fs := findingsFor(t, bad); !hasRule(fs, "SC4N-GGUF-TRAILING-DATA") {
+		t.Fatalf("0-tensor GGUF with non-zero trailer missed TRAILING-DATA; got %v", ids(fs))
+	}
+	// Zero-only trailing alignment padding remains clean.
+	ok := build(spec{version: 3, kvs: []kv{{key: "general.name", valType: 8, val: strb("v", binary.LittleEndian)}}})
+	if fs := findingsFor(t, ok); hasRule(fs, "SC4N-GGUF-TRAILING-DATA") {
+		t.Fatalf("0-tensor GGUF with zero padding falsely reported TRAILING-DATA; got %v", ids(fs))
+	}
+}
+
+func TestOverlapSortingContainedOverlapOverflowAndNonZeroGap(t *testing.T) {
+	// 1. Out-of-order disjoint tensors: must report out-of-order, NOT overlap.
+	ooo := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "general.name", valType: 8, val: strb("m", binary.LittleEndian)}},
+		tensors: []tensor{
+			{name: "b", dims: []uint64{8}, typ: 0, offset: 64},
+			{name: "a", dims: []uint64{8}, typ: 0, offset: 0},
+		},
+		dataLen: 96,
+	})
+	for _, f := range findingsFor(t, ooo) {
+		if strings.Contains(f.Evidence, "overlaps") {
+			t.Fatalf("out-of-order disjoint tensors reported false overlap: %s", f.Evidence)
+		}
+	}
+
+	// 2. Contained overlap: [0, 1024), [32, 64), [128, 160) -> BOTH b and c overlap a.
+	contained := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "general.name", valType: 8, val: strb("m", binary.LittleEndian)}},
+		tensors: []tensor{
+			{name: "a", dims: []uint64{256}, typ: 0, offset: 0}, // [0, 1024)
+			{name: "b", dims: []uint64{8}, typ: 0, offset: 32},  // [32, 64)
+			{name: "c", dims: []uint64{8}, typ: 0, offset: 128}, // [128, 160)
+		},
+		dataLen: 1024,
+	})
+	overlaps := 0
+	for _, f := range findingsFor(t, contained) {
+		if strings.Contains(f.Evidence, "overlaps") {
+			overlaps++
+		}
+	}
+	if overlaps != 2 {
+		t.Fatalf("contained overlap reported %d overlaps, want 2:\n%s", overlaps, evidence(findingsFor(t, contained)))
+	}
+
+	// 3. end > math.MaxInt64 must report STRUCT cleanly without wrapping negative.
+	overflow := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "general.name", valType: 8, val: strb("m", binary.LittleEndian)}},
+		tensors: []tensor{{name: "huge", dims: []uint64{16}, typ: 0, offset: (1 << 63) - 32}},
+		dataLen: 64,
+	})
+	if fs := findingsFor(t, overflow); !hasRule(fs, "SC4N-GGUF-STRUCT") {
+		t.Fatalf("int64 end overflow was not reported; got %v", ids(fs))
+	}
+
+	// 4. Non-zero inter-tensor gap must be reported.
+	gapSpec := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "general.name", valType: 8, val: strb("m", binary.LittleEndian)}},
+		tensors: []tensor{
+			{name: "a", dims: []uint64{8}, typ: 0, offset: 0},   // [0, 32)
+			{name: "b", dims: []uint64{8}, typ: 0, offset: 128}, // [128, 160)
+		},
+		dataLen: 160,
+	})
+	// Paint non-zero bytes inside the [32, 128) gap before tensor b.
+	gapSpec[len(gapSpec)-160+48] = 0xde
+	gapSpec[len(gapSpec)-160+49] = 0xad
+	gapFound := false
+	for _, f := range findingsFor(t, gapSpec) {
+		if f.RuleID == "SC4N-GGUF-STRUCT" && strings.Contains(f.Evidence, "non-zero") {
+			gapFound = true
+		}
+	}
+	if !gapFound {
+		t.Fatalf("non-zero inter-tensor gap was not reported:\n%s", evidence(findingsFor(t, gapSpec)))
+	}
+}
+
+func TestMaxArrayElementsEnforcedAndNumericFastSkipAndPolyglotNoDup(t *testing.T) {
+	// 1. String array exceeding MaxArrayElements stops and emits LIMIT-ENTRIES + STRUCT.
+	var arr bytes.Buffer
+	arr.Write(u32b(8, binary.LittleEndian)) // STRING
+	arr.Write(u64b(20, binary.LittleEndian))
+	for i := range 20 {
+		arr.Write(strb("s"+strconv.Itoa(i), binary.LittleEndian))
+	}
+	data := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "tokenizer.ggml.tokens", valType: 9, val: arr.Bytes()}},
+	})
+	l := limits.Default()
+	l.MaxArrayElements = 5
+	fs := parseWithLimits(t, data, l)
+	if !hasRule(fs, "SC4N-LIMIT-ENTRIES") || !hasRule(fs, "SC4N-GGUF-STRUCT") {
+		t.Fatalf("MaxArrayElements breach not enforced; got %v", ids(fs))
+	}
+
+	// 2. Fixed-width numeric array (FLOAT32) skips in O(1) and parses following KV cleanly.
+	var numArr bytes.Buffer
+	numArr.Write(u32b(6, binary.LittleEndian)) // FLOAT32
+	numArr.Write(u64b(10000, binary.LittleEndian))
+	numArr.Write(make([]byte, 10000*4))
+	numData := build(spec{
+		version: 3,
+		kvs: []kv{
+			{key: "tokenizer.ggml.scores", valType: 9, val: numArr.Bytes()},
+			{key: "tokenizer.chat_template", valType: 8, val: strb("{{ ''.__class__ }}", binary.LittleEndian)},
+		},
+	})
+	if fs := parseWithLimits(t, numData, limits.Limits{}); !hasRule(fs, "SC4N-JINJA-PY-OBJECT") {
+		t.Fatalf("fixed-width numeric skip failed to reach following KV; got %v", ids(fs))
+	}
+
+	// 3. Polyglot scan on file < 1 MiB (e.g. 16 KiB) must not duplicate APE finding.
+	smallPoly := build(spec{
+		version: 3,
+		kvs:     []kv{{key: "general.description", valType: 8, val: strb("MZqFpD='test'", binary.LittleEndian)}},
+		tensors: []tensor{{name: "w", dims: []uint64{4096}, typ: 0, offset: 0}},
+		dataLen: 16384,
+	})
+	polyCount := 0
+	for _, f := range findingsFor(t, smallPoly) {
+		if f.RuleID == "SC4N-GGUF-POLYGLOT" {
+			polyCount++
+		}
+	}
+	if polyCount != 1 {
+		t.Fatalf("16 KiB GGUF emitted %d SC4N-GGUF-POLYGLOT findings, want 1", polyCount)
+	}
+}

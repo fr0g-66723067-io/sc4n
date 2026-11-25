@@ -35,9 +35,12 @@ func init() {
 type pythonParser struct{}
 
 func (pythonParser) Parse(ctx *artifact.Ctx, s source.Source) error {
-	data, err := s.Bytes(0, s.Size())
-	if err != nil && len(data) == 0 {
+	data, err := readSourceCapped(ctx, s)
+	if err != nil {
 		return err
+	}
+	if len(data) == 0 {
+		return nil
 	}
 	Analyze(ctx, data)
 	return nil
@@ -46,12 +49,37 @@ func (pythonParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 type notebookParser struct{}
 
 func (notebookParser) Parse(ctx *artifact.Ctx, s source.Source) error {
-	data, err := s.Bytes(0, s.Size())
-	if err != nil && len(data) == 0 {
+	data, err := readSourceCapped(ctx, s)
+	if err != nil {
 		return err
+	}
+	if len(data) == 0 {
+		return nil
 	}
 	AnalyzeNotebook(ctx, data)
 	return nil
+}
+
+// readSourceCapped caps reads to MaxStringBlob before calling s.Bytes so an
+// oversized .py or .ipynb file is never pulled into memory in full.
+func readSourceCapped(ctx *artifact.Ctx, s source.Source) ([]byte, error) {
+	n := s.Size()
+	if n <= 0 {
+		return nil, nil
+	}
+	cap := ctx.Limits.MaxStringBlob
+	if cap <= 0 {
+		cap = limits.Default().MaxStringBlob
+	}
+	if n > cap {
+		limits.Emit(ctx.Sink, limits.RuleString, "MaxStringBlob", n, cap, "python source truncated")
+		n = cap
+	}
+	data, err := s.Bytes(0, n)
+	if err != nil && len(data) == 0 {
+		return nil, err
+	}
+	return data, nil
 }
 
 // lastSegment returns the part of a display name after the last ':' so that a

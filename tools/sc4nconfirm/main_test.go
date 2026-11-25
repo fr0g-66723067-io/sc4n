@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/fr0g-66723067-io/sc4n/internal/malice"
 )
 
 func TestDockerOutputIsBounded(t *testing.T) {
@@ -18,20 +21,35 @@ func TestDockerOutputIsBounded(t *testing.T) {
 	}
 }
 
-func TestReadTraceIsBounded(t *testing.T) {
+// TestApplyTraceFileStreamsFromStartBounded proves that streaming from byte 0
+// preserves early payload effects even when the tail floods past maxBytes.
+func TestApplyTraceFileStreamsFromStartBounded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trace")
-	if err := os.WriteFile(path, []byte("0123456789abcdefghij"), 0o644); err != nil {
+	var b strings.Builder
+	b.WriteString(`1 execve("/usr/local/bin/python3", ["python3", "/opt/sc4nconfirm/load.py", "/w/a.pkl", "/tmp/result.json"], 0x0) = 0` + "\n")
+	b.WriteString(`2 execve("/bin/sh", ["/bin/sh", "-c", "id"], 0x0) = 0` + "\n")
+	for range 200 {
+		b.WriteString(`1 openat(AT_FDCWD, "/usr/lib/quiet.py", O_RDONLY) = 3` + "\n")
+	}
+	b.WriteString(`3 execve("/bin/sh", ["/bin/sh", "-c", "after-cap"], 0x0) = 0` + "\n")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readTail(path, 8)
-	if err != nil {
+	r := &malice.Run{}
+	if err := applyTraceFile(r, path, 512); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(got, "cdefghij") || !strings.Contains(got, "trace truncated") {
-		t.Fatalf("readTail = %q, want the last 8 bytes and a truncation marker", got)
+	if len(r.Exec) != 1 || r.Exec[0] != "/bin/sh -c id" {
+		t.Fatalf("Exec = %v, want early payload preserved and tail beyond cap ignored", r.Exec)
 	}
-	if strings.Contains(got, "0123456789") {
-		t.Fatalf("readTail kept the head: %q", got)
+}
+
+func TestConfirmOneRejectsDirWithoutConfigJSON(t *testing.T) {
+	dir := t.TempDir()
+	var errb bytes.Buffer
+	_, err := confirmOne(options{}, dir, 0, &errb)
+	if err == nil || !strings.Contains(err.Error(), "config.json") {
+		t.Fatalf("confirmOne(dir without config.json) = %v, want error naming config.json", err)
 	}
 }
 

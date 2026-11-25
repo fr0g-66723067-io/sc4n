@@ -82,9 +82,14 @@ func (npzParser) Parse(ctx *artifact.Ctx, s source.Source) error {
 	}
 	for i := range ms.Members {
 		m := ms.Members[i]
-		if m.IsDir || m.LinkKind != "" {
-			// A directory or link member carries no content; Check already
-			// reported the link.
+		if m.IsDir || m.Encrypted {
+			// A directory carries no content; Check already reported encryption.
+			continue
+		}
+		if m.LinkKind != "" && m.Size <= 0 && m.CompressedSize <= 0 {
+			// A link member with no payload carries no content; Check already
+			// reported the link. When a zip symlink/device carries non-empty
+			// bytes, Python's zipfile still reads them, so scan them too.
 			continue
 		}
 		if !dispatchMember(ctx, s, m, max) {
@@ -145,13 +150,15 @@ func dispatchMember(ctx *artifact.Ctx, s source.Source, m archive.Member, max in
 			var st *source.SpillTooLargeError
 			if errors.As(serr, &st) {
 				limits.Emit(ctx.Sink, limits.RuleSpill, "MaxSpillBytes", m.Size, st.Limit, "npz member "+snippet(m.Name))
-			} else {
-				ctx.Sink.Emit(RuleStruct, 0, "npz member "+snippet(m.Name)+" cannot be materialised: "+serr.Error())
+				// The spill may have failed after writing a bounded prefix; scan what
+				// was already read instead of dropping the payload it may contain.
+				artifact.ScanMemberBytes(ctx, m.Name, probe)
+				ctx.ChargeSpill(cap + 1)
+				ctx.ChargeDecompressed(cap + 1)
+				return ctx.RemainingDecompressed() > 0
 			}
-			// The spill may have failed after writing a bounded prefix; scan what
-			// was already read instead of dropping the payload it may contain.
+			ctx.Sink.Emit(RuleStruct, 0, "npz member "+snippet(m.Name)+" cannot be materialised: "+serr.Error())
 			artifact.ScanMemberBytes(ctx, m.Name, probe)
-			ctx.ChargeSpill(cap + 1)
 			ctx.ChargeDecompressed(int64(len(probe)))
 			return ctx.RemainingDecompressed() > 0
 		}

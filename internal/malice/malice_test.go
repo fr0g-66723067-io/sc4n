@@ -11,15 +11,18 @@ import (
 
 func TestIsLoadSink(t *testing.T) {
 	yes := []string{
-		"posix.system", "os.system", "os.popen", "os.execv", "os.spawnl",
-		"subprocess.run", "subprocess.Popen",
+		"posix.system", "os.system", "os.popen", "os.execv", "os.spawnl", "os.posix_spawn",
+		"subprocess.run", "subprocess.Popen", "subprocess.check_output", "subprocess.getoutput",
+		"asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell",
 		"socket.getaddrinfo", "socket.socket", "socket.create_connection",
 		"urllib.request.urlopen", "requests.get", "http.client.HTTPConnection",
 		"ftplib.FTP", "smtplib.SMTP", "paramiko.SSHClient",
 		"eval", "exec", "compile", "__import__", "builtins.eval",
-		"importlib.import_module", "runpy.run_path",
-		"ctypes.CDLL", "cffi.FFI",
-		"marshal.loads", "pickle.loads",
+		"importlib.import_module", "importlib.machinery.SourceFileLoader", "runpy.run_path",
+		"ctypes.CDLL", "ctypes.pythonapi", "ctypes.cdll.LoadLibrary", "cffi.FFI",
+		"marshal.loads", "pickle.loads", "dill.load", "dill.loads",
+		"cloudpickle.load", "cloudpickle.loads", "joblib.load",
+		"torch.load", "yaml.load", "yaml.unsafe_load",
 	}
 	for _, s := range yes {
 		if !IsLoadSink(s) {
@@ -29,6 +32,10 @@ func TestIsLoadSink(t *testing.T) {
 	no := []string{
 		"", "socketx.f", "subprocessx", "requestsx.get", "os.getcwd", "os.path.join",
 		"json.loads", "sys.exit", "collections.OrderedDict", "numpy.array",
+		// Benign helpers in modules whose execution sinks are listed above.
+		"importlib.util.find_spec", "importlib.metadata.version",
+		"socket.gethostname", "subprocess.list2cmdline", "subprocess.CalledProcessError",
+		"ctypes.sizeof", "ctypes.c_int",
 		// Effects that run no code are deliberately outside the set: the
 		// constructed rule claims code execution, so a delete or a chmod at
 		// import time must not be graded by it.
