@@ -1138,12 +1138,6 @@
       ],
       "notes": "Two memo rebindings (slot 0 and slot 1), no name bound in two slots. The finding is emitted once per stream from flush, so the evidence carries the final rebinding count; the emit key used to embed the count, which made it unique per rebinding and let a 400 KB stream produce 100000 findings and grow the dedup map without bound. TestRound3FixtureCounts asserts the count is exactly one."
     },
-    "round3/pysrc_nested_calls.py": {
-      "expect": [
-        "SC4N-LIMIT-ENTRIES"
-      ],
-      "notes": "One statement of 4000 nested exec( calls. The call analysis scans from each '(' to the end of the statement, so the cost is quadratic in the nesting; the call-token budget bounds it and the truncation is reported as SC4N-LIMIT-ENTRIES/MaxCallTokens. 60000 nested calls measured over 120 s before the bound."
-    },
     "round3/template_txt.txt": {
       "expect": [
         "SC4N-JINJA-PY-OBJECT"

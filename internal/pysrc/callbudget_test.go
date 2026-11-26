@@ -18,13 +18,25 @@ func nestedCalls(n int) []byte {
 //
 // The property is the budget, not the speed: a quadratic statement must stop at
 // the entry cap and say so. That assertion is deterministic — the entry count is
-// a function of the input — so it holds on any machine.
+// a function of the input — so it holds on any machine. This is the sole regression
+// pin for the budget; the former round-3 fixture asserted the same rule through
+// scan.Run and was removed as a duplicate.
 func TestNestedCallsAreBounded(t *testing.T) {
 	ctx, c := newTestCtx(t)
 	Analyze(ctx, nestedCalls(60000))
-	// The truncation must be visible: a file whose call analysis stopped is not
-	// the same as a file with nothing to find.
-	if !ids(c)["SC4N-LIMIT-ENTRIES"] {
-		t.Fatalf("call-analysis truncation was not reported; findings: %v", keys(ids(c)))
+	// The truncation must be visible exactly once, and its evidence must name the
+	// cap that stopped the analysis rather than merely saying the file was partial.
+	var reported int
+	for _, f := range c.Findings() {
+		if f.RuleID != "SC4N-LIMIT-ENTRIES" {
+			continue
+		}
+		reported++
+		if !strings.Contains(f.Evidence, "MaxCallTokens") {
+			t.Fatalf("call-analysis truncation does not name MaxCallTokens: %q", f.Evidence)
+		}
+	}
+	if reported != 1 {
+		t.Fatalf("call-analysis truncation reports = %d, want 1; findings: %v", reported, keys(ids(c)))
 	}
 }

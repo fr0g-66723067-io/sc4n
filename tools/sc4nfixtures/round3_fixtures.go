@@ -34,7 +34,8 @@ func round3Fixtures(f *fixtureSet) {
 	// recognised through h.structured. numpy.load(allow_pickle=True) executes the
 	// data section for this form exactly as it does for descr '|O'.
 	f.add("round3/npy_struct_object.npy", nfNPY(
-		"{'descr': [('a', '|O')], 'fortran_order': False, 'shape': (1,)}", gadget))
+		"{'descr': [('a', '|O')], 'fortran_order': False, 'shape': (1,)}", gadget,
+	))
 
 	// A conformant zip written by Go's archive/zip: the local headers carry the
 	// data-descriptor flag (bit 3) and zero crc/sizes, with the real values in the
@@ -50,14 +51,16 @@ func round3Fixtures(f *fixtureSet) {
 		`{"class_name":"Lambda","config":{"name":"l","function":{"class_name":"__lambda__",` +
 		`"config":{"code":null,"defaults":null,"closure":null}}}}]}}`
 	f.add("round3/h5_json_cap.h5", h5File(
-		bytes.Repeat([]byte("{}"), 4096), []byte("model_config\x00"), []byte(lambda)))
+		bytes.Repeat([]byte("{}"), 4096), []byte("model_config\x00"), []byte(lambda),
+	))
 
 	// joblib's real inline layout at protocol 2: the array bytes sit between the
 	// wrapper's BUILD and the outer STOP. The mask that hides the payload from the
 	// object-graph walk used to write POP, which is outside the weights-only opcode
 	// set, so masking a well-formed file made sc4n report its own injection.
 	f.add("round3/joblib_inline.joblib", round3JoblibInline(
-		cat([]byte{bBININT1, 2}, []byte{bBININT1, 3}), nfPayload(make([]byte, 48))))
+		cat([]byte{bBININT1, 2}, []byte{bBININT1, 3}), nfPayload(make([]byte, 48)),
+	))
 
 	// Two rebindings in one stream: slot 0 is rebound to a second name and slot 1
 	// to a third, so no name is bound in two slots and the only signal is the
@@ -84,7 +87,8 @@ func round3Fixtures(f *fixtureSet) {
 	f.add("round3/two_docs/config.json", []byte(
 		`{"model_type":"bert"}`+"\n"+
 			`{"note":"https://discord.com/api/webhooks/123456789012345678/`+
-			`abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}`+"\n"))
+			`abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}`+"\n",
+	))
 
 	// A Jinja template in a .txt file. .txt is the untyped text extension, so the
 	// content decides: the leading "{{" must route it to the template analyser, and
@@ -100,14 +104,6 @@ func round3Fixtures(f *fixtureSet) {
 	deep := "{'descr': " + repeat("[", 200) + "('a', '<i4')" + repeat("]", 200) +
 		", 'fortran_order': False, 'shape': (1,)}"
 	f.add("round3/npy_deep_descr.npy", nfNPY(deep, make([]byte, 4)))
-
-	// One statement of 4000 nested exec( calls. The call analysis scans from each
-	// '(' to the end of the statement, so this is quadratic in the nesting and was
-	// unbounded: the scan deadline is observed between artifacts, so -timeout could
-	// not stop it either. It must trip the call-token budget and report it.
-	nest := 4000
-	f.add("round3/pysrc_nested_calls.py", []byte(
-		"exec("+repeat("exec(", nest)+"1"+repeat(")", nest+1)+"\n"))
 
 	// A map whose one blob is a run of NaN-shaped float pairs. The rule is emitted
 	// for the blob, and its offset must be the blob's offset in the artifact, not
@@ -221,13 +217,6 @@ func round3Expectations() map[string]expectation {
 				"overflow (exit 2, no report) rather than a structural finding. 200 levels is past the " +
 				"documented maxLitDepth of 64: an unbounded reader accepts this descriptor, the bounded " +
 				"one refuses it as not a dtype, which is the deliberate trade the bound makes.",
-		},
-		"round3/pysrc_nested_calls.py": {
-			Expect: []string{"SC4N-LIMIT-ENTRIES"},
-			Notes: "One statement of 4000 nested exec( calls. The call analysis scans from each '(' to " +
-				"the end of the statement, so the cost is quadratic in the nesting; the call-token budget " +
-				"bounds it and the truncation is reported as SC4N-LIMIT-ENTRIES/MaxCallTokens. 60000 " +
-				"nested calls measured over 120 s before the bound.",
 		},
 		"round3/msgpack_nan.msgpack": {
 			Expect: []string{"SC4N-MSGPACK-NAN-PAYLOAD"},
